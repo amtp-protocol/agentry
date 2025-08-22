@@ -1,0 +1,72 @@
+# AMTP Gateway Schema Configuration Example
+
+schema:
+  # Use local registry (recommended for most deployments)
+  use_local_registry: true
+  
+  # Local registry configuration
+  local_registry:
+    base_path: "./schemas"
+    auto_save: true
+    index_file: "index.json"
+    create_dirs: true
+    backup_count: 5
+  
+  # External registry configuration (if use_local_registry is false)
+  registry:
+    base_url: "https://schemas.example.com"
+    api_key: "your-api-key"
+    timeout: "30s"
+    max_retries: 3
+  
+  # Cache configuration
+  cache:
+    type: "memory"  # "memory", "redis", or "custom"
+    default_ttl: "1h"
+    max_size: 1000
+    cleanup_interval: "10m"
+    # For Redis cache (when implemented):
+    # connection_string: "redis://localhost:6379"
+    # options:
+    #   db: 0
+    #   password: ""
+  
+  # Validation configuration
+  validation:
+    strict_mode: false
+    cache_ttl: "1h"
+    max_schema_size: 1048576  # 1MB
+    timeout_seconds: 30
+  
+  # Schema negotiation configuration
+  negotiation:
+    supported_schemas:
+      - "agntcy:commerce.*"
+      - "agntcy:finance.payment.*"
+      - "agntcy:logistics.shipment.*"
+    strict_mode: false
+    fallback_enabled: true
+    max_negotiation_time: "5s"
+  
+  # Compatibility checking configuration
+  compatibility:
+    strict_mode: false
+    allow_minor_changes: true
+    allow_field_additions: true
+    allow_field_removals: false
+  
+  # Validation pipeline configuration
+  pipeline:
+    enable_validation: true
+    strict_mode: false
+    bypass_non_schema: true
+    validation_timeout: "30s"
+    cache_validation_results: true
+    max_payload_size: 10485760  # 10MB
+  
+  # Error reporting configuration
+  error_reporting:
+    include_context: true
+    max_error_depth: 10
+    timestamp_format: "2006-01-02T15:04:05Z07:00"
+    include_stack_trace: false

@@ -1,0 +1,72 @@
+# Local Development Multi-Domain Setup
+# This setup uses HTTP and mock DNS for local development
+
+version: '3.8'
+
+services:
+  # Gateway for localhost (development)
+  gateway-localhost:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: amtp-gateway-localhost
+    environment:
+      - AMTP_DOMAIN=localhost
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_DNS_MOCK_MODE=true
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+    ports:
+      - "8080:8080"
+    networks:
+      - amtp-dev-network
+    restart: unless-stopped
+
+  # Gateway for test.local
+  gateway-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: amtp-gateway-test
+    environment:
+      - AMTP_DOMAIN=test.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_DNS_MOCK_MODE=true
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+    ports:
+      - "8081:8080"
+    networks:
+      - amtp-dev-network
+    restart: unless-stopped
+
+  # Gateway for dev.local
+  gateway-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: amtp-gateway-dev
+    environment:
+      - AMTP_DOMAIN=dev.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_DNS_MOCK_MODE=true
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+    ports:
+      - "8082:8080"
+    networks:
+      - amtp-dev-network
+    restart: unless-stopped
+
+networks:
+  amtp-dev-network:
+    driver: bridge

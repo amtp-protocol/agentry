@@ -1,0 +1,153 @@
+# Multi-Domain AMTP Gateway Deployment
+# This example shows how to run multiple gateway instances,
+# each managing a different domain.
+
+version: '3.8'
+
+services:
+  # Gateway for company-a.com
+  gateway-company-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: amtp-gateway-company-a
+    environment:
+      - AMTP_DOMAIN=company-a.com
+      - AMTP_SERVER_ADDRESS=:8443
+      - AMTP_TLS_ENABLED=true
+      - AMTP_TLS_CERT_FILE=/etc/ssl/certs/company-a.com.crt
+      - AMTP_TLS_KEY_FILE=/etc/ssl/private/company-a.com.key
+      - AMTP_AUTH_REQUIRED=true
+      - AMTP_AUTH_ADMIN_KEY_FILE=/etc/ssl/admin/company-a.key
+      - AMTP_LOGGING_LEVEL=info
+      - AMTP_LOGGING_FORMAT=json
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./certs/company-a.com.crt:/etc/ssl/certs/company-a.com.crt:ro
+      - ./certs/company-a.com.key:/etc/ssl/private/company-a.com.key:ro
+      - ./admin-keys/company-a.key:/etc/ssl/admin/company-a.key:ro
+    networks:
+      - amtp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Gateway for subsidiary.com
+  gateway-subsidiary:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: amtp-gateway-subsidiary
+    environment:
+      - AMTP_DOMAIN=subsidiary.com
+      - AMTP_SERVER_ADDRESS=:8443
+      - AMTP_TLS_ENABLED=true
+      - AMTP_TLS_CERT_FILE=/etc/ssl/certs/subsidiary.com.crt
+      - AMTP_TLS_KEY_FILE=/etc/ssl/private/subsidiary.com.key
+      - AMTP_AUTH_REQUIRED=true
+      - AMTP_AUTH_ADMIN_KEY_FILE=/etc/ssl/admin/subsidiary.key
+      - AMTP_LOGGING_LEVEL=info
+      - AMTP_LOGGING_FORMAT=json
+    ports:
+      - "8444:8443"
+    volumes:
+      - ./certs/subsidiary.com.crt:/etc/ssl/certs/subsidiary.com.crt:ro
+      - ./certs/subsidiary.com.key:/etc/ssl/private/subsidiary.com.key:ro
+      - ./admin-keys/subsidiary.key:/etc/ssl/admin/subsidiary.key:ro
+    networks:
+      - amtp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Gateway for partner.com
+  gateway-partner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: amtp-gateway-partner
+    environment:
+      - AMTP_DOMAIN=partner.com
+      - AMTP_SERVER_ADDRESS=:8443
+      - AMTP_TLS_ENABLED=true
+      - AMTP_TLS_CERT_FILE=/etc/ssl/certs/partner.com.crt
+      - AMTP_TLS_KEY_FILE=/etc/ssl/private/partner.com.key
+      - AMTP_AUTH_REQUIRED=true
+      - AMTP_AUTH_ADMIN_KEY_FILE=/etc/ssl/admin/partner.key
+      - AMTP_LOGGING_LEVEL=info
+      - AMTP_LOGGING_FORMAT=json
+    ports:
+      - "8445:8443"
+    volumes:
+      - ./certs/partner.com.crt:/etc/ssl/certs/partner.com.crt:ro
+      - ./certs/partner.com.key:/etc/ssl/private/partner.com.key:ro
+      - ./admin-keys/partner.key:/etc/ssl/admin/partner.key:ro
+    networks:
+      - amtp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Nginx reverse proxy for routing based on domain
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: amtp-nginx-proxy
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/ssl/certs:ro
+    networks:
+      - amtp-network
+    depends_on:
+      - gateway-company-a
+      - gateway-subsidiary
+      - gateway-partner
+    restart: unless-stopped
+
+  # Optional: Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: amtp-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - amtp-network
+    restart: unless-stopped
+
+  # Optional: Grafana for metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: amtp-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - amtp-network
+    restart: unless-stopped
+
+networks:
+  amtp-network:
+    driver: bridge
+
+volumes:
+  grafana-data:

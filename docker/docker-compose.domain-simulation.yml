@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  # DNS Server for AMTP TXT records
+  dns-server:
+    image: strm/dnsmasq
+    container_name: amtp-dns-server
+    ports:
+      - "1053:53/udp"
+    networks:
+      amtp-network:
+        ipv4_address: 172.20.0.10
+    command:
+      - --no-daemon
+      - --keep-in-foreground
+      - --log-queries
+      - --server=8.8.8.8
+      - --txt-record=_amtp.company-a.local,"v=amtp1;gateway=http://company-a.local:8080;features=agent-discovery"
+      - --txt-record=_amtp.company-b.local,"v=amtp1;gateway=http://company-b.local:8080;features=agent-discovery"
+      - --txt-record=_amtp.partner.local,"v=amtp1;gateway=http://partner.local:8080;features=agent-discovery"
+  # Company A Gateway
+  gateway-company-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gateway-company-a
+    hostname: company-a.local
+    environment:
+      - AMTP_DOMAIN=company-a.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.20.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+    ports:
+      - "8080:8080"
+    networks:
+      amtp-network:
+        aliases:
+          - company-a.local
+    # DNS configuration - use custom DNS server for AMTP discovery
+    dns:
+      - 172.20.0.10  # Use our custom DNS server
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Company B Gateway
+  gateway-company-b:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gateway-company-b
+    hostname: company-b.local
+    environment:
+      - AMTP_DOMAIN=company-b.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+    ports:
+      - "8081:8080"
+    networks:
+      amtp-network:
+        aliases:
+          - company-b.local
+    # DNS configuration - use custom DNS server for AMTP discovery
+    dns:
+      - 172.20.0.10  # Use our custom DNS server
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Partner Gateway
+  gateway-partner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gateway-partner
+    hostname: partner.local
+    environment:
+      - AMTP_DOMAIN=partner.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+    ports:
+      - "8082:8080"
+    networks:
+      amtp-network:
+        aliases:
+          - partner.local
+    # DNS configuration - use custom DNS server for AMTP discovery
+    dns:
+      - 172.20.0.10  # Use our custom DNS server
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Test client container for inter-gateway communication
+  test-client:
+    image: alpine:3.19
+    container_name: amtp-test-client
+    networks:
+      - amtp-network
+    dns:
+      - 172.20.0.10  # Use our custom DNS server
+    command: ["sh", "-c", "apk add --no-cache curl bind-tools && sleep 3600"]
+    depends_on:
+      - dns-server
+      - gateway-company-a
+      - gateway-company-b
+      - gateway-partner
+
+networks:
+  amtp-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

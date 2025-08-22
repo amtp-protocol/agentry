@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  agentry:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - AMTP_TLS_ENABLED=false
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_DOMAIN=localhost
+      - AMTP_LOG_LEVEL=debug
+      - AMTP_LOG_FORMAT=text
+      - AMTP_AUTH_REQUIRED=false
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped

@@ -1,0 +1,40 @@
+# Local development configuration for AMTP Gateway
+version: "1.0"
+
+# Server configuration - HTTP only for local testing
+server:
+  address: ":8080"
+  domain: "localhost"
+  read_timeout: "30s"
+  write_timeout: "30s"
+  idle_timeout: "120s"
+
+# TLS disabled for local development
+tls:
+  enabled: false
+
+# DNS discovery configuration
+dns:
+  cache_ttl: "1m"  # Shorter TTL for development
+  timeout: "5s"
+  resolvers:
+    - "8.8.8.8:53"
+    - "1.1.1.1:53"
+
+# Message processing configuration
+message:
+  max_size: 10485760  # 10MB
+  idempotency_ttl: "1h"  # Shorter for testing
+  validation_enabled: true
+
+# Authentication disabled for local testing
+auth:
+  require_auth: false
+  methods:
+    - "domain"
+  api_key_header: "X-API-Key"
+
+# Logging configuration - verbose for development
+logging:
+  level: "debug"
+  format: "text"  # Easier to read in terminal

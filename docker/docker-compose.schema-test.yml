@@ -1,0 +1,153 @@
+version: '3.8'
+
+services:
+  # DNS Server for AMTP TXT records (no schemas in DNS anymore)
+  dns-server:
+    image: strm/dnsmasq
+    container_name: amtp-schema-dns-server
+    ports:
+      - "1053:53/udp"
+    networks:
+      amtp-schema-network:
+        ipv4_address: 172.21.0.10
+    command:
+      - --no-daemon
+      - --keep-in-foreground
+      - --log-queries
+      - --server=8.8.8.8
+      - --txt-record=_amtp.company-a.local,"v=amtp1;gateway=http://company-a.local:8080;features=agent-discovery,schema-validation"
+      - --txt-record=_amtp.company-b.local,"v=amtp1;gateway=http://company-b.local:8080;features=agent-discovery,schema-validation"
+      - --txt-record=_amtp.partner.local,"v=amtp1;gateway=http://partner.local:8080;features=agent-discovery,schema-validation"
+
+  # Company A Gateway (E-commerce focused)
+  gateway-company-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gateway-company-a-schema
+    hostname: company-a.local
+    environment:
+      - AMTP_DOMAIN=company-a.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.21.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SCHEMA_REGISTRY_TYPE=local
+      - AMTP_SCHEMA_REGISTRY_PATH=/schemas
+    ports:
+      - "8080:8080"
+    volumes:
+      - /tmp/amtp-schemas:/schemas
+    networks:
+      amtp-schema-network:
+        aliases:
+          - company-a.local
+    dns:
+      - 172.21.0.10
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Company B Gateway (Finance focused)
+  gateway-company-b:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gateway-company-b-schema
+    hostname: company-b.local
+    environment:
+      - AMTP_DOMAIN=company-b.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.21.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SCHEMA_REGISTRY_TYPE=local
+      - AMTP_SCHEMA_REGISTRY_PATH=/schemas
+    ports:
+      - "8081:8080"
+    volumes:
+      - /tmp/amtp-schemas:/schemas
+    networks:
+      amtp-schema-network:
+        aliases:
+          - company-b.local
+    dns:
+      - 172.21.0.10
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Partner Gateway (Logistics focused)
+  gateway-partner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: gateway-partner-schema
+    hostname: partner.local
+    environment:
+      - AMTP_DOMAIN=partner.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_LOGGING_LEVEL=debug
+      - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.21.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SCHEMA_REGISTRY_TYPE=local
+      - AMTP_SCHEMA_REGISTRY_PATH=/schemas
+    ports:
+      - "8082:8080"
+    volumes:
+      - /tmp/amtp-schemas:/schemas
+    networks:
+      amtp-schema-network:
+        aliases:
+          - partner.local
+    dns:
+      - 172.21.0.10
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Test client container for schema testing
+  test-client:
+    image: alpine:3.19
+    container_name: amtp-schema-test-client
+    networks:
+      - amtp-schema-network
+    dns:
+      - 172.21.0.10
+    command: ["sh", "-c", "apk add --no-cache curl bind-tools jq && sleep 3600"]
+    depends_on:
+      - dns-server
+      - gateway-company-a
+      - gateway-company-b
+      - gateway-partner
+
+networks:
+  amtp-schema-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
