@@ -48,10 +48,8 @@ type LocalAgent struct {
 type Registry struct {
 	localDomain   string
 	schemaManager SchemaManager
-	agents        map[string]*LocalAgent      // registered local agents by address
-	inbox         map[string][]*types.Message // inbox for pull-based delivery
+	agents        map[string]*LocalAgent // registered local agents by address
 	agentsMutex   sync.RWMutex
-	inboxMutex    sync.RWMutex
 }
 
 // SchemaManager interface for schema validation
@@ -72,7 +70,6 @@ func NewRegistry(config RegistryConfig) *Registry {
 		localDomain:   config.LocalDomain,
 		schemaManager: config.SchemaManager,
 		agents:        make(map[string]*LocalAgent),
-		inbox:         make(map[string][]*types.Message),
 	}
 }
 
@@ -257,69 +254,35 @@ func (r *Registry) RotateAPIKey(agentAddress string) (string, error) {
 	return newAPIKey, nil
 }
 
-// StoreMessage stores a message in the local inbox for pull-based delivery
+// StoreMessage is deprecated - inbox storage is now handled by unified message storage
+// This method is kept for interface compatibility but does nothing
 func (r *Registry) StoreMessage(recipient string, message *types.Message) error {
-	r.inboxMutex.Lock()
-	defer r.inboxMutex.Unlock()
-
-	// Store message in recipient's inbox
-	if r.inbox[recipient] == nil {
-		r.inbox[recipient] = make([]*types.Message, 0)
-	}
-	r.inbox[recipient] = append(r.inbox[recipient], message)
-
+	// No-op: unified storage handles this now
 	return nil
 }
 
-// GetInboxMessages returns messages for a specific recipient (pull mode)
+// GetInboxMessages is deprecated - inbox access is now handled by unified message storage
+// This method is kept for interface compatibility but returns empty
 func (r *Registry) GetInboxMessages(recipient string) []*types.Message {
-	r.inboxMutex.RLock()
-	defer r.inboxMutex.RUnlock()
-
-	messages, exists := r.inbox[recipient]
-	if !exists {
-		return []*types.Message{}
-	}
-
-	// Return a copy to avoid race conditions
-	result := make([]*types.Message, len(messages))
-	copy(result, messages)
-	return result
+	// No-op: unified storage handles this now
+	return []*types.Message{}
 }
 
-// AcknowledgeMessage removes a message from the inbox after successful processing (pull mode)
+// AcknowledgeMessage is deprecated - acknowledgment is now handled by unified message storage
+// This method is kept for interface compatibility but does nothing
 func (r *Registry) AcknowledgeMessage(recipient, messageID string) error {
-	r.inboxMutex.Lock()
-	defer r.inboxMutex.Unlock()
-
-	messages, exists := r.inbox[recipient]
-	if !exists {
-		return fmt.Errorf("no messages found for recipient: %s", recipient)
-	}
-
-	// Find and remove the message
-	for i, msg := range messages {
-		if msg.MessageID == messageID {
-			// Remove message from slice
-			r.inbox[recipient] = append(messages[:i], messages[i+1:]...)
-			return nil
-		}
-	}
-
-	return fmt.Errorf("message not found: %s", messageID)
+	// No-op: unified storage handles this now
+	return fmt.Errorf("acknowledgment should be handled by unified message storage")
 }
 
 // GetStats returns agent registry statistics
 func (r *Registry) GetStats() map[string]interface{} {
 	r.agentsMutex.RLock()
-	r.inboxMutex.RLock()
 	defer r.agentsMutex.RUnlock()
-	defer r.inboxMutex.RUnlock()
 
 	totalAgents := len(r.agents)
 	pushAgents := 0
 	pullAgents := 0
-	totalInboxMessages := 0
 
 	for _, agent := range r.agents {
 		if agent.DeliveryMode == "push" {
@@ -329,15 +292,10 @@ func (r *Registry) GetStats() map[string]interface{} {
 		}
 	}
 
-	for _, messages := range r.inbox {
-		totalInboxMessages += len(messages)
-	}
-
 	return map[string]interface{}{
-		"local_agents":         totalAgents,
-		"push_agents":          pushAgents,
-		"pull_agents":          pullAgents,
-		"total_inbox_messages": totalInboxMessages,
+		"local_agents": totalAgents,
+		"push_agents":  pushAgents,
+		"pull_agents":  pullAgents,
 	}
 }
 

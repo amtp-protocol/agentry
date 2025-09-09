@@ -151,6 +151,14 @@ func (mp *MessageProcessor) processImmediatePath(ctx context.Context, message *t
 				recipientStatus.ErrorMessage = err.Error()
 			} else {
 				recipientStatus.Status = deliveryResult.Status
+				recipientStatus.DeliveryMode = deliveryResult.DeliveryMode
+				recipientStatus.LocalDelivery = deliveryResult.LocalDelivery
+
+				// For pull mode local delivery, mark as inbox delivered
+				if deliveryResult.LocalDelivery && deliveryResult.DeliveryMode == "pull" && deliveryResult.Status == types.StatusDelivered {
+					recipientStatus.InboxDelivered = true
+				}
+
 				if deliveryResult.ErrorCode != "" {
 					recipientStatus.ErrorCode = deliveryResult.ErrorCode
 					recipientStatus.ErrorMessage = deliveryResult.ErrorMessage
@@ -503,4 +511,99 @@ func (mp *MessageProcessor) CleanupExpiredEntries() {
 			delete(mp.idempotencyMap, key)
 		}
 	}
+}
+
+// GetInboxMessages returns messages for a specific recipient using unified storage view
+func (mp *MessageProcessor) GetInboxMessages(recipient string) []*types.Message {
+	mp.storeMux.RLock()
+	mp.statusMux.RLock()
+	defer mp.storeMux.RUnlock()
+	defer mp.statusMux.RUnlock()
+
+	var inboxMessages []*types.Message
+
+	// Iterate through all messages and find those delivered to this recipient's inbox
+	for messageID, message := range mp.messageStore {
+		status, exists := mp.statusStore[messageID]
+		if !exists {
+			continue
+		}
+
+		// Check if this message has been delivered to the recipient's inbox
+		for _, recipientStatus := range status.Recipients {
+			if recipientStatus.Address == recipient &&
+				recipientStatus.LocalDelivery &&
+				recipientStatus.InboxDelivered &&
+				!recipientStatus.Acknowledged {
+				inboxMessages = append(inboxMessages, message)
+				break
+			}
+		}
+	}
+
+	return inboxMessages
+}
+
+// AcknowledgeMessage marks a message as acknowledged for a specific recipient
+func (mp *MessageProcessor) AcknowledgeMessage(recipient, messageID string) error {
+	mp.statusMux.Lock()
+	defer mp.statusMux.Unlock()
+
+	status, exists := mp.statusStore[messageID]
+	if !exists {
+		return fmt.Errorf("message not found: %s", messageID)
+	}
+
+	// Find and acknowledge the recipient
+	for i, recipientStatus := range status.Recipients {
+		if recipientStatus.Address == recipient {
+			if !recipientStatus.LocalDelivery || !recipientStatus.InboxDelivered {
+				return fmt.Errorf("message not available in inbox for recipient: %s", recipient)
+			}
+			if recipientStatus.Acknowledged {
+				return fmt.Errorf("message already acknowledged: %s", messageID)
+			}
+
+			// Mark as acknowledged
+			now := time.Now().UTC()
+			status.Recipients[i].Acknowledged = true
+			status.Recipients[i].AcknowledgedAt = &now
+			status.UpdatedAt = now
+
+			return nil
+		}
+	}
+
+	return fmt.Errorf("recipient not found for message: %s", recipient)
+}
+
+// UpdateRecipientDeliveryStatus updates the delivery status for a specific recipient
+func (mp *MessageProcessor) UpdateRecipientDeliveryStatus(messageID, recipient string, deliveryStatus types.DeliveryStatus, deliveryMode string, localDelivery bool) error {
+	mp.statusMux.Lock()
+	defer mp.statusMux.Unlock()
+
+	status, exists := mp.statusStore[messageID]
+	if !exists {
+		return fmt.Errorf("message status not found: %s", messageID)
+	}
+
+	// Find and update the recipient status
+	for i, recipientStatus := range status.Recipients {
+		if recipientStatus.Address == recipient {
+			status.Recipients[i].Status = deliveryStatus
+			status.Recipients[i].DeliveryMode = deliveryMode
+			status.Recipients[i].LocalDelivery = localDelivery
+			status.Recipients[i].Timestamp = time.Now().UTC()
+
+			// For pull mode local delivery, mark as inbox delivered
+			if localDelivery && deliveryMode == "pull" && deliveryStatus == types.StatusDelivered {
+				status.Recipients[i].InboxDelivered = true
+			}
+
+			status.UpdatedAt = time.Now().UTC()
+			return nil
+		}
+	}
+
+	return fmt.Errorf("recipient not found for message: %s", recipient)
 }

@@ -659,8 +659,8 @@ func (s *Server) handleGetInbox(c *gin.Context) {
 		return // verifyAgentAccess handles the error response
 	}
 
-	// Get inbox messages and update last access
-	messages := s.agentRegistry.GetInboxMessages(recipient)
+	// Get inbox messages from unified storage and update last access
+	messages := s.processor.GetInboxMessages(recipient)
 	s.agentRegistry.UpdateLastAccess(recipient)
 
 	s.respondWithSuccess(c, http.StatusOK, gin.H{
@@ -680,8 +680,8 @@ func (s *Server) handleAcknowledgeMessage(c *gin.Context) {
 		return // verifyAgentAccess handles the error response
 	}
 
-	// Acknowledge the message and update last access
-	if err := s.agentRegistry.AcknowledgeMessage(recipient, messageID); err != nil {
+	// Acknowledge the message using unified storage and update last access
+	if err := s.processor.AcknowledgeMessage(recipient, messageID); err != nil {
 		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
 			"Message not found or already acknowledged", map[string]interface{}{
 				"error": err.Error(),

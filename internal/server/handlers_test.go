@@ -128,6 +128,35 @@ func (m *MockMessageProcessor) SetProcessError(err error) {
 	m.processError = err
 }
 
+// GetInboxMessages returns messages for a specific recipient (mock implementation)
+func (m *MockMessageProcessor) GetInboxMessages(recipient string) []*types.Message {
+	var inboxMessages []*types.Message
+
+	// For testing, return messages that match the recipient
+	for _, message := range m.messages {
+		for _, msgRecipient := range message.Recipients {
+			if msgRecipient == recipient {
+				inboxMessages = append(inboxMessages, message)
+				break
+			}
+		}
+	}
+
+	return inboxMessages
+}
+
+// AcknowledgeMessage marks a message as acknowledged (mock implementation)
+func (m *MockMessageProcessor) AcknowledgeMessage(recipient, messageID string) error {
+	// For testing, just check if the message exists
+	if _, exists := m.messages[messageID]; !exists {
+		return fmt.Errorf("message not found: %s", messageID)
+	}
+
+	// In a real implementation, this would update the recipient status
+	// For testing, we'll just return success
+	return nil
+}
+
 func createTestServer() *Server {
 	cfg := &config.Config{
 		Server: config.ServerConfig{

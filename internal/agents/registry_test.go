@@ -387,24 +387,26 @@ func TestGetStats(t *testing.T) {
 		t.Errorf("Expected 1 pull agent, got %v", stats["pull_agents"])
 	}
 
-	if stats["total_inbox_messages"] != 1 {
-		t.Errorf("Expected 1 inbox message, got %v", stats["total_inbox_messages"])
+	// Note: total_inbox_messages is no longer tracked by AgentRegistry
+	// since inbox storage is now handled by unified message storage
+	if _, exists := stats["total_inbox_messages"]; exists {
+		t.Errorf("total_inbox_messages should not be present in stats (handled by unified storage)")
 	}
 }
 
-// Test inbox functionality
+// Test inbox functionality (deprecated methods - now handled by unified storage)
 func TestInboxOperations(t *testing.T) {
 	registry := createTestRegistry()
 
 	recipient := "test@localhost"
 
-	// Test getting messages from empty inbox
+	// Test getting messages from empty inbox (should return empty since it's deprecated)
 	messages := registry.GetInboxMessages(recipient)
 	if len(messages) != 0 {
-		t.Errorf("Expected 0 messages in empty inbox, got %d", len(messages))
+		t.Errorf("Expected 0 messages from deprecated GetInboxMessages, got %d", len(messages))
 	}
 
-	// Store a message
+	// Store a message (should be no-op now)
 	testMessage1 := &types.Message{
 		MessageID: "test-msg-1",
 		Sender:    "sender@example.com",
@@ -413,53 +415,24 @@ func TestInboxOperations(t *testing.T) {
 
 	err := registry.StoreMessage(recipient, testMessage1)
 	if err != nil {
-		t.Fatalf("Failed to store message: %v", err)
+		t.Fatalf("StoreMessage should not fail (it's a no-op): %v", err)
 	}
 
-	// Store another message
-	testMessage2 := &types.Message{
-		MessageID: "test-msg-2",
-		Sender:    "sender@example.com",
-		Subject:   "Test Message 2",
-	}
-
-	err = registry.StoreMessage(recipient, testMessage2)
-	if err != nil {
-		t.Fatalf("Failed to store second message: %v", err)
-	}
-
-	// Get messages
+	// Get messages (should still return empty since storage is deprecated)
 	messages = registry.GetInboxMessages(recipient)
-	if len(messages) != 2 {
-		t.Errorf("Expected 2 messages in inbox, got %d", len(messages))
+	if len(messages) != 0 {
+		t.Errorf("Expected 0 messages from deprecated GetInboxMessages after store, got %d", len(messages))
 	}
 
-	// Acknowledge first message
+	// Acknowledge message (should return error indicating it's deprecated)
 	err = registry.AcknowledgeMessage(recipient, "test-msg-1")
-	if err != nil {
-		t.Fatalf("Failed to acknowledge message: %v", err)
-	}
-
-	// Verify message was removed
-	messages = registry.GetInboxMessages(recipient)
-	if len(messages) != 1 {
-		t.Errorf("Expected 1 message after acknowledgment, got %d", len(messages))
-	}
-
-	if messages[0].MessageID != "test-msg-2" {
-		t.Errorf("Expected remaining message to be test-msg-2, got %s", messages[0].MessageID)
-	}
-
-	// Test acknowledging non-existent message
-	err = registry.AcknowledgeMessage(recipient, "non-existent")
 	if err == nil {
-		t.Error("Expected error when acknowledging non-existent message")
+		t.Error("Expected error from deprecated AcknowledgeMessage method")
 	}
 
-	// Test acknowledging message for non-existent recipient
-	err = registry.AcknowledgeMessage("non-existent@localhost", "test-msg-2")
-	if err == nil {
-		t.Error("Expected error when acknowledging message for non-existent recipient")
+	expectedError := "acknowledgment should be handled by unified message storage"
+	if err.Error() != expectedError {
+		t.Errorf("Expected error message '%s', got '%s'", expectedError, err.Error())
 	}
 }
 

@@ -65,14 +65,16 @@ type DeliveryConfig struct {
 
 // DeliveryResult represents the result of a delivery attempt
 type DeliveryResult struct {
-	Status       types.DeliveryStatus
-	StatusCode   int
-	ResponseBody string
-	ErrorCode    string
-	ErrorMessage string
-	Timestamp    time.Time
-	Attempts     int
-	NextRetry    *time.Time
+	Status        types.DeliveryStatus
+	StatusCode    int
+	ResponseBody  string
+	ErrorCode     string
+	ErrorMessage  string
+	Timestamp     time.Time
+	Attempts      int
+	NextRetry     *time.Time
+	DeliveryMode  string // "push" or "pull"
+	LocalDelivery bool   // true if delivered locally
 }
 
 // NewDeliveryEngine creates a new delivery engine
@@ -522,6 +524,8 @@ func (de *DeliveryEngine) deliverLocalPush(ctx context.Context, message *types.M
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		result.Status = types.StatusDelivered
 		result.Attempts = 1
+		result.DeliveryMode = "push"
+		result.LocalDelivery = true
 		return result, nil
 	}
 
@@ -530,22 +534,23 @@ func (de *DeliveryEngine) deliverLocalPush(ctx context.Context, message *types.M
 	result.ErrorCode = "PUSH_DELIVERY_FAILED"
 	result.ErrorMessage = fmt.Sprintf("push delivery failed with status %d", resp.StatusCode)
 	result.Attempts = 1
+	result.DeliveryMode = "push"
+	result.LocalDelivery = true
 	return result, fmt.Errorf("push delivery failed with status %d", resp.StatusCode)
 }
 
-// deliverLocalPull stores a message in the local inbox for pull-based delivery
+// deliverLocalPull marks a message as delivered to local inbox
 func (de *DeliveryEngine) deliverLocalPull(ctx context.Context, message *types.Message, recipient string, result *DeliveryResult) (*DeliveryResult, error) {
-	// Store message in recipient's inbox using agent registry
-	if err := de.agentRegistry.StoreMessage(recipient, message); err != nil {
-		result.Status = types.StatusFailed
-		result.ErrorCode = "INBOX_STORE_FAILED"
-		result.ErrorMessage = fmt.Sprintf("failed to store message in inbox: %v", err)
-		return result, fmt.Errorf("failed to store message in inbox: %w", err)
-	}
+	// No longer copying message to separate inbox storage!
+	// Instead, we'll mark the delivery status in the unified storage
+	// The actual status update will be handled by the message processor
 
-	// Mark as delivered (stored in inbox)
+	// Mark as delivered, now available in inbox view
 	result.Status = types.StatusDelivered
 	result.Attempts = 1
 	result.Timestamp = time.Now().UTC()
+	result.DeliveryMode = "pull"
+	result.LocalDelivery = true
+
 	return result, nil
 }

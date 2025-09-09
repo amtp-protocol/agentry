@@ -89,12 +89,17 @@ type MessageStatus struct {
 
 // RecipientStatus represents the delivery status for a specific recipient
 type RecipientStatus struct {
-	Address      string         `json:"address"`
-	Status       DeliveryStatus `json:"status"`
-	Timestamp    time.Time      `json:"timestamp"`
-	Attempts     int            `json:"attempts"`
-	ErrorCode    string         `json:"error_code,omitempty"`
-	ErrorMessage string         `json:"error_message,omitempty"`
+	Address        string         `json:"address"`
+	Status         DeliveryStatus `json:"status"`
+	Timestamp      time.Time      `json:"timestamp"`
+	Attempts       int            `json:"attempts"`
+	ErrorCode      string         `json:"error_code,omitempty"`
+	ErrorMessage   string         `json:"error_message,omitempty"`
+	DeliveryMode   string         `json:"delivery_mode,omitempty"`   // "push" or "pull"
+	LocalDelivery  bool           `json:"local_delivery,omitempty"`  // true if delivered locally
+	InboxDelivered bool           `json:"inbox_delivered,omitempty"` // true if available in inbox
+	Acknowledged   bool           `json:"acknowledged,omitempty"`    // true if acknowledged by recipient
+	AcknowledgedAt *time.Time     `json:"acknowledged_at,omitempty"` // when acknowledged
 }
 
 // DeliveryStatus represents possible message delivery states
