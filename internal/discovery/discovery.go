@@ -172,6 +172,9 @@ func (m *MockDiscovery) SupportsSchema(ctx context.Context, domain, schema strin
 
 // parseAMTPRecord parses an AMTP DNS TXT record (reused from Discovery)
 func (m *MockDiscovery) parseAMTPRecord(record string) *AMTPCapabilities {
+	// Clean up the record - remove extra quotes that may be added by DNS servers
+	record = strings.Trim(record, "\"")
+
 	// AMTP TXT record format: "v=amtp1;gateway=https://...;auth=...;max-size=..."
 	if !strings.HasPrefix(record, "v=amtp") {
 		return nil
@@ -297,6 +300,62 @@ func (m *MockDiscovery) DiscoverAgents(ctx context.Context, domain string) (*Age
 	}
 
 	return &agentResponse, nil
+}
+
+// DiscoverAgentsWithFilters discovers agents with optional filtering parameters for MockDiscovery
+func (m *MockDiscovery) DiscoverAgentsWithFilters(ctx context.Context, domain string, deliveryMode string, activeOnly bool) (*AgentDiscoveryResponse, error) {
+	// First discover the gateway capabilities to get the gateway URL
+	capabilities, err := m.DiscoverCapabilities(ctx, domain)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover domain capabilities: %w", err)
+	}
+
+	// Create HTTP client for agent discovery
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+
+	// Construct agent discovery URL
+	agentDiscoveryURL := fmt.Sprintf("%s/v1/discovery/agents", capabilities.Gateway)
+
+	// Create request with query parameters
+	req, err := http.NewRequestWithContext(ctx, "GET", agentDiscoveryURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create agent discovery request: %w", err)
+	}
+
+	q := req.URL.Query()
+	if deliveryMode != "" {
+		q.Add("delivery_mode", deliveryMode)
+	}
+	if activeOnly {
+		q.Add("active_only", "true")
+	}
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("agent discovery request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close() // nolint:errcheck
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("agent discovery request failed with status: %d", resp.StatusCode)
+	}
+
+	// Parse the agent discovery response (direct format, not wrapped in success/data)
+	var agentResponse AgentDiscoveryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&agentResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode agent discovery response: %w", err)
+	}
+
+	return &agentResponse, nil
+}
+
+// HasAMTPSupport checks if a domain supports AMTP using mock data
+func (m *MockDiscovery) HasAMTPSupport(ctx context.Context, domain string) bool {
+	_, err := m.DiscoverCapabilities(ctx, domain)
+	return err == nil
 }
 
 // DiscoverCapabilities discovers AMTP capabilities for a domain using DNS TXT records only
