@@ -785,6 +785,7 @@ func createTestServerWithRealProcessor() *Server {
 		MessagesInFlight:          prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_messages_in_flight", Help: "Test messages in flight"}),
 		DeliveryAttempts:          prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_delivery_attempts", Help: "Test delivery attempts"}, []string{"status", "domain"}),
 		DeliveryDuration:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_delivery_duration", Help: "Test delivery duration"}, []string{"status", "domain"}),
+		ErrorsTotal:               prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_errors_total", Help: "Test errors"}, []string{"component", "error_code", "error_type"}),
 	}
 
 	server := &Server{
@@ -985,5 +986,681 @@ func BenchmarkHandleGetMessage(b *testing.B) {
 		if rr.Code != http.StatusOK {
 			b.Errorf("Expected status code %d, got %d", http.StatusOK, rr.Code)
 		}
+	}
+}
+
+// Test handleListMessages
+func TestHandleListMessages_Success(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["total"].(float64) != 0 {
+		t.Errorf("Expected total 0, got %v", response["total"])
+	}
+
+	if response["limit"].(float64) != 100 {
+		t.Errorf("Expected limit 100, got %v", response["limit"])
+	}
+
+	if response["offset"].(float64) != 0 {
+		t.Errorf("Expected offset 0, got %v", response["offset"])
+	}
+}
+
+func TestHandleListMessages_WithParameters(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=50&offset=10&status=delivered&sender=test@example.com&recipient=user@example.com&since=2023-01-01T00:00:00Z", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["limit"].(float64) != 50 {
+		t.Errorf("Expected limit 50, got %v", response["limit"])
+	}
+
+	if response["offset"].(float64) != 10 {
+		t.Errorf("Expected offset 10, got %v", response["offset"])
+	}
+}
+
+func TestHandleListMessages_InvalidLimit(t *testing.T) {
+	server := createTestServer()
+
+	tests := []struct {
+		name  string
+		limit string
+	}{
+		{"negative limit", "-1"},
+		{"zero limit", "0"},
+		{"too large limit", "1001"},
+		{"non-numeric limit", "abc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages?limit="+tt.limit, nil)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+			}
+
+			var errorResponse types.ErrorResponse
+			err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+			if err != nil {
+				t.Fatalf("Failed to unmarshal error response: %v", err)
+			}
+
+			if errorResponse.Error.Code != "INVALID_LIMIT" {
+				t.Errorf("Expected error code 'INVALID_LIMIT', got %s", errorResponse.Error.Code)
+			}
+		})
+	}
+}
+
+func TestHandleListMessages_InvalidOffset(t *testing.T) {
+	server := createTestServer()
+
+	tests := []struct {
+		name   string
+		offset string
+	}{
+		{"negative offset", "-1"},
+		{"non-numeric offset", "xyz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages?offset="+tt.offset, nil)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+			}
+
+			var errorResponse types.ErrorResponse
+			err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+			if err != nil {
+				t.Fatalf("Failed to unmarshal error response: %v", err)
+			}
+
+			if errorResponse.Error.Code != "INVALID_OFFSET" {
+				t.Errorf("Expected error code 'INVALID_OFFSET', got %s", errorResponse.Error.Code)
+			}
+		})
+	}
+}
+
+func TestHandleListMessages_InvalidSince(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("GET", "/v1/messages?since=invalid-date", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "INVALID_SINCE_FORMAT" {
+		t.Errorf("Expected error code 'INVALID_SINCE_FORMAT', got %s", errorResponse.Error.Code)
+	}
+}
+
+// Test handleGetCapabilities
+func TestHandleGetCapabilities_Success(t *testing.T) {
+	server := createTestServerWithRealProcessor()
+
+	req := httptest.NewRequest("GET", "/v1/capabilities/localhost", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	// The response should contain capabilities
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	// Should have basic AMTP capabilities
+	if response["version"] == nil {
+		t.Error("Expected version in capabilities response")
+	}
+}
+
+func TestHandleGetCapabilities_EmptyDomain(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("GET", "/v1/capabilities/", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+}
+
+func TestHandleGetCapabilities_OwnDomain(t *testing.T) {
+	server := createTestServerWithRealProcessor()
+
+	// Register some agents to test schema inclusion
+	agent := &agents.LocalAgent{
+		Address:          "test",
+		DeliveryMode:     "pull",
+		SupportedSchemas: []string{"agntcy:example.test.v1", "agntcy:example.order.v1"},
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/capabilities/localhost", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	// Should include schemas from registered agents
+	if schemas, ok := response["schemas"].([]interface{}); ok {
+		if len(schemas) == 0 {
+			t.Error("Expected schemas to be included for own domain")
+		}
+	}
+}
+
+// Test handleDiscoverAgentsByDomain
+func TestHandleDiscoverAgentsByDomain_Success(t *testing.T) {
+	server := createTestServerWithRealProcessor()
+
+	// Register test agent
+	agent := &agents.LocalAgent{
+		Address:      "test",
+		DeliveryMode: "pull",
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/discovery/agents/localhost", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["domain"] != "localhost" {
+		t.Errorf("Expected domain 'localhost', got %v", response["domain"])
+	}
+}
+
+func TestHandleDiscoverAgentsByDomain_NotFound(t *testing.T) {
+	server := createTestServerWithRealProcessor()
+
+	req := httptest.NewRequest("GET", "/v1/discovery/agents/other.domain.com", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "DOMAIN_NOT_FOUND" {
+		t.Errorf("Expected error code 'DOMAIN_NOT_FOUND', got %s", errorResponse.Error.Code)
+	}
+}
+
+// Test agent management handlers
+func TestHandleRegisterAgent_Success(t *testing.T) {
+	server := createTestServer()
+
+	agent := agents.LocalAgent{
+		Address:      "newagent",
+		DeliveryMode: "pull",
+	}
+
+	body, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatalf("Failed to marshal agent: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("Expected status %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["message"] != "Agent registered successfully" {
+		t.Errorf("Expected success message, got %v", response["message"])
+	}
+}
+
+func TestHandleRegisterAgent_InvalidJSON(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents", bytes.NewBufferString("invalid json"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "INVALID_REQUEST_FORMAT" {
+		t.Errorf("Expected error code 'INVALID_REQUEST_FORMAT', got %s", errorResponse.Error.Code)
+	}
+}
+
+func TestHandleUnregisterAgent_Success(t *testing.T) {
+	server := createTestServer()
+
+	// First register an agent
+	agent := &agents.LocalAgent{
+		Address:      "testagent",
+		DeliveryMode: "pull",
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/v1/admin/agents/testagent", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["message"] != "Agent unregistered successfully" {
+		t.Errorf("Expected success message, got %v", response["message"])
+	}
+}
+
+func TestHandleUnregisterAgent_NotFound(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("DELETE", "/v1/admin/agents/nonexistent@localhost", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "AGENT_UNREGISTRATION_FAILED" {
+		t.Errorf("Expected error code 'AGENT_UNREGISTRATION_FAILED', got %s", errorResponse.Error.Code)
+	}
+}
+
+func TestHandleListAgents_Success(t *testing.T) {
+	server := createTestServer()
+
+	// Register test agents
+	agent1 := &agents.LocalAgent{
+		Address:      "agent1",
+		DeliveryMode: "pull",
+	}
+	agent2 := &agents.LocalAgent{
+		Address:      "agent2",
+		DeliveryMode: "push",
+		PushTarget:   "https://example.com/webhook",
+	}
+
+	err := server.agentRegistry.RegisterAgent(agent1)
+	if err != nil {
+		t.Fatalf("Failed to register agent1: %v", err)
+	}
+
+	err = server.agentRegistry.RegisterAgent(agent2)
+	if err != nil {
+		t.Fatalf("Failed to register agent2: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/admin/agents", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["count"].(float64) != 2 {
+		t.Errorf("Expected count 2, got %v", response["count"])
+	}
+
+	agents, ok := response["agents"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected agents to be a map, got %T", response["agents"])
+	}
+
+	if len(agents) != 2 {
+		t.Errorf("Expected 2 agents, got %d", len(agents))
+	}
+}
+
+// Test inbox handlers
+func TestHandleGetInbox_Success(t *testing.T) {
+	server := createTestServer()
+
+	// Register agent with API key
+	agent := &agents.LocalAgent{
+		Address:      "testuser",
+		DeliveryMode: "pull",
+		APIKey:       "valid-api-key",
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/inbox/testuser@localhost", nil)
+	req.Header.Set("Authorization", "Bearer valid-api-key")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["recipient"] != "testuser@localhost" {
+		t.Errorf("Expected recipient 'testuser@localhost', got %v", response["recipient"])
+	}
+
+	if response["count"].(float64) != 0 {
+		t.Errorf("Expected count 0, got %v", response["count"])
+	}
+}
+
+func TestHandleGetInbox_Unauthorized(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("GET", "/v1/inbox/testuser@localhost", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "MISSING_AUTHORIZATION" {
+		t.Errorf("Expected error code 'MISSING_AUTHORIZATION', got %s", errorResponse.Error.Code)
+	}
+}
+
+func TestHandleGetInbox_InvalidAPIKey(t *testing.T) {
+	server := createTestServer()
+
+	// Register agent with different API key
+	agent := &agents.LocalAgent{
+		Address:      "testuser",
+		DeliveryMode: "pull",
+		APIKey:       "correct-api-key",
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/inbox/testuser@localhost", nil)
+	req.Header.Set("Authorization", "Bearer wrong-api-key")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected status %d, got %d", http.StatusForbidden, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err = json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "ACCESS_DENIED" {
+		t.Errorf("Expected error code 'ACCESS_DENIED', got %s", errorResponse.Error.Code)
+	}
+}
+
+func TestHandleAcknowledgeMessage_Success(t *testing.T) {
+	server := createTestServer()
+	mockProcessor := server.processor.(*MockMessageProcessor)
+
+	// Register agent with API key
+	agent := &agents.LocalAgent{
+		Address:      "testuser",
+		DeliveryMode: "pull",
+		APIKey:       "valid-api-key",
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	// Add a message to acknowledge
+	messageID := "test-message-123"
+	message := &types.Message{
+		MessageID:  messageID,
+		Recipients: []string{"testuser@localhost"},
+	}
+	mockProcessor.messages[messageID] = message
+
+	req := httptest.NewRequest("DELETE", "/v1/inbox/testuser@localhost/"+messageID, nil)
+	req.Header.Set("Authorization", "Bearer valid-api-key")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response["message"] != "Message acknowledged successfully" {
+		t.Errorf("Expected success message, got %v", response["message"])
+	}
+}
+
+func TestHandleAcknowledgeMessage_NotFound(t *testing.T) {
+	server := createTestServer()
+
+	// Register agent with API key
+	agent := &agents.LocalAgent{
+		Address:      "testuser",
+		DeliveryMode: "pull",
+		APIKey:       "valid-api-key",
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/v1/inbox/testuser@localhost/nonexistent-message", nil)
+	req.Header.Set("Authorization", "Bearer valid-api-key")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err = json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "MESSAGE_NOT_FOUND" {
+		t.Errorf("Expected error code 'MESSAGE_NOT_FOUND', got %s", errorResponse.Error.Code)
+	}
+}
+
+// Test verifyAgentAccess function
+func TestVerifyAgentAccess_Success(t *testing.T) {
+	server := createTestServer()
+
+	// Register agent with API key
+	agent := &agents.LocalAgent{
+		Address:      "testuser",
+		DeliveryMode: "pull",
+		APIKey:       "valid-api-key",
+	}
+	err := server.agentRegistry.RegisterAgent(agent)
+	if err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	// Create test context
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/test", func(c *gin.Context) {
+		if server.verifyAgentAccess(c, "testuser@localhost") {
+			c.JSON(http.StatusOK, gin.H{"access": "granted"})
+		}
+		// If access denied, verifyAgentAccess handles the response
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Authorization", "Bearer valid-api-key")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+func TestVerifyAgentAccess_EmptyAPIKey(t *testing.T) {
+	server := createTestServer()
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/test", func(c *gin.Context) {
+		server.verifyAgentAccess(c, "testuser@localhost")
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	err := json.Unmarshal(w.Body.Bytes(), &errorResponse)
+	if err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+
+	if errorResponse.Error.Code != "EMPTY_API_KEY" {
+		t.Errorf("Expected error code 'EMPTY_API_KEY', got %s", errorResponse.Error.Code)
 	}
 }
