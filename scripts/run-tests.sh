@@ -48,6 +48,7 @@ PACKAGES=(
     "./internal/processing"
     "./internal/schema"
     "./internal/server"
+    "./internal/storage"
     "./internal/types"
     "./internal/validation"
 )

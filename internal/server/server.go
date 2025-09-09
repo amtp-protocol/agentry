@@ -31,6 +31,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/middleware"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/validation"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -130,8 +131,15 @@ func New(cfg *config.Config) (*Server, error) {
 		validator = validation.NewWithAgentManager(cfg.Message.MaxSize, nil, agentManagerAdapter)
 	}
 
+	// Create message storage
+	storageConfig := storage.DefaultStorageConfig()
+	messageStorage, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create message storage: %w", err)
+	}
+
 	// Create message processor
-	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine)
+	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, messageStorage)
 
 	// Set Gin mode based on environment
 	if cfg.Logging.Level == "debug" {

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
@@ -29,12 +30,9 @@ import (
 type MessageProcessor struct {
 	discovery      DiscoveryService
 	deliveryEngine DeliveryService
+	storage        storage.MessageStorage
 	idempotencyMap map[string]*ProcessingResult
 	idempotencyMux sync.RWMutex
-	messageStore   map[string]*types.Message
-	storeMux       sync.RWMutex
-	statusStore    map[string]*types.MessageStatus
-	statusMux      sync.RWMutex
 }
 
 // ProcessingResult represents the result of message processing
@@ -56,13 +54,12 @@ type ProcessingOptions struct {
 }
 
 // NewMessageProcessor creates a new message processor
-func NewMessageProcessor(discovery DiscoveryService, deliveryEngine DeliveryService) *MessageProcessor {
+func NewMessageProcessor(discovery DiscoveryService, deliveryEngine DeliveryService, messageStorage storage.MessageStorage) *MessageProcessor {
 	return &MessageProcessor{
 		discovery:      discovery,
 		deliveryEngine: deliveryEngine,
+		storage:        messageStorage,
 		idempotencyMap: make(map[string]*ProcessingResult),
-		messageStore:   make(map[string]*types.Message),
-		statusStore:    make(map[string]*types.MessageStatus),
 	}
 }
 
@@ -74,7 +71,9 @@ func (mp *MessageProcessor) ProcessMessage(ctx context.Context, message *types.M
 	}
 
 	// Store message
-	mp.storeMessage(message)
+	if err := mp.storage.StoreMessage(ctx, message); err != nil {
+		return nil, fmt.Errorf("failed to store message: %w", err)
+	}
 
 	// Initialize processing result
 	result := &ProcessingResult{
@@ -96,14 +95,17 @@ func (mp *MessageProcessor) ProcessMessage(ctx context.Context, message *types.M
 	}
 
 	// Store initial status
-	mp.storeStatus(message.MessageID, &types.MessageStatus{
+	initialStatus := &types.MessageStatus{
 		MessageID:  message.MessageID,
 		Status:     types.StatusQueued,
 		Recipients: result.Recipients,
 		Attempts:   0,
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
-	})
+	}
+	if err := mp.storage.StoreStatus(ctx, message.MessageID, initialStatus); err != nil {
+		return nil, fmt.Errorf("failed to store initial status: %w", err)
+	}
 
 	// Store idempotency result
 	mp.storeIdempotencyResult(message.IdempotencyKey, result)
@@ -206,7 +208,19 @@ func (mp *MessageProcessor) processImmediatePath(ctx context.Context, message *t
 	}
 
 	// Update stored status
-	mp.updateStatus(message.MessageID, result)
+	err := mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
+		status.Status = result.Status
+		status.Recipients = result.Recipients
+		status.UpdatedAt = time.Now().UTC()
+		if result.Status == types.StatusDelivered {
+			now := time.Now().UTC()
+			status.DeliveredAt = &now
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update status: %w", err)
+	}
 
 	return result, nil
 }
@@ -226,7 +240,15 @@ func (mp *MessageProcessor) processWithCoordination(ctx context.Context, message
 		result.Status = types.StatusFailed
 		result.ErrorCode = "UNSUPPORTED_COORDINATION"
 		result.ErrorMessage = fmt.Sprintf("unsupported coordination type: %s", coordination.Type)
-		mp.updateStatus(message.MessageID, result)
+
+		// Update status in storage
+		mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
+			status.Status = result.Status
+			status.Recipients = result.Recipients
+			status.UpdatedAt = time.Now().UTC()
+			return nil
+		})
+
 		return result, fmt.Errorf("unsupported coordination type: %s", coordination.Type)
 	}
 }
@@ -277,7 +299,15 @@ func (mp *MessageProcessor) processSequentialCoordination(ctx context.Context, m
 					}
 				}
 				result.Status = types.StatusFailed
-				mp.updateStatus(message.MessageID, result)
+
+				// Update status in storage
+				mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
+					status.Status = result.Status
+					status.Recipients = result.Recipients
+					status.UpdatedAt = time.Now().UTC()
+					return nil
+				})
+
 				return result, fmt.Errorf("sequential delivery failed for %s: %w", recipient, err)
 			}
 		} else {
@@ -319,7 +349,21 @@ func (mp *MessageProcessor) processSequentialCoordination(ctx context.Context, m
 		result.Status = types.StatusDelivering
 	}
 
-	mp.updateStatus(message.MessageID, result)
+	// Update status in storage
+	err := mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
+		status.Status = result.Status
+		status.Recipients = result.Recipients
+		status.UpdatedAt = time.Now().UTC()
+		if result.Status == types.StatusDelivered {
+			now := time.Now().UTC()
+			status.DeliveredAt = &now
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update status: %w", err)
+	}
+
 	return result, nil
 }
 
@@ -377,7 +421,22 @@ func (mp *MessageProcessor) processConditionalCoordination(ctx context.Context, 
 
 	// Determine overall status
 	result.Status = types.StatusDelivered
-	mp.updateStatus(message.MessageID, result)
+
+	// Update status in storage
+	err := mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
+		status.Status = result.Status
+		status.Recipients = result.Recipients
+		status.UpdatedAt = time.Now().UTC()
+		if result.Status == types.StatusDelivered {
+			now := time.Now().UTC()
+			status.DeliveredAt = &now
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update status: %w", err)
+	}
+
 	return result, nil
 }
 
@@ -428,71 +487,14 @@ func (mp *MessageProcessor) storeIdempotencyResult(idempotencyKey string, result
 	mp.idempotencyMap[idempotencyKey] = result
 }
 
-// storeMessage stores a message in memory
-func (mp *MessageProcessor) storeMessage(message *types.Message) {
-	mp.storeMux.Lock()
-	defer mp.storeMux.Unlock()
-
-	mp.messageStore[message.MessageID] = message
-}
-
 // GetMessage retrieves a message by ID
 func (mp *MessageProcessor) GetMessage(messageID string) (*types.Message, error) {
-	mp.storeMux.RLock()
-	defer mp.storeMux.RUnlock()
-
-	message, exists := mp.messageStore[messageID]
-	if !exists {
-		return nil, fmt.Errorf("message not found: %s", messageID)
-	}
-
-	return message, nil
-}
-
-// storeStatus stores message status
-func (mp *MessageProcessor) storeStatus(messageID string, status *types.MessageStatus) {
-	mp.statusMux.Lock()
-	defer mp.statusMux.Unlock()
-
-	mp.statusStore[messageID] = status
-}
-
-// updateStatus updates message status based on processing result
-func (mp *MessageProcessor) updateStatus(messageID string, result *ProcessingResult) {
-	mp.statusMux.Lock()
-	defer mp.statusMux.Unlock()
-
-	status, exists := mp.statusStore[messageID]
-	if !exists {
-		status = &types.MessageStatus{
-			MessageID: messageID,
-			CreatedAt: time.Now().UTC(),
-		}
-	}
-
-	status.Status = result.Status
-	status.Recipients = result.Recipients
-	status.UpdatedAt = time.Now().UTC()
-
-	if result.Status == types.StatusDelivered {
-		now := time.Now().UTC()
-		status.DeliveredAt = &now
-	}
-
-	mp.statusStore[messageID] = status
+	return mp.storage.GetMessage(context.Background(), messageID)
 }
 
 // GetMessageStatus retrieves message status by ID
 func (mp *MessageProcessor) GetMessageStatus(messageID string) (*types.MessageStatus, error) {
-	mp.statusMux.RLock()
-	defer mp.statusMux.RUnlock()
-
-	status, exists := mp.statusStore[messageID]
-	if !exists {
-		return nil, fmt.Errorf("message status not found: %s", messageID)
-	}
-
-	return status, nil
+	return mp.storage.GetStatus(context.Background(), messageID)
 }
 
 // GetDeliveryEngine returns the delivery engine for local agent management
@@ -515,95 +517,15 @@ func (mp *MessageProcessor) CleanupExpiredEntries() {
 
 // GetInboxMessages returns messages for a specific recipient using unified storage view
 func (mp *MessageProcessor) GetInboxMessages(recipient string) []*types.Message {
-	mp.storeMux.RLock()
-	mp.statusMux.RLock()
-	defer mp.storeMux.RUnlock()
-	defer mp.statusMux.RUnlock()
-
-	var inboxMessages []*types.Message
-
-	// Iterate through all messages and find those delivered to this recipient's inbox
-	for messageID, message := range mp.messageStore {
-		status, exists := mp.statusStore[messageID]
-		if !exists {
-			continue
-		}
-
-		// Check if this message has been delivered to the recipient's inbox
-		for _, recipientStatus := range status.Recipients {
-			if recipientStatus.Address == recipient &&
-				recipientStatus.LocalDelivery &&
-				recipientStatus.InboxDelivered &&
-				!recipientStatus.Acknowledged {
-				inboxMessages = append(inboxMessages, message)
-				break
-			}
-		}
+	messages, err := mp.storage.GetInboxMessages(context.Background(), recipient)
+	if err != nil {
+		// Log error but return empty slice to maintain interface compatibility
+		return []*types.Message{}
 	}
-
-	return inboxMessages
+	return messages
 }
 
 // AcknowledgeMessage marks a message as acknowledged for a specific recipient
 func (mp *MessageProcessor) AcknowledgeMessage(recipient, messageID string) error {
-	mp.statusMux.Lock()
-	defer mp.statusMux.Unlock()
-
-	status, exists := mp.statusStore[messageID]
-	if !exists {
-		return fmt.Errorf("message not found: %s", messageID)
-	}
-
-	// Find and acknowledge the recipient
-	for i, recipientStatus := range status.Recipients {
-		if recipientStatus.Address == recipient {
-			if !recipientStatus.LocalDelivery || !recipientStatus.InboxDelivered {
-				return fmt.Errorf("message not available in inbox for recipient: %s", recipient)
-			}
-			if recipientStatus.Acknowledged {
-				return fmt.Errorf("message already acknowledged: %s", messageID)
-			}
-
-			// Mark as acknowledged
-			now := time.Now().UTC()
-			status.Recipients[i].Acknowledged = true
-			status.Recipients[i].AcknowledgedAt = &now
-			status.UpdatedAt = now
-
-			return nil
-		}
-	}
-
-	return fmt.Errorf("recipient not found for message: %s", recipient)
-}
-
-// UpdateRecipientDeliveryStatus updates the delivery status for a specific recipient
-func (mp *MessageProcessor) UpdateRecipientDeliveryStatus(messageID, recipient string, deliveryStatus types.DeliveryStatus, deliveryMode string, localDelivery bool) error {
-	mp.statusMux.Lock()
-	defer mp.statusMux.Unlock()
-
-	status, exists := mp.statusStore[messageID]
-	if !exists {
-		return fmt.Errorf("message status not found: %s", messageID)
-	}
-
-	// Find and update the recipient status
-	for i, recipientStatus := range status.Recipients {
-		if recipientStatus.Address == recipient {
-			status.Recipients[i].Status = deliveryStatus
-			status.Recipients[i].DeliveryMode = deliveryMode
-			status.Recipients[i].LocalDelivery = localDelivery
-			status.Recipients[i].Timestamp = time.Now().UTC()
-
-			// For pull mode local delivery, mark as inbox delivered
-			if localDelivery && deliveryMode == "pull" && deliveryStatus == types.StatusDelivered {
-				status.Recipients[i].InboxDelivered = true
-			}
-
-			status.UpdatedAt = time.Now().UTC()
-			return nil
-		}
-	}
-
-	return fmt.Errorf("recipient not found for message: %s", recipient)
+	return mp.storage.AcknowledgeMessage(context.Background(), recipient, messageID)
 }

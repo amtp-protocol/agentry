@@ -19,9 +19,12 @@ package processing
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/amtp-protocol/agentry/internal/discovery"
+	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
@@ -100,6 +103,190 @@ func (m *MockDiscovery) SetCapabilities(domain string, cap *discovery.AMTPCapabi
 }
 
 func (m *MockDiscovery) SetError(err error) {
+	m.error = err
+}
+
+// MockStorage for testing
+type MockStorage struct {
+	messages map[string]*types.Message
+	statuses map[string]*types.MessageStatus
+	mutex    sync.RWMutex
+	error    error
+}
+
+func NewMockStorage() *MockStorage {
+	return &MockStorage{
+		messages: make(map[string]*types.Message),
+		statuses: make(map[string]*types.MessageStatus),
+	}
+}
+
+func (m *MockStorage) StoreMessage(ctx context.Context, message *types.Message) error {
+	if m.error != nil {
+		return m.error
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.messages[message.MessageID] = message
+	return nil
+}
+
+func (m *MockStorage) GetMessage(ctx context.Context, messageID string) (*types.Message, error) {
+	if m.error != nil {
+		return nil, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	if msg, exists := m.messages[messageID]; exists {
+		return msg, nil
+	}
+	return nil, fmt.Errorf("message not found: %s", messageID)
+}
+
+func (m *MockStorage) DeleteMessage(ctx context.Context, messageID string) error {
+	if m.error != nil {
+		return m.error
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	delete(m.messages, messageID)
+	return nil
+}
+
+func (m *MockStorage) ListMessages(ctx context.Context, filter storage.MessageFilter) ([]*types.Message, error) {
+	if m.error != nil {
+		return nil, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	var results []*types.Message
+	for _, msg := range m.messages {
+		results = append(results, msg)
+	}
+	return results, nil
+}
+
+func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
+	if m.error != nil {
+		return m.error
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.statuses[messageID] = status
+	return nil
+}
+
+func (m *MockStorage) GetStatus(ctx context.Context, messageID string) (*types.MessageStatus, error) {
+	if m.error != nil {
+		return nil, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	if status, exists := m.statuses[messageID]; exists {
+		return status, nil
+	}
+	return nil, fmt.Errorf("message status not found: %s", messageID)
+}
+
+func (m *MockStorage) UpdateStatus(ctx context.Context, messageID string, updater storage.StatusUpdater) error {
+	if m.error != nil {
+		return m.error
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if status, exists := m.statuses[messageID]; exists {
+		return updater(status)
+	}
+	return fmt.Errorf("message status not found: %s", messageID)
+}
+
+func (m *MockStorage) DeleteStatus(ctx context.Context, messageID string) error {
+	if m.error != nil {
+		return m.error
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	delete(m.statuses, messageID)
+	return nil
+}
+
+func (m *MockStorage) GetInboxMessages(ctx context.Context, recipient string) ([]*types.Message, error) {
+	if m.error != nil {
+		return nil, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	var inboxMessages []*types.Message
+	for messageID, message := range m.messages {
+		status, exists := m.statuses[messageID]
+		if !exists {
+			continue
+		}
+
+		for _, recipientStatus := range status.Recipients {
+			if recipientStatus.Address == recipient &&
+				recipientStatus.LocalDelivery &&
+				recipientStatus.InboxDelivered &&
+				!recipientStatus.Acknowledged {
+				inboxMessages = append(inboxMessages, message)
+				break
+			}
+		}
+	}
+	return inboxMessages, nil
+}
+
+func (m *MockStorage) AcknowledgeMessage(ctx context.Context, recipient, messageID string) error {
+	if m.error != nil {
+		return m.error
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	status, exists := m.statuses[messageID]
+	if !exists {
+		return fmt.Errorf("message status not found: %s", messageID)
+	}
+
+	for i, recipientStatus := range status.Recipients {
+		if recipientStatus.Address == recipient {
+			if !recipientStatus.LocalDelivery || !recipientStatus.InboxDelivered {
+				return fmt.Errorf("message not available in inbox for recipient: %s", recipient)
+			}
+			if recipientStatus.Acknowledged {
+				return fmt.Errorf("message already acknowledged: %s", messageID)
+			}
+
+			now := time.Now().UTC()
+			status.Recipients[i].Acknowledged = true
+			status.Recipients[i].AcknowledgedAt = &now
+			status.UpdatedAt = now
+			return nil
+		}
+	}
+	return fmt.Errorf("recipient not found for message: %s", recipient)
+}
+
+func (m *MockStorage) Close() error {
+	return nil
+}
+
+func (m *MockStorage) HealthCheck(ctx context.Context) error {
+	return m.error
+}
+
+func (m *MockStorage) GetStats(ctx context.Context) (storage.StorageStats, error) {
+	if m.error != nil {
+		return storage.StorageStats{}, m.error
+	}
+	return storage.StorageStats{
+		TotalMessages: int64(len(m.messages)),
+		TotalStatuses: int64(len(m.statuses)),
+	}, nil
+}
+
+func (m *MockStorage) SetError(err error) {
 	m.error = err
 }
 

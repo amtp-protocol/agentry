@@ -29,7 +29,8 @@ func TestNewMessageProcessor(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
 
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	if processor == nil {
 		t.Fatal("NewMessageProcessor returned nil")
@@ -47,19 +48,16 @@ func TestNewMessageProcessor(t *testing.T) {
 		t.Error("IdempotencyMap not initialized")
 	}
 
-	if processor.messageStore == nil {
-		t.Error("MessageStore not initialized")
-	}
-
-	if processor.statusStore == nil {
-		t.Error("StatusStore not initialized")
+	if processor.storage == nil {
+		t.Error("Storage not initialized")
 	}
 }
 
 func TestProcessMessage_ImmediatePath(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -99,7 +97,8 @@ func TestProcessMessage_ImmediatePath(t *testing.T) {
 func TestProcessMessage_ParallelCoordination(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 	message.Recipients = []string{"recipient1@test.com", "recipient2@test.com"}
@@ -139,7 +138,8 @@ func TestProcessMessage_ParallelCoordination(t *testing.T) {
 func TestProcessMessage_SequentialCoordination(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 	message.Recipients = []string{"recipient1@test.com", "recipient2@test.com"}
@@ -174,7 +174,8 @@ func TestProcessMessage_SequentialCoordination(t *testing.T) {
 func TestProcessMessage_SequentialCoordination_StopOnFailure(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	// Set first recipient to fail by setting a delivery error
 	deliveryEngine.SetDeliveryError(fmt.Errorf("test delivery failure"))
@@ -209,7 +210,8 @@ func TestProcessMessage_SequentialCoordination_StopOnFailure(t *testing.T) {
 func TestProcessMessage_Idempotency(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -245,7 +247,8 @@ func TestProcessMessage_Idempotency(t *testing.T) {
 func TestGetMessage(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -278,7 +281,8 @@ func TestGetMessage(t *testing.T) {
 func TestGetMessage_NotFound(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	_, err := processor.GetMessage("nonexistent-id")
 	if err == nil {
@@ -294,7 +298,8 @@ func TestGetMessage_NotFound(t *testing.T) {
 func TestGetMessageStatus(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -331,7 +336,8 @@ func TestGetMessageStatus(t *testing.T) {
 func TestGetMessageStatus_NotFound(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	_, err := processor.GetMessageStatus("nonexistent-id")
 	if err == nil {
@@ -347,7 +353,8 @@ func TestGetMessageStatus_NotFound(t *testing.T) {
 func TestCleanupExpiredEntries(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	// Add an expired entry
 	expiredResult := &ProcessingResult{
@@ -390,7 +397,8 @@ func TestCleanupExpiredEntries(t *testing.T) {
 func TestEvaluateCondition(t *testing.T) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 
@@ -414,7 +422,8 @@ func TestEvaluateCondition(t *testing.T) {
 func BenchmarkProcessMessage(b *testing.B) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -439,7 +448,8 @@ func BenchmarkProcessMessage(b *testing.B) {
 func BenchmarkIdempotencyCheck(b *testing.B) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
-	processor := NewMessageProcessor(discovery, deliveryEngine)
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
 	// Pre-populate with some entries
 	for i := 0; i < 1000; i++ {

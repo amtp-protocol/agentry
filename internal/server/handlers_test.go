@@ -32,6 +32,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/logging"
 	"github.com/amtp-protocol/agentry/internal/metrics"
 	"github.com/amtp-protocol/agentry/internal/processing"
+	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/internal/validation"
 	"github.com/gin-gonic/gin"
@@ -765,7 +766,12 @@ func createTestServerWithRealProcessor() *Server {
 		LocalDomain:    cfg.Server.Domain,
 	}
 	deliveryEngine := processing.NewDeliveryEngine(discoveryService, agentRegistry, deliveryConfig)
-	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine)
+
+	// Create message storage
+	storageConfig := storage.DefaultStorageConfig()
+	messageStorage, _ := storage.NewStorage(storageConfig)
+
+	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, messageStorage)
 
 	logger := logging.NewLogger(cfg.Logging).WithComponent("server")
 
