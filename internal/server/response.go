@@ -119,21 +119,25 @@ func (s *Server) withRequestMetrics(handler gin.HandlerFunc) gin.HandlerFunc {
 		start := time.Now()
 		c.Set("start_time", start)
 
-		// Increment in-flight requests
-		s.metrics.IncHTTPRequestsInFlight()
-		defer s.metrics.DecHTTPRequestsInFlight()
+		// Increment in-flight requests (if metrics enabled)
+		if s.metrics != nil {
+			s.metrics.IncHTTPRequestsInFlight()
+			defer s.metrics.DecHTTPRequestsInFlight()
+		}
 
 		// Process request
 		handler(c)
 
-		// Record metrics
+		// Record metrics (if metrics enabled)
 		duration := time.Since(start)
-		s.metrics.RecordHTTPRequest(
-			c.Request.Method,
-			c.FullPath(),
-			c.Writer.Status(),
-			duration,
-		)
+		if s.metrics != nil {
+			s.metrics.RecordHTTPRequest(
+				c.Request.Method,
+				c.FullPath(),
+				c.Writer.Status(),
+				duration,
+			)
+		}
 
 		// Log request
 		s.logger.LogRequest(

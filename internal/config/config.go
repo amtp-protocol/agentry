@@ -40,6 +40,7 @@ type Config struct {
 	Message MessageConfig         `yaml:"message"`
 	Auth    AuthConfig            `yaml:"auth"`
 	Logging LoggingConfig         `yaml:"logging"`
+	Metrics *MetricsConfig        `yaml:"metrics,omitempty"`
 	Schema  *schema.ManagerConfig `yaml:"schema,omitempty"`
 }
 
@@ -90,6 +91,11 @@ type AuthConfig struct {
 type LoggingConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`
+}
+
+// MetricsConfig holds metrics configuration
+type MetricsConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Load loads configuration from YAML file and environment variables
@@ -296,6 +302,9 @@ func loadFromEnv(cfg *Config) {
 		cfg.Logging.Format = val
 	}
 
+	// Metrics configuration
+	loadMetricsFromEnv(cfg)
+
 	// Schema configuration
 	loadSchemaFromEnv(cfg)
 }
@@ -466,5 +475,20 @@ func loadSchemaFromEnv(cfg *Config) {
 		cfg.Schema.LocalRegistry.BasePath = registryPath
 	} else {
 		log.Printf("INFO: Schema management not configured. Set AMTP_SCHEMA_REGISTRY_TYPE=local and AMTP_SCHEMA_REGISTRY_PATH to enable.")
+	}
+}
+
+// loadMetricsFromEnv loads metrics configuration from environment variables
+func loadMetricsFromEnv(cfg *Config) {
+	// Check if metrics should be enabled
+	if getBoolEnv("AMTP_METRICS_ENABLED", false) {
+		log.Printf("INFO: Metrics enabled via environment variable")
+
+		if cfg.Metrics == nil {
+			cfg.Metrics = &MetricsConfig{}
+		}
+		cfg.Metrics.Enabled = true
+	} else {
+		log.Printf("INFO: Metrics not enabled. Set AMTP_METRICS_ENABLED=true to enable Prometheus metrics.")
 	}
 }

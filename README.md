@@ -195,6 +195,11 @@ export AMTP_LOG_FORMAT=text
 | `AMTP_LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `AMTP_LOG_FORMAT` | `json` | Log format (json, text) |
 
+##### Metrics Configuration
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AMTP_METRICS_ENABLED` | `false` | Enable Prometheus metrics collection and `/metrics` endpoint |
+
 > ⚠️ **Security Note**: Variables marked with ⚠️ should only be used in development environments. Never enable `AMTP_DNS_ALLOW_HTTP=true` in production as it allows insecure HTTP gateway URLs.
 
 #### Production Configuration
@@ -230,6 +235,9 @@ export AMTP_AUTH_API_KEY_HEADER="X-API-Key"
 # Logging
 export AMTP_LOG_LEVEL=info
 export AMTP_LOG_FORMAT=json
+
+# Metrics (optional - enable for monitoring)
+export AMTP_METRICS_ENABLED=true
 ```
 
 #### Development Configuration
@@ -378,6 +386,18 @@ GET /v1/capabilities/{domain}
 GET /health
 GET /ready
 ```
+
+#### Metrics (optional)
+
+```http
+GET /metrics
+```
+
+**Prometheus Metrics Endpoint** - Available when `AMTP_METRICS_ENABLED=true`:
+- Exposes Prometheus-compatible metrics for monitoring
+- Includes HTTP request metrics, message processing metrics, and system metrics
+- Secured by the same authentication as other endpoints
+- Use with monitoring systems like Prometheus, Grafana, or similar tools
 
 **Health Check (`/health`)** - Liveness Probe:
 - Verifies that all core components are initialized

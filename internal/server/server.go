@@ -89,8 +89,11 @@ func New(cfg *config.Config) (*Server, error) {
 	// Create logger
 	logger := logging.NewLogger(cfg.Logging).WithComponent("server")
 
-	// Create metrics
-	metrics := metrics.NewMetrics()
+	// Create metrics if enabled
+	var metricsInstance *metrics.Metrics
+	if cfg.Metrics != nil && cfg.Metrics.Enabled {
+		metricsInstance = metrics.NewMetrics()
+	}
 
 	// Create schema manager (if configured)
 	var schemaManager *schema.Manager
@@ -163,7 +166,7 @@ func New(cfg *config.Config) (*Server, error) {
 		agentRegistry: agentRegistry,
 		schemaManager: schemaManager,
 		logger:        logger,
-		metrics:       metrics,
+		metrics:       metricsInstance,
 	}
 
 	// Setup middleware
@@ -291,8 +294,9 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	// Metrics endpoint (if monitoring is enabled)
-	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	if s.metrics != nil {
+		s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	}
 }
 
 // createTLSConfig creates TLS configuration

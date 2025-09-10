@@ -114,8 +114,58 @@ func TestNew_Success(t *testing.T) {
 		t.Error("Expected logger to be initialized")
 	}
 
+	// Metrics should be nil by default (not enabled in config)
+	if server.metrics != nil {
+		t.Error("Expected metrics to be nil when not configured")
+	}
+}
+
+// Test server creation with metrics enabled
+func TestNew_WithMetrics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Address:      ":8080",
+			Domain:       "test.example.com",
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		},
+		Message: config.MessageConfig{
+			MaxSize: 10485760,
+		},
+		Logging: config.LoggingConfig{
+			Level:  "info",
+			Format: "json",
+		},
+		DNS: config.DNSConfig{
+			MockMode: true,
+			MockRecords: map[string]string{
+				"test.example.com": "v=amtp1;gateway=http://test.example.com:8080",
+			},
+			CacheTTL: 5 * time.Minute,
+		},
+		Auth: config.AuthConfig{
+			RequireAuth: false,
+		},
+		Metrics: &config.MetricsConfig{
+			Enabled: true,
+		},
+	}
+
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server with metrics: %v", err)
+	}
+
+	if server == nil {
+		t.Fatal("Expected server to be created, got nil")
+	}
+
+	// Metrics should be initialized when enabled
 	if server.metrics == nil {
-		t.Error("Expected metrics to be initialized")
+		t.Error("Expected metrics to be initialized when enabled")
 	}
 }
 
