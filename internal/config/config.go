@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"regexp"
@@ -294,6 +295,9 @@ func loadFromEnv(cfg *Config) {
 	if val := getEnv("AMTP_LOG_FORMAT", ""); val != "" {
 		cfg.Logging.Format = val
 	}
+
+	// Schema configuration
+	loadSchemaFromEnv(cfg)
 }
 
 // validate validates the configuration
@@ -438,4 +442,29 @@ func loadMockRecords() map[string]string {
 
 	// Return empty map - let the caller decide on defaults
 	return map[string]string{}
+}
+
+// loadSchemaFromEnv loads schema configuration from environment variables
+func loadSchemaFromEnv(cfg *Config) {
+	registryType := getEnv("AMTP_SCHEMA_REGISTRY_TYPE", "")
+	registryPath := getEnv("AMTP_SCHEMA_REGISTRY_PATH", "")
+	useLocalRegistry := getBoolEnv("AMTP_SCHEMA_USE_LOCAL_REGISTRY", false)
+
+	if registryType == "local" || registryPath != "" || useLocalRegistry {
+		if registryPath == "" {
+			log.Printf("WARNING: Schema management enabled but AMTP_SCHEMA_REGISTRY_PATH not set. Schema registration will fail.")
+			return
+		}
+
+		log.Printf("INFO: Schema management enabled with local registry at: %s", registryPath)
+
+		if cfg.Schema == nil {
+			cfg.Schema = &schema.ManagerConfig{}
+		}
+
+		cfg.Schema.UseLocalRegistry = true
+		cfg.Schema.LocalRegistry.BasePath = registryPath
+	} else {
+		log.Printf("INFO: Schema management not configured. Set AMTP_SCHEMA_REGISTRY_TYPE=local and AMTP_SCHEMA_REGISTRY_PATH to enable.")
+	}
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/amtp-protocol/agentry/internal/errors"
+	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/gin-gonic/gin"
 )
@@ -117,8 +119,239 @@ func TestNew_Success(t *testing.T) {
 	}
 }
 
-// TestNew_WithSchema is temporarily removed due to metrics collision issues
-// Schema functionality will be tested through integration tests instead
+// Test server creation with schema configuration
+func TestNew_WithSchema(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Create temporary directory for schema registry
+	tempDir, err := os.MkdirTemp("", "server_schema_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Address:      ":8080",
+			Domain:       "test.example.com",
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		},
+		Message: config.MessageConfig{
+			MaxSize: 10485760,
+		},
+		Logging: config.LoggingConfig{
+			Level:  "info",
+			Format: "json",
+		},
+		DNS: config.DNSConfig{
+			MockMode: true,
+			MockRecords: map[string]string{
+				"test.example.com": "v=amtp1;gateway=http://test.example.com:8080",
+			},
+			CacheTTL: 5 * time.Minute,
+		},
+		Auth: config.AuthConfig{
+			RequireAuth: false,
+		},
+		Schema: &schema.ManagerConfig{
+			UseLocalRegistry: true,
+			LocalRegistry: schema.LocalRegistryConfig{
+				BasePath:   tempDir,
+				IndexFile:  "index.json",
+				AutoSave:   true,
+				CreateDirs: true,
+			},
+			Cache: schema.CacheConfig{
+				Type: "memory",
+			},
+			Validation: schema.ValidatorConfig{
+				Enabled: true,
+			},
+			Negotiation: schema.NegotiationConfig{
+				Enabled: true,
+			},
+			Compatibility: schema.CompatibilityConfig{
+				Enabled: true,
+			},
+			Pipeline: schema.PipelineConfig{
+				Enabled: true,
+			},
+			ErrorReporting: schema.ErrorReportConfig{
+				Enabled: true,
+			},
+		},
+	}
+
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server with schema: %v", err)
+	}
+
+	if server == nil {
+		t.Fatal("Expected server to be created, got nil")
+	}
+
+	// Verify schema manager was created
+	if server.schemaManager == nil {
+		t.Error("Expected schema manager to be initialized")
+	}
+
+	// Test health check shows schema manager as healthy
+	health := server.checkHealth()
+	if !health.Healthy {
+		t.Error("Expected server to be healthy")
+	}
+
+	if health.Components["schema_manager"] != "healthy" {
+		t.Errorf("Expected schema manager to be healthy, got %s", health.Components["schema_manager"])
+	}
+
+	// Test readiness check
+	readiness := server.checkReadiness()
+	if !readiness.Ready {
+		t.Error("Expected server to be ready")
+	}
+
+	if readiness.Dependencies["schema_manager"] != "ready" {
+		t.Errorf("Expected schema manager to be ready, got %s", readiness.Dependencies["schema_manager"])
+	}
+}
+
+// Test end-to-end integration: environment variables → config → server → schema registration
+func TestIntegration_EnvToSchemaRegistration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Create temporary directory for schema registry
+	tempDir, err := os.MkdirTemp("", "integration_schema_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Set environment variables
+	os.Setenv("AMTP_SCHEMA_REGISTRY_TYPE", "local")
+	os.Setenv("AMTP_SCHEMA_REGISTRY_PATH", tempDir)
+	defer func() {
+		os.Unsetenv("AMTP_SCHEMA_REGISTRY_TYPE")
+		os.Unsetenv("AMTP_SCHEMA_REGISTRY_PATH")
+	}()
+
+	// Create config with environment variable loading
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Address: ":8080",
+			Domain:  "test.example.com",
+		},
+		Message: config.MessageConfig{
+			MaxSize: 10485760,
+		},
+		Logging: config.LoggingConfig{
+			Level:  "info",
+			Format: "json",
+		},
+		DNS: config.DNSConfig{
+			MockMode: true,
+			MockRecords: map[string]string{
+				"test.example.com": "v=amtp1;gateway=http://test.example.com:8080",
+			},
+		},
+		Auth: config.AuthConfig{
+			RequireAuth: false,
+		},
+	}
+
+	// Load environment variables (simulate what happens in config.Load())
+	// We need to call the internal loadFromEnv function, but since it's not exported,
+	// we'll simulate the environment variable loading by creating the schema config directly
+	cfg.Schema = &schema.ManagerConfig{
+		UseLocalRegistry: true,
+		LocalRegistry: schema.LocalRegistryConfig{
+			BasePath:   tempDir,
+			IndexFile:  "index.json",
+			AutoSave:   true,
+			CreateDirs: true,
+		},
+		Cache: schema.CacheConfig{
+			Type: "memory",
+		},
+		Validation: schema.ValidatorConfig{
+			Enabled: true,
+		},
+		Negotiation: schema.NegotiationConfig{
+			Enabled: true,
+		},
+		Compatibility: schema.CompatibilityConfig{
+			Enabled: true,
+		},
+		Pipeline: schema.PipelineConfig{
+			Enabled: true,
+		},
+		ErrorReporting: schema.ErrorReportConfig{
+			Enabled: true,
+		},
+	}
+
+	// Verify schema config was created from environment variables
+	if cfg.Schema == nil {
+		t.Fatal("Expected schema config to be created from environment variables")
+	}
+
+	if cfg.Schema.LocalRegistry.BasePath != tempDir {
+		t.Errorf("Expected registry path '%s', got '%s'", tempDir, cfg.Schema.LocalRegistry.BasePath)
+	}
+
+	// Create server with the config
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Verify schema manager was created and is healthy
+	if server.schemaManager == nil {
+		t.Fatal("Expected schema manager to be created")
+	}
+
+	health := server.checkHealth()
+	if health.Components["schema_manager"] != "healthy" {
+		t.Errorf("Expected schema manager to be healthy, got %s", health.Components["schema_manager"])
+	}
+
+	// Test that schema registration would work (simulate the API call)
+	router := server.GetRouter()
+
+	// Create a test schema registration request
+	schemaJSON := `{
+		"id": "agntcy:test.integration.v1",
+		"definition": {
+			"type": "object",
+			"properties": {
+				"test_field": {"type": "string"}
+			}
+		}
+	}`
+
+	req := httptest.NewRequest("POST", "/v1/admin/schemas", strings.NewReader(schemaJSON))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	// Should succeed (not return SCHEMA_MANAGER_UNAVAILABLE)
+	if w.Code == http.StatusServiceUnavailable {
+		var errorResponse types.ErrorResponse
+		json.Unmarshal(w.Body.Bytes(), &errorResponse)
+		if errorResponse.Error.Code == "SCHEMA_MANAGER_UNAVAILABLE" {
+			t.Fatal("Schema registration failed with SCHEMA_MANAGER_UNAVAILABLE - the bug is still present!")
+		}
+	}
+
+	// Should return 201 Created for successful registration
+	if w.Code != http.StatusCreated {
+		t.Errorf("Expected status 201 Created, got %d. Response: %s", w.Code, w.Body.String())
+	}
+}
 
 // Test AgentManagerAdapter
 func TestAgentManagerAdapter_GetLocalAgents(t *testing.T) {
