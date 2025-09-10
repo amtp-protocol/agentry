@@ -177,8 +177,8 @@ func (s *Server) handleGetMessage(c *gin.Context) {
 		return
 	}
 
-	// Retrieve message from processor
-	message, err := s.processor.GetMessage(messageID)
+	// Retrieve message from storage
+	message, err := s.storage.GetMessage(c.Request.Context(), messageID)
 	if err != nil {
 		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
 			"Message not found", nil)
@@ -199,8 +199,8 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 		return
 	}
 
-	// Retrieve message status from processor
-	status, err := s.processor.GetMessageStatus(messageID)
+	// Retrieve message status from storage
+	status, err := s.storage.GetStatus(c.Request.Context(), messageID)
 	if err != nil {
 		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
 			"Message status not found", nil)
@@ -660,7 +660,12 @@ func (s *Server) handleGetInbox(c *gin.Context) {
 	}
 
 	// Get inbox messages from unified storage and update last access
-	messages := s.processor.GetInboxMessages(recipient)
+	messages, err := s.storage.GetInboxMessages(c.Request.Context(), recipient)
+	if err != nil {
+		s.respondWithError(c, http.StatusInternalServerError, "INBOX_ACCESS_FAILED",
+			"Failed to retrieve inbox messages", nil)
+		return
+	}
 	s.agentRegistry.UpdateLastAccess(recipient)
 
 	s.respondWithSuccess(c, http.StatusOK, gin.H{
@@ -681,7 +686,7 @@ func (s *Server) handleAcknowledgeMessage(c *gin.Context) {
 	}
 
 	// Acknowledge the message using unified storage and update last access
-	if err := s.processor.AcknowledgeMessage(recipient, messageID); err != nil {
+	if err := s.storage.AcknowledgeMessage(c.Request.Context(), recipient, messageID); err != nil {
 		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
 			"Message not found or already acknowledged", map[string]interface{}{
 				"error": err.Error(),

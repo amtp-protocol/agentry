@@ -47,11 +47,106 @@ type MockMessageProcessor struct {
 	statuses      map[string]*types.MessageStatus
 }
 
+type MockStorage struct {
+	messages map[string]*types.Message
+	statuses map[string]*types.MessageStatus
+}
+
 func NewMockMessageProcessor() *MockMessageProcessor {
 	return &MockMessageProcessor{
 		messages: make(map[string]*types.Message),
 		statuses: make(map[string]*types.MessageStatus),
 	}
+}
+
+func NewMockStorage() *MockStorage {
+	return &MockStorage{
+		messages: make(map[string]*types.Message),
+		statuses: make(map[string]*types.MessageStatus),
+	}
+}
+
+// Implement storage.MessageStorage interface
+func (m *MockStorage) StoreMessage(ctx context.Context, message *types.Message) error {
+	m.messages[message.MessageID] = message
+	return nil
+}
+
+func (m *MockStorage) GetMessage(ctx context.Context, messageID string) (*types.Message, error) {
+	if message, exists := m.messages[messageID]; exists {
+		return message, nil
+	}
+	return nil, fmt.Errorf("message not found: %s", messageID)
+}
+
+func (m *MockStorage) DeleteMessage(ctx context.Context, messageID string) error {
+	delete(m.messages, messageID)
+	return nil
+}
+
+func (m *MockStorage) ListMessages(ctx context.Context, filter storage.MessageFilter) ([]*types.Message, error) {
+	var messages []*types.Message
+	for _, msg := range m.messages {
+		messages = append(messages, msg)
+	}
+	return messages, nil
+}
+
+func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
+	m.statuses[messageID] = status
+	return nil
+}
+
+func (m *MockStorage) GetStatus(ctx context.Context, messageID string) (*types.MessageStatus, error) {
+	if status, exists := m.statuses[messageID]; exists {
+		return status, nil
+	}
+	return nil, fmt.Errorf("message status not found: %s", messageID)
+}
+
+func (m *MockStorage) UpdateStatus(ctx context.Context, messageID string, updater storage.StatusUpdater) error {
+	if status, exists := m.statuses[messageID]; exists {
+		return updater(status)
+	}
+	return fmt.Errorf("message status not found: %s", messageID)
+}
+
+func (m *MockStorage) DeleteStatus(ctx context.Context, messageID string) error {
+	delete(m.statuses, messageID)
+	return nil
+}
+
+func (m *MockStorage) GetInboxMessages(ctx context.Context, recipient string) ([]*types.Message, error) {
+	var messages []*types.Message
+	for _, msg := range m.messages {
+		for _, r := range msg.Recipients {
+			if r == recipient {
+				messages = append(messages, msg)
+				break
+			}
+		}
+	}
+	return messages, nil
+}
+
+func (m *MockStorage) AcknowledgeMessage(ctx context.Context, recipient, messageID string) error {
+	// Check if message exists
+	if _, exists := m.messages[messageID]; !exists {
+		return fmt.Errorf("message not found: %s", messageID)
+	}
+	return nil
+}
+
+func (m *MockStorage) Close() error {
+	return nil
+}
+
+func (m *MockStorage) HealthCheck(ctx context.Context) error {
+	return nil
+}
+
+func (m *MockStorage) GetStats(ctx context.Context) (storage.StorageStats, error) {
+	return storage.StorageStats{}, nil
 }
 
 func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message *types.Message, options processing.ProcessingOptions) (*processing.ProcessingResult, error) {
@@ -129,35 +224,6 @@ func (m *MockMessageProcessor) SetProcessError(err error) {
 	m.processError = err
 }
 
-// GetInboxMessages returns messages for a specific recipient (mock implementation)
-func (m *MockMessageProcessor) GetInboxMessages(recipient string) []*types.Message {
-	var inboxMessages []*types.Message
-
-	// For testing, return messages that match the recipient
-	for _, message := range m.messages {
-		for _, msgRecipient := range message.Recipients {
-			if msgRecipient == recipient {
-				inboxMessages = append(inboxMessages, message)
-				break
-			}
-		}
-	}
-
-	return inboxMessages
-}
-
-// AcknowledgeMessage marks a message as acknowledged (mock implementation)
-func (m *MockMessageProcessor) AcknowledgeMessage(recipient, messageID string) error {
-	// For testing, just check if the message exists
-	if _, exists := m.messages[messageID]; !exists {
-		return fmt.Errorf("message not found: %s", messageID)
-	}
-
-	// In a real implementation, this would update the recipient status
-	// For testing, we'll just return success
-	return nil
-}
-
 func createTestServer() *Server {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -178,6 +244,7 @@ func createTestServer() *Server {
 	discoveryService := &discovery.Discovery{}
 	validator := validation.New(cfg.Message.MaxSize)
 	processor := NewMockMessageProcessor()
+	mockStorage := NewMockStorage()
 	logger := logging.NewLogger(cfg.Logging).WithComponent("server")
 
 	// Create agent registry for testing
@@ -217,6 +284,7 @@ func createTestServer() *Server {
 		discovery:     discoveryService,
 		validator:     validator,
 		processor:     processor,
+		storage:       mockStorage,
 		agentRegistry: agentRegistry,
 		schemaManager: nil, // No schema manager in basic test
 		logger:        logger,
@@ -386,7 +454,7 @@ func TestHandleSendMessage_ProcessingFailed(t *testing.T) {
 
 func TestHandleGetMessage_Success(t *testing.T) {
 	server := createTestServer()
-	mockProcessor := server.processor.(*MockMessageProcessor)
+	mockStorage := server.storage.(*MockStorage)
 
 	// First, send a message to store it
 	message := &types.Message{
@@ -399,7 +467,7 @@ func TestHandleGetMessage_Success(t *testing.T) {
 		Subject:        "Test Message",
 		Payload:        json.RawMessage(`{"message": "Hello, World!"}`),
 	}
-	mockProcessor.messages[message.MessageID] = message
+	mockStorage.messages[message.MessageID] = message
 
 	req, err := http.NewRequest("GET", "/v1/messages/"+message.MessageID, nil)
 	if err != nil {
@@ -482,7 +550,7 @@ func TestHandleGetMessage_NotFound(t *testing.T) {
 
 func TestHandleGetMessageStatus_Success(t *testing.T) {
 	server := createTestServer()
-	mockProcessor := server.processor.(*MockMessageProcessor)
+	mockStorage := server.storage.(*MockStorage)
 
 	messageID := "01234567-89ab-7def-8123-456789abcdef"
 	status := &types.MessageStatus{
@@ -500,7 +568,7 @@ func TestHandleGetMessageStatus_Success(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
-	mockProcessor.statuses[messageID] = status
+	mockStorage.statuses[messageID] = status
 
 	req, err := http.NewRequest("GET", "/v1/messages/"+messageID+"/status", nil)
 	if err != nil {
@@ -1526,7 +1594,7 @@ func TestHandleGetInbox_InvalidAPIKey(t *testing.T) {
 
 func TestHandleAcknowledgeMessage_Success(t *testing.T) {
 	server := createTestServer()
-	mockProcessor := server.processor.(*MockMessageProcessor)
+	mockStorage := server.storage.(*MockStorage)
 
 	// Register agent with API key
 	agent := &agents.LocalAgent{
@@ -1545,7 +1613,7 @@ func TestHandleAcknowledgeMessage_Success(t *testing.T) {
 		MessageID:  messageID,
 		Recipients: []string{"testuser@localhost"},
 	}
-	mockProcessor.messages[messageID] = message
+	mockStorage.messages[messageID] = message
 
 	req := httptest.NewRequest("DELETE", "/v1/inbox/testuser@localhost/"+messageID, nil)
 	req.Header.Set("Authorization", "Bearer valid-api-key")

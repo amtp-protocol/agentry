@@ -47,8 +47,4 @@ type DeliveryService interface {
 // MessageProcessorService defines the interface for message processing
 type MessageProcessorService interface {
 	ProcessMessage(ctx context.Context, message *types.Message, options ProcessingOptions) (*ProcessingResult, error)
-	GetMessage(messageID string) (*types.Message, error)
-	GetMessageStatus(messageID string) (*types.MessageStatus, error)
-	GetInboxMessages(recipient string) []*types.Message
-	AcknowledgeMessage(recipient, messageID string) error
 }

@@ -487,21 +487,6 @@ func (mp *MessageProcessor) storeIdempotencyResult(idempotencyKey string, result
 	mp.idempotencyMap[idempotencyKey] = result
 }
 
-// GetMessage retrieves a message by ID
-func (mp *MessageProcessor) GetMessage(messageID string) (*types.Message, error) {
-	return mp.storage.GetMessage(context.Background(), messageID)
-}
-
-// GetMessageStatus retrieves message status by ID
-func (mp *MessageProcessor) GetMessageStatus(messageID string) (*types.MessageStatus, error) {
-	return mp.storage.GetStatus(context.Background(), messageID)
-}
-
-// GetDeliveryEngine returns the delivery engine for local agent management
-func (mp *MessageProcessor) GetDeliveryEngine() *DeliveryEngine {
-	return mp.deliveryEngine.(*DeliveryEngine)
-}
-
 // CleanupExpiredEntries removes expired idempotency entries
 func (mp *MessageProcessor) CleanupExpiredEntries() {
 	mp.idempotencyMux.Lock()
@@ -513,19 +498,4 @@ func (mp *MessageProcessor) CleanupExpiredEntries() {
 			delete(mp.idempotencyMap, key)
 		}
 	}
-}
-
-// GetInboxMessages returns messages for a specific recipient using unified storage view
-func (mp *MessageProcessor) GetInboxMessages(recipient string) []*types.Message {
-	messages, err := mp.storage.GetInboxMessages(context.Background(), recipient)
-	if err != nil {
-		// Log error but return empty slice to maintain interface compatibility
-		return []*types.Message{}
-	}
-	return messages
-}
-
-// AcknowledgeMessage marks a message as acknowledged for a specific recipient
-func (mp *MessageProcessor) AcknowledgeMessage(recipient, messageID string) error {
-	return mp.storage.AcknowledgeMessage(context.Background(), recipient, messageID)
 }

@@ -65,6 +65,7 @@ type Server struct {
 	discovery     processing.DiscoveryService
 	validator     *validation.Validator
 	processor     processing.MessageProcessorService
+	storage       storage.MessageStorage
 	agentRegistry agents.AgentRegistry
 	schemaManager *schema.Manager
 	logger        *logging.Logger
@@ -158,6 +159,7 @@ func New(cfg *config.Config) (*Server, error) {
 		discovery:     discoveryService,
 		validator:     validator,
 		processor:     processor,
+		storage:       messageStorage,
 		agentRegistry: agentRegistry,
 		schemaManager: schemaManager,
 		logger:        logger,

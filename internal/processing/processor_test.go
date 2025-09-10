@@ -263,8 +263,8 @@ func TestGetMessage(t *testing.T) {
 		t.Fatalf("ProcessMessage failed: %v", err)
 	}
 
-	// Retrieve the message
-	retrievedMessage, err := processor.GetMessage(message.MessageID)
+	// Retrieve the message directly from storage
+	retrievedMessage, err := storage.GetMessage(ctx, message.MessageID)
 	if err != nil {
 		t.Fatalf("GetMessage failed: %v", err)
 	}
@@ -279,12 +279,10 @@ func TestGetMessage(t *testing.T) {
 }
 
 func TestGetMessage_NotFound(t *testing.T) {
-	discovery := NewMockDiscovery()
-	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
-	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
-	_, err := processor.GetMessage("nonexistent-id")
+	ctx := context.Background()
+	_, err := storage.GetMessage(ctx, "nonexistent-id")
 	if err == nil {
 		t.Error("Expected error for nonexistent message")
 	}
@@ -314,10 +312,10 @@ func TestGetMessageStatus(t *testing.T) {
 		t.Fatalf("ProcessMessage failed: %v", err)
 	}
 
-	// Retrieve the status
-	status, err := processor.GetMessageStatus(message.MessageID)
+	// Retrieve the status directly from storage
+	status, err := storage.GetStatus(ctx, message.MessageID)
 	if err != nil {
-		t.Fatalf("GetMessageStatus failed: %v", err)
+		t.Fatalf("GetStatus failed: %v", err)
 	}
 
 	if status.MessageID != message.MessageID {
@@ -334,12 +332,10 @@ func TestGetMessageStatus(t *testing.T) {
 }
 
 func TestGetMessageStatus_NotFound(t *testing.T) {
-	discovery := NewMockDiscovery()
-	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
-	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
 
-	_, err := processor.GetMessageStatus("nonexistent-id")
+	ctx := context.Background()
+	_, err := storage.GetStatus(ctx, "nonexistent-id")
 	if err == nil {
 		t.Error("Expected error for nonexistent message status")
 	}
