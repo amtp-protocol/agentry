@@ -200,6 +200,13 @@ export AMTP_LOG_FORMAT=text
 |----------|---------|-------------|
 | `AMTP_METRICS_ENABLED` | `false` | Enable Prometheus metrics collection and `/metrics` endpoint |
 
+##### Schema Configuration
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AMTP_SCHEMA_REGISTRY_TYPE` | - | Schema registry type (set to `local` to enable) |
+| `AMTP_SCHEMA_REGISTRY_PATH` | - | Path to local schema registry directory |
+| `AMTP_SCHEMA_USE_LOCAL_REGISTRY` | `false` | Enable local schema registry (alternative to setting type) |
+
 > ⚠️ **Security Note**: Variables marked with ⚠️ should only be used in development environments. Never enable `AMTP_DNS_ALLOW_HTTP=true` in production as it allows insecure HTTP gateway URLs.
 
 #### Production Configuration
@@ -238,6 +245,10 @@ export AMTP_LOG_FORMAT=json
 
 # Metrics (optional - enable for monitoring)
 export AMTP_METRICS_ENABLED=true
+
+# Schema management (optional - enable for schema validation)
+export AMTP_SCHEMA_REGISTRY_TYPE=local
+export AMTP_SCHEMA_REGISTRY_PATH="/var/lib/agentry/schemas"
 ```
 
 #### Development Configuration
@@ -263,6 +274,11 @@ export AMTP_AUTH_REQUIRED=false
 # Logging (verbose for development)
 export AMTP_LOG_LEVEL=debug
 export AMTP_LOG_FORMAT=text
+
+# Schema management (optional - enable for schema validation)
+export AMTP_SCHEMA_REGISTRY_TYPE=local
+export AMTP_SCHEMA_REGISTRY_PATH="/tmp/schemas"
+# Alternative: export AMTP_SCHEMA_USE_LOCAL_REGISTRY=true
 ```
 
 > 📝 **Development Note**: The development script `./scripts/local-dev.sh` automatically sets these variables for you.
@@ -277,6 +293,15 @@ make docker-build
 docker run -p 8443:8443 \
   -e AMTP_DOMAIN=your-domain.com \
   -e AMTP_TLS_ENABLED=false \
+  agentry:latest
+
+# Run with Docker including schema management
+docker run -p 8443:8443 \
+  -e AMTP_DOMAIN=your-domain.com \
+  -e AMTP_TLS_ENABLED=false \
+  -e AMTP_SCHEMA_REGISTRY_TYPE=local \
+  -e AMTP_SCHEMA_REGISTRY_PATH=/app/schemas \
+  -v $(pwd)/schemas:/app/schemas \
   agentry:latest
 ```
 
