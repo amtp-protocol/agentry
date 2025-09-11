@@ -66,11 +66,12 @@ func generateIdempotencyKey(req *types.SendMessageRequest) string {
 	// Format as UUIDv4 (8-4-4-4-12 format with version 4 indicator)
 	hashHex := hex.EncodeToString(hash[:])
 	// Take first 32 hex chars and format them as UUID
-	return fmt.Sprintf("%s-%s-4%s-%s-%s",
+	// For UUIDv4: version = 4, variant = 8/9/a/b
+	return fmt.Sprintf("%s-%s-4%s-8%s-%s",
 		hashHex[0:8],   // 8 chars
 		hashHex[8:12],  // 4 chars
-		hashHex[13:16], // 3 chars (4th char is version '4')
-		hashHex[16:20], // 4 chars
+		hashHex[13:16], // 3 chars (version '4' prepended)
+		hashHex[16:19], // 3 chars (variant '8' prepended)
 		hashHex[20:32]) // 12 chars
 }
 
@@ -176,7 +177,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 
 	// Return response
 	response := types.SendMessageResponse{
-		MessageID:  messageID,
+		MessageID:  result.MessageID,
 		Status:     status,
 		Recipients: result.Recipients,
 	}
