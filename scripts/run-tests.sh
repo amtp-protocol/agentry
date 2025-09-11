@@ -44,6 +44,7 @@ PACKAGES=(
     "./internal/config"
     "./internal/discovery"
     "./internal/errors"
+    "./internal/metrics"
     "./internal/middleware"
     "./internal/processing"
     "./internal/schema"
@@ -81,10 +82,27 @@ fi
 
 # Run benchmarks
 print_status "Running benchmarks..."
-if go test ./internal/processing -bench=. -benchmem; then
-    print_success "✓ Benchmarks completed"
+BENCHMARK_PACKAGES=(
+    "./internal/processing"
+    "./internal/metrics"
+)
+
+BENCHMARK_SUCCESS=true
+for package in "${BENCHMARK_PACKAGES[@]}"; do
+    print_status "Running benchmarks for: $package"
+    if go test "$package" -bench=. -benchmem; then
+        print_success "✓ $package benchmarks completed"
+    else
+        print_warning "⚠ $package benchmarks had issues"
+        BENCHMARK_SUCCESS=false
+    fi
+    echo ""
+done
+
+if [ "$BENCHMARK_SUCCESS" = true ]; then
+    print_success "✓ All benchmarks completed"
 else
-    print_warning "⚠ Benchmarks had issues"
+    print_warning "⚠ Some benchmarks had issues"
 fi
 
 # Summary
