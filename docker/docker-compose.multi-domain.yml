@@ -119,35 +119,6 @@ services:
       - gateway-partner
     restart: unless-stopped
 
-  # Optional: Monitoring with Prometheus
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: amtp-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    networks:
-      - amtp-network
-    restart: unless-stopped
-
-  # Optional: Grafana for metrics visualization
-  grafana:
-    image: grafana/grafana:latest
-    container_name: amtp-grafana
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - grafana-data:/var/lib/grafana
-    networks:
-      - amtp-network
-    restart: unless-stopped
-
 networks:
   amtp-network:
     driver: bridge
-
-volumes:
-  grafana-data:

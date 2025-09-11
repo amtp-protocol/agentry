@@ -117,7 +117,6 @@ The AMTP protocol supports both **Immediate Path** (direct processing) and **Dur
 - **Duration**: 3 days
 - **Tasks**:
   - Implement structured logging (JSON format)
-  - Add basic Prometheus metrics collection
   - Create health check endpoints with detailed status
   - Add request/response logging with correlation IDs
 
@@ -315,7 +314,6 @@ The AMTP protocol supports both **Immediate Path** (direct processing) and **Dur
 - **HTTP Framework**: Gin or Echo
 - **Core Processing**: In-memory with optional PostgreSQL persistence
 - **Message Queue**: In-memory (core) with optional PostgreSQL-based durability
-- **Monitoring**: Prometheus + Grafana
 - **Logging**: Structured JSON with zerolog
 - **Testing**: Testify + Ginkgo for BDD
 

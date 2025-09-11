@@ -204,8 +204,6 @@ docker-compose -f docker/docker-compose.local-dev.yml up -d
 The compose files include:
 - Multiple gateway instances (one per domain)
 - Nginx reverse proxy for domain-based routing
-- Prometheus monitoring
-- Grafana dashboards
 
 ## Kubernetes Deployments
 
@@ -410,13 +408,6 @@ curl -f https://company-a.com/ready
 curl https://company-a.com/metrics
 ```
 
-### Prometheus Metrics
-
-Key metrics to monitor:
-- `amtp_messages_total` - Total messages processed
-- `amtp_messages_in_flight` - Current active messages
-- `amtp_delivery_duration_seconds` - Message delivery latency
-- `amtp_errors_total` - Error counts by type
 
 ### Logging
 
@@ -428,13 +419,6 @@ logging:
   format: "json"     # json, text
 ```
 
-### Grafana Dashboards
-
-The deployment includes pre-configured Grafana dashboards for:
-- Message throughput and latency
-- Error rates and types
-- Gateway health and availability
-- Resource utilization
 
 ## Troubleshooting
 

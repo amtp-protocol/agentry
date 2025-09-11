@@ -32,14 +32,12 @@ AMTP_DOMAIN="-invalid.com" ./agentry
 - `docker/docker-compose.multi-domain.yml` - Production multi-domain setup
 - `docker/docker-compose.local-dev.yml` - Development setup
 - `docker/nginx/nginx.conf` - Nginx reverse proxy configuration
-- `docker/monitoring/prometheus.yml` - Monitoring configuration
 
 **Features**:
 - **Separate containers** for each domain
 - **Domain-based routing** via Nginx
 - **TLS termination** per domain
 - **Health checks** and monitoring
-- **Prometheus metrics** collection
 
 ### 3. **Automated Deployment Script**
 
@@ -208,12 +206,8 @@ _amtp.partner.com.      IN TXT "v=amtp1;gateway=https://partner.com:443"
 ### **Health Endpoints**
 - `GET /health` - Basic health check
 - `GET /ready` - Readiness probe
-- `GET /metrics` - Prometheus metrics
+- `GET /metrics` - Simple JSON metrics
 
-### **Key Metrics**
-- `amtp_messages_total{domain="company-a.com"}` - Message count per domain
-- `amtp_delivery_duration_seconds{domain="company-a.com"}` - Delivery latency
-- `amtp_errors_total{domain="company-a.com",type="validation"}` - Error rates
 
 ### **Logging**
 - **Structured JSON** logging in production

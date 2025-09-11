@@ -489,6 +489,6 @@ func loadMetricsFromEnv(cfg *Config) {
 		}
 		cfg.Metrics.Enabled = true
 	} else {
-		log.Printf("INFO: Metrics not enabled. Set AMTP_METRICS_ENABLED=true to enable Prometheus metrics.")
+		log.Printf("INFO: Metrics not enabled. Set AMTP_METRICS_ENABLED=true to enable metrics.")
 	}
 }

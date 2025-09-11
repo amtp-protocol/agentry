@@ -690,7 +690,7 @@ func TestIntegration_Idempotency(t *testing.T) {
 }
 
 func BenchmarkIntegration_SendMessage(b *testing.B) {
-	b.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
+	b.Skip("Integration tests temporarily disabled")
 	cfg := createTestConfig()
 
 	srv, err := server.New(cfg)

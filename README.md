@@ -198,7 +198,7 @@ export AMTP_LOG_FORMAT=text
 ##### Metrics Configuration
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AMTP_METRICS_ENABLED` | `false` | Enable Prometheus metrics collection and `/metrics` endpoint |
+| `AMTP_METRICS_ENABLED` | `false` | Enable JSON metrics collection and `/metrics` endpoint |
 
 ##### Schema Configuration
 | Variable | Default | Description |
@@ -418,11 +418,10 @@ GET /ready
 GET /metrics
 ```
 
-**Prometheus Metrics Endpoint** - Available when `AMTP_METRICS_ENABLED=true`:
-- Exposes Prometheus-compatible metrics for monitoring
+**Metrics Endpoint** - Available when `AMTP_METRICS_ENABLED=true`:
+- Exposes JSON metrics for monitoring
 - Includes HTTP request metrics, message processing metrics, and system metrics
 - Secured by the same authentication as other endpoints
-- Use with monitoring systems like Prometheus, Grafana, or similar tools
 
 **Health Check (`/health`)** - Liveness Probe:
 - Verifies that all core components are initialized
