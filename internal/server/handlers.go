@@ -17,7 +17,10 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,6 +33,46 @@ import (
 	"github.com/amtp-protocol/agentry/pkg/uuid"
 	"github.com/gin-gonic/gin"
 )
+
+// generateIdempotencyKey creates a deterministic idempotency key based on request content
+func generateIdempotencyKey(req *types.SendMessageRequest) string {
+	// Create a canonical representation of the request for hashing
+	canonical := struct {
+		Sender       string                    `json:"sender"`
+		Recipients   []string                  `json:"recipients"`
+		Subject      string                    `json:"subject"`
+		Schema       string                    `json:"schema"`
+		Coordination *types.CoordinationConfig `json:"coordination"`
+		Headers      map[string]interface{}    `json:"headers"`
+		Payload      json.RawMessage           `json:"payload"`
+		Attachments  []types.Attachment        `json:"attachments"`
+	}{
+		Sender:       req.Sender,
+		Recipients:   req.Recipients,
+		Subject:      req.Subject,
+		Schema:       req.Schema,
+		Coordination: req.Coordination,
+		Headers:      req.Headers,
+		Payload:      req.Payload,
+		Attachments:  req.Attachments,
+	}
+
+	// Marshal to JSON for consistent hashing
+	data, _ := json.Marshal(canonical)
+
+	// Create SHA256 hash
+	hash := sha256.Sum256(data)
+
+	// Format as UUIDv4 (8-4-4-4-12 format with version 4 indicator)
+	hashHex := hex.EncodeToString(hash[:])
+	// Take first 32 hex chars and format them as UUID
+	return fmt.Sprintf("%s-%s-4%s-%s-%s",
+		hashHex[0:8],   // 8 chars
+		hashHex[8:12],  // 4 chars
+		hashHex[13:16], // 3 chars (4th char is version '4')
+		hashHex[16:20], // 4 chars
+		hashHex[20:32]) // 12 chars
+}
 
 // handleSendMessage handles POST /v1/messages
 func (s *Server) handleSendMessage(c *gin.Context) {
@@ -58,7 +101,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		return
 	}
 
-	// Generate message ID and idempotency key
+	// Generate message ID and deterministic idempotency key
 	messageID, err := uuid.GenerateV7()
 	if err != nil {
 		s.respondWithError(c, http.StatusInternalServerError, "ID_GENERATION_FAILED",
@@ -66,12 +109,8 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		return
 	}
 
-	idempotencyKey, err := uuid.GenerateV4()
-	if err != nil {
-		s.respondWithError(c, http.StatusInternalServerError, "ID_GENERATION_FAILED",
-			"Failed to generate idempotency key", nil)
-		return
-	}
+	// Generate deterministic idempotency key based on request content
+	idempotencyKey := generateIdempotencyKey(&req)
 
 	// Create AMTP message
 	message := &types.Message{
