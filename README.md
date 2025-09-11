@@ -50,8 +50,11 @@ go mod download
 # Build the binary
 make build
 
-# Run the gateway
+# Run the gateway (uses default configuration)
 ./build/agentry
+
+# Or run with custom configuration
+./build/agentry -config config/config.example.yaml
 ```
 
 ### Local Development
@@ -148,6 +151,44 @@ export AMTP_LOG_FORMAT=text
 
 ### Configuration
 
+#### Command Line Options
+
+The Agentry gateway accepts the following optional command line flags:
+
+```bash
+./build/agentry [OPTIONS]
+
+Options:
+  -config string
+        Path to configuration file (YAML) - optional
+  -admin-key-file string
+        Path to admin API key file - optional
+```
+
+**Examples:**
+
+```bash
+# Run with default configuration (environment variables only)
+./build/agentry
+
+# Run with custom config file
+./build/agentry -config /path/to/config.yaml
+
+# Run with admin key file for admin API access
+./build/agentry -admin-key-file /path/to/admin.keys
+
+# Run with both config file and admin key file
+./build/agentry -config /path/to/config.yaml -admin-key-file /path/to/admin.keys
+```
+
+**Configuration Priority (highest to lowest):**
+1. Command line flags (`-admin-key-file`)
+2. Environment variables
+3. Configuration file (if specified with `-config`)
+4. Default values
+
+> **Note**: If no `-config` flag is provided, the gateway will use default configuration values combined with any environment variable overrides. The configuration file is completely optional.
+
 #### Environment Variables
 
 ##### Server Configuration
@@ -188,6 +229,8 @@ export AMTP_LOG_FORMAT=text
 |----------|---------|-------------|
 | `AMTP_AUTH_REQUIRED` | `false` | Require authentication |
 | `AMTP_AUTH_API_KEY_HEADER` | `X-API-Key` | API key header name |
+| `AMTP_ADMIN_KEY_FILE` | - | Path to admin API key file (can also be set via `-admin-key-file` flag) |
+| `AMTP_ADMIN_API_KEY_HEADER` | `X-Admin-Key` | Header name for admin API authentication |
 
 ##### Logging Configuration
 | Variable | Default | Description |
@@ -238,6 +281,7 @@ export AMTP_IDEMPOTENCY_TTL="168h"  # 7 days
 # Authentication configuration
 export AMTP_AUTH_REQUIRED=false
 export AMTP_AUTH_API_KEY_HEADER="X-API-Key"
+export AMTP_ADMIN_KEY_FILE="/etc/agentry/admin.keys"  # Optional: for admin API access
 
 # Logging
 export AMTP_LOG_LEVEL=info
@@ -303,6 +347,12 @@ docker run -p 8443:8443 \
   -e AMTP_SCHEMA_REGISTRY_PATH=/app/schemas \
   -v $(pwd)/schemas:/app/schemas \
   agentry:latest
+
+# Run with custom config file and admin keys
+docker run -p 8443:8443 \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/keys:/app/keys \
+  agentry:latest -config /app/config/production.yaml -admin-key-file /app/keys/admin.keys
 ```
 
 ## API Reference
