@@ -306,14 +306,13 @@ register_agents_with_schemas() {
         }' | format_json
     echo ""
     
-    # Order processing agent - only commerce orders
+    # Order processing agent - only commerce orders (using pull mode for testing)
     log_info "  - Registering order-processor agent (supports only commerce.order.v1)..."
     docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "order-processor",
-            "delivery_mode": "push",
-            "push_target": "https://company-a.local/webhook/orders",
+            "delivery_mode": "pull",
             "supported_schemas": ["agntcy:commerce.order.v1"]
         }' | format_json
     echo ""
@@ -332,14 +331,13 @@ register_agents_with_schemas() {
         }' | format_json
     echo ""
     
-    # Accounting agent - specific finance payment schema
+    # Accounting agent - specific finance payment schema (using pull mode for testing)
     log_info "  - Registering accounting agent (supports finance.payment.v1 only)..."
     docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-b.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "accounting",
-            "delivery_mode": "push",
-            "push_target": "https://company-b.local/webhook/accounting",
+            "delivery_mode": "pull",
             "supported_schemas": ["agntcy:finance.payment.v1"]
         }' | format_json
     echo ""
@@ -358,14 +356,13 @@ register_agents_with_schemas() {
         }' | format_json
     echo ""
     
-    # Integration agent - supports all schemas (empty array means all)
+    # Integration agent - supports all schemas (empty array means all, using pull mode for testing)
     log_info "  - Registering integration agent (supports all schemas)..."
     docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://partner.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "integration",
-            "delivery_mode": "push",
-            "push_target": "https://partner.local/webhook/integration",
+            "delivery_mode": "pull",
             "supported_schemas": []
         }' | format_json
     echo ""
@@ -540,6 +537,100 @@ test_schema_validation() {
     echo ""
 }
 
+# Function to test inbox message retrieval for pull-mode agents
+test_inbox_retrieval() {
+    log_step "Testing inbox message retrieval for pull-mode agents..."
+    
+    # Wait a moment for message processing to complete
+    sleep 2
+    
+    # Test 1: Check sales agent inbox (should have commerce order message)
+    log_info "Test 1: Checking sales agent inbox (should have commerce order)..."
+    local sales_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/admin/agents" | jq -r '.agents."sales@company-a.local".api_key // empty')
+    if [ -n "$sales_response" ] && [ "$sales_response" != "null" ]; then
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/inbox/sales@company-a.local" \
+            -H "Authorization: Bearer $sales_response" | format_json
+    else
+        log_warning "Could not retrieve sales agent API key for inbox access"
+    fi
+    echo ""
+    
+    # Test 2: Check order-processor agent inbox (should have commerce order message)
+    log_info "Test 2: Checking order-processor agent inbox (should have commerce order)..."
+    local processor_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/admin/agents" | jq -r '.agents."order-processor@company-a.local".api_key // empty')
+    if [ -n "$processor_response" ] && [ "$processor_response" != "null" ]; then
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/inbox/order-processor@company-a.local" \
+            -H "Authorization: Bearer $processor_response" | format_json
+    else
+        log_warning "Could not retrieve order-processor agent API key for inbox access"
+    fi
+    echo ""
+    
+    # Test 3: Check payment-processor agent inbox (should have finance payment message)
+    log_info "Test 3: Checking payment-processor agent inbox (should have finance payment)..."
+    local payment_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/admin/agents" | jq -r '.agents."payment-processor@company-b.local".api_key // empty')
+    if [ -n "$payment_response" ] && [ "$payment_response" != "null" ]; then
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/inbox/payment-processor@company-b.local" \
+            -H "Authorization: Bearer $payment_response" | format_json
+    else
+        log_warning "Could not retrieve payment-processor agent API key for inbox access"
+    fi
+    echo ""
+    
+    # Test 4: Check accounting agent inbox (should be empty - finance payment was rejected)
+    log_info "Test 4: Checking accounting agent inbox (should be empty - schema mismatch)..."
+    local accounting_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/admin/agents" | jq -r '.agents."accounting@company-b.local".api_key // empty')
+    if [ -n "$accounting_response" ] && [ "$accounting_response" != "null" ]; then
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/inbox/accounting@company-b.local" \
+            -H "Authorization: Bearer $accounting_response" | format_json
+    else
+        log_warning "Could not retrieve accounting agent API key for inbox access"
+    fi
+    echo ""
+    
+    # Test 5: Check integration agent inbox (should have logistics message)
+    log_info "Test 5: Checking integration agent inbox (should have logistics message)..."
+    local integration_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/admin/agents" | jq -r '.agents."integration@partner.local".api_key // empty')
+    if [ -n "$integration_response" ] && [ "$integration_response" != "null" ]; then
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
+            -H "Authorization: Bearer $integration_response" | format_json
+    else
+        log_warning "Could not retrieve integration agent API key for inbox access"
+    fi
+    echo ""
+}
+
+# Function to test message acknowledgment
+test_message_acknowledgment() {
+    log_step "Testing message acknowledgment for pull-mode agents..."
+    
+    # Test acknowledging a message from the integration agent inbox
+    log_info "Test: Acknowledging first message from integration agent inbox..."
+    local integration_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/admin/agents" | jq -r '.agents."integration@partner.local".api_key // empty')
+    if [ -n "$integration_response" ] && [ "$integration_response" != "null" ]; then
+        # Get the first message ID from inbox
+        local message_id=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
+            -H "Authorization: Bearer $integration_response" | jq -r 'if .messages and (.messages | length > 0) then .messages[0].message_id else empty end')
+        
+        if [ -n "$message_id" ] && [ "$message_id" != "null" ]; then
+            log_info "  - Acknowledging message ID: $message_id"
+            docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X DELETE "http://partner.local:8080/v1/inbox/integration@partner.local/$message_id" \
+                -H "Authorization: Bearer $integration_response" | format_json
+            echo ""
+            
+            # Verify message was removed
+            log_info "  - Verifying message was removed from inbox..."
+            docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
+                -H "Authorization: Bearer $integration_response" | format_json
+        else
+            log_warning "No messages found in integration agent inbox to acknowledge"
+        fi
+    else
+        log_warning "Could not retrieve integration agent API key for acknowledgment test"
+    fi
+    echo ""
+}
+
 # Function to test invalid scenarios
 test_invalid_scenarios() {
     log_step "Testing invalid schema scenarios..."
@@ -647,6 +738,8 @@ main() {
             test_agent_discovery
             test_inter_gateway_communication
             test_schema_validation
+            test_inbox_retrieval
+            test_message_acknowledgment
             test_invalid_scenarios
             log_success "🎉 Comprehensive simulation test completed!"
             log_info "💡 Services are still running. Use '$0 stop' to clean up."
@@ -675,8 +768,12 @@ main() {
             test_connectivity
             test_dns_discovery
             ;;
+        "test-inbox")
+            test_inbox_retrieval
+            test_message_acknowledgment
+            ;;
         *)
-            echo "Usage: $0 {start|stop|logs|status|test-schemas|test-discovery|test-connectivity}"
+            echo "Usage: $0 {start|stop|logs|status|test-schemas|test-discovery|test-connectivity|test-inbox}"
             echo ""
             echo "Commands:"
             echo "  start             - Start services and run full comprehensive test suite"
@@ -686,6 +783,7 @@ main() {
             echo "  test-schemas      - Run schema validation tests only"
             echo "  test-discovery    - Run discovery tests only"
             echo "  test-connectivity - Run connectivity tests only"
+            echo "  test-inbox        - Run inbox retrieval and acknowledgment tests only"
             exit 1
             ;;
     esac
