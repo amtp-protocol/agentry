@@ -176,30 +176,12 @@ func getDefaultConfig() *Config {
 
 // loadFromYAML loads configuration from a YAML file
 func loadFromYAML(cfg *Config, configFile string) error {
-	// Determine config file to use
-	var filePath string
-	if configFile != "" {
-		filePath = configFile
-	} else {
-		// Try default locations in order of preference
-		candidates := []string{
-			"config/config.local.yaml", // Development
-			"config/config.yaml",       // Production
-			"config.yaml",              // Current directory
-		}
-
-		for _, candidate := range candidates {
-			if _, err := os.Stat(candidate); err == nil {
-				filePath = candidate
-				break
-			}
-		}
-	}
-
-	// If no config file found, that's OK - we'll use defaults + env vars
-	if filePath == "" {
+	// Only load config file if explicitly provided via command line
+	if configFile == "" {
 		return nil
 	}
+
+	filePath := configFile
 
 	// Read and parse YAML file
 	data, err := os.ReadFile(filePath)
