@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,6 +50,12 @@ func createTestConfig() *config.Config {
 			CacheTTL:  5 * time.Minute,
 			Timeout:   5 * time.Second,
 			Resolvers: []string{"8.8.8.8:53", "1.1.1.1:53"},
+			MockMode:  true,
+			MockRecords: map[string]string{
+				"test.com":    "v=amtp1;gateway=http://localhost:8080;auth=none;max-size=10485760",
+				"example.com": "v=amtp1;gateway=http://localhost:8080;auth=none;max-size=10485760",
+			},
+			AllowHTTP: true,
 		},
 		Message: config.MessageConfig{
 			MaxSize:           10485760,
@@ -78,8 +85,37 @@ func createTestServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(srv.GetRouter())
 }
 
+// createMockAMTPServer creates a mock AMTP server for testing deliveries
+func createMockAMTPServer(t *testing.T) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mock AMTP server that accepts all messages
+		if r.URL.Path == "/v1/messages" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"message_id":"mock-id","status":"delivered"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+}
+
 func TestIntegration_MessageLifecycle(t *testing.T) {
-	testServer := createTestServer(t)
+	// Create mock AMTP server for deliveries
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	// Update DNS mock records to point to the mock server
+	cfg := createTestConfig()
+	cfg.DNS.MockRecords = map[string]string{
+		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
 	defer testServer.Close()
 
 	// Test 1: Send a message
@@ -106,7 +142,9 @@ func TestIntegration_MessageLifecycle(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		t.Errorf("Expected status 200 or 202, got %d", resp.StatusCode)
+		// Read the error response body for debugging
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("Expected status 200 or 202, got %d. Response: %s", resp.StatusCode, string(body))
 	}
 
 	var sendResponse types.SendMessageResponse
@@ -185,7 +223,22 @@ func TestIntegration_MessageLifecycle(t *testing.T) {
 }
 
 func TestIntegration_MultipleRecipients(t *testing.T) {
-	testServer := createTestServer(t)
+	// Create mock AMTP server for deliveries
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	// Update DNS mock records to point to the mock server
+	cfg := createTestConfig()
+	cfg.DNS.MockRecords = map[string]string{
+		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
 	defer testServer.Close()
 
 	sendRequest := types.SendMessageRequest{
@@ -205,6 +258,13 @@ func TestIntegration_MultipleRecipients(t *testing.T) {
 		t.Fatalf("Failed to send message: %v", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		// Read the error response body for debugging
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("Expected status 200 or 202, got %d. Response: %s", resp.StatusCode, string(body))
+		return
+	}
 
 	var sendResponse types.SendMessageResponse
 	err = json.NewDecoder(resp.Body).Decode(&sendResponse)
@@ -237,7 +297,22 @@ func TestIntegration_MultipleRecipients(t *testing.T) {
 }
 
 func TestIntegration_CoordinationTypes(t *testing.T) {
-	testServer := createTestServer(t)
+	// Create mock AMTP server for deliveries
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	// Update DNS mock records to point to the mock server
+	cfg := createTestConfig()
+	cfg.DNS.MockRecords = map[string]string{
+		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
 	defer testServer.Close()
 
 	tests := []struct {
@@ -547,7 +622,22 @@ func TestIntegration_InvalidMessageID(t *testing.T) {
 }
 
 func TestIntegration_Idempotency(t *testing.T) {
-	testServer := createTestServer(t)
+	// Create mock AMTP server for deliveries
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	// Update DNS mock records to point to the mock server
+	cfg := createTestConfig()
+	cfg.DNS.MockRecords = map[string]string{
+		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
 	defer testServer.Close()
 
 	sendRequest := types.SendMessageRequest{
