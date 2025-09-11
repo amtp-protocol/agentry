@@ -36,7 +36,6 @@ import (
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/internal/validation"
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 // MockMessageProcessor for testing
@@ -254,27 +253,7 @@ func createTestServer() *Server {
 	}
 	agentRegistry := agents.NewRegistry(agentRegistryConfig)
 
-	// Create a new metrics registry for each test to avoid conflicts
-	testMetrics := &metrics.Metrics{
-		HTTPRequestsTotal:         prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_http_requests_total", Help: "Test HTTP requests"}, []string{"method", "path", "status_code"}),
-		HTTPRequestDuration:       prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_http_request_duration", Help: "Test HTTP duration"}, []string{"method", "path", "status_code"}),
-		HTTPRequestsInFlight:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_http_requests_in_flight", Help: "Test HTTP requests in flight"}),
-		MessagesTotal:             prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_messages_total", Help: "Test messages"}, []string{"status", "coordination_type"}),
-		MessageProcessingDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_processing_duration", Help: "Test processing duration"}, []string{"status", "coordination_type"}),
-		MessagesInFlight:          prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_messages_in_flight", Help: "Test messages in flight"}),
-		MessageSizeBytes:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_message_size", Help: "Test message size"}, []string{"schema"}),
-		DeliveriesTotal:           prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_deliveries_total", Help: "Test deliveries"}, []string{"status"}),
-		DeliveryDuration:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_delivery_duration", Help: "Test delivery duration"}, []string{"status"}),
-		DeliveryAttempts:          prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_delivery_attempts", Help: "Test delivery attempts"}, []string{"status"}),
-		DeliveryRetries:           prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_delivery_retries", Help: "Test delivery retries"}, []string{"reason"}),
-		DiscoveryTotal:            prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_discovery_total", Help: "Test discovery"}, []string{"status"}),
-		DiscoveryDuration:         prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_discovery_duration", Help: "Test discovery duration"}, []string{"domain", "method", "status"}),
-		DiscoveryCacheHits:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_discovery_cache", Help: "Test discovery cache"}, []string{"domain"}),
-		ConnectionsActive:         prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_connections_active", Help: "Test connections"}),
-		MemoryUsageBytes:          prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_memory_usage", Help: "Test memory"}),
-		GoroutinesActive:          prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_goroutines", Help: "Test goroutines"}),
-		ErrorsTotal:               prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_errors_total", Help: "Test errors"}, []string{"component", "error_code", "error_type"}),
-	}
+	testMetrics := metrics.NewMetricsProvider()
 
 	router := gin.New()
 
@@ -843,18 +822,7 @@ func createTestServerWithRealProcessor() *Server {
 
 	logger := logging.NewLogger(cfg.Logging).WithComponent("server")
 
-	// Create a new metrics registry for each test to avoid conflicts
-	testMetrics := &metrics.Metrics{
-		HTTPRequestsTotal:         prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_http_requests_total", Help: "Test HTTP requests"}, []string{"method", "path", "status_code"}),
-		HTTPRequestDuration:       prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_http_request_duration", Help: "Test HTTP duration"}, []string{"method", "path", "status_code"}),
-		HTTPRequestsInFlight:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_http_requests_in_flight", Help: "Test HTTP requests in flight"}),
-		MessagesTotal:             prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_messages_total", Help: "Test messages"}, []string{"status", "coordination_type"}),
-		MessageProcessingDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_processing_duration", Help: "Test processing duration"}, []string{"status", "coordination_type"}),
-		MessagesInFlight:          prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_messages_in_flight", Help: "Test messages in flight"}),
-		DeliveryAttempts:          prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_delivery_attempts", Help: "Test delivery attempts"}, []string{"status", "domain"}),
-		DeliveryDuration:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_delivery_duration", Help: "Test delivery duration"}, []string{"status", "domain"}),
-		ErrorsTotal:               prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_errors_total", Help: "Test errors"}, []string{"component", "error_code", "error_type"}),
-	}
+	testMetrics := metrics.NewMetricsProvider()
 
 	server := &Server{
 		config:        cfg,

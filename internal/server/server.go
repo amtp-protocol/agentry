@@ -34,7 +34,6 @@ import (
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/validation"
 	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // AgentManagerAdapter adapts agents.Registry to validation.AgentManager
@@ -69,7 +68,7 @@ type Server struct {
 	agentRegistry agents.AgentRegistry
 	schemaManager *schema.Manager
 	logger        *logging.Logger
-	metrics       *metrics.Metrics
+	metrics       metrics.MetricsProvider
 }
 
 // New creates a new AMTP server
@@ -90,9 +89,9 @@ func New(cfg *config.Config) (*Server, error) {
 	logger := logging.NewLogger(cfg.Logging).WithComponent("server")
 
 	// Create metrics if enabled
-	var metricsInstance *metrics.Metrics
+	var metricsInstance metrics.MetricsProvider
 	if cfg.Metrics != nil && cfg.Metrics.Enabled {
-		metricsInstance = metrics.NewMetrics()
+		metricsInstance = metrics.NewMetricsProvider()
 	}
 
 	// Create schema manager (if configured)
@@ -295,7 +294,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	if s.metrics != nil {
-		s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+		s.router.GET("/metrics", s.handleMetrics)
 	}
 }
 
@@ -346,6 +345,24 @@ func (s *Server) handleReady(c *gin.Context) {
 	}
 
 	c.JSON(statusCode, readiness)
+}
+
+// handleMetrics handles metrics requests
+func (s *Server) handleMetrics(c *gin.Context) {
+	if s.metrics == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "metrics not enabled"})
+		return
+	}
+
+	data, err := s.metrics.ToJSON()
+	if err != nil {
+		s.logger.Error("Failed to serialize metrics", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to serialize metrics"})
+		return
+	}
+
+	c.Header("Content-Type", "application/json")
+	c.Data(http.StatusOK, "application/json", data)
 }
 
 // HealthStatus represents the health status of the gateway

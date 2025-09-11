@@ -54,7 +54,9 @@ func (s *Server) respondWithError(c *gin.Context, statusCode int, code, message 
 	}
 
 	// Record error metrics
-	s.metrics.RecordError("server", code, getErrorType(statusCode))
+	if s.metrics != nil {
+		s.metrics.RecordError("server", code, getErrorType(statusCode))
+	}
 
 	c.JSON(statusCode, errorResponse)
 }
@@ -83,7 +85,9 @@ func (s *Server) respondWithAMTPError(c *gin.Context, err *errors.AMTPError) {
 	}
 
 	// Record error metrics
-	s.metrics.RecordError("server", string(err.Code), getErrorType(statusCode))
+	if s.metrics != nil {
+		s.metrics.RecordError("server", string(err.Code), getErrorType(statusCode))
+	}
 
 	c.JSON(statusCode, errorResponse)
 }
@@ -103,12 +107,14 @@ func getErrorType(statusCode int) string {
 // respondWithSuccess sends a successful response with metrics
 func (s *Server) respondWithSuccess(c *gin.Context, statusCode int, data interface{}) {
 	// Record success metrics
-	s.metrics.RecordHTTPRequest(
-		c.Request.Method,
-		c.FullPath(),
-		statusCode,
-		time.Since(c.GetTime("start_time")),
-	)
+	if s.metrics != nil {
+		s.metrics.RecordHTTPRequest(
+			c.Request.Method,
+			c.FullPath(),
+			statusCode,
+			time.Since(c.GetTime("start_time")),
+		)
+	}
 
 	c.JSON(statusCode, data)
 }

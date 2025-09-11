@@ -34,8 +34,10 @@ import (
 // handleSendMessage handles POST /v1/messages
 func (s *Server) handleSendMessage(c *gin.Context) {
 	timer := time.Now()
-	s.metrics.IncMessagesInFlight()
-	defer s.metrics.DecMessagesInFlight()
+	if s.metrics != nil {
+		s.metrics.IncMessagesInFlight()
+		defer s.metrics.DecMessagesInFlight()
+	}
 	var req types.SendMessageRequest
 
 	// Parse request body
@@ -146,13 +148,15 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		coordinationType = message.Coordination.Type
 	}
 
-	s.metrics.RecordMessage(
-		string(result.Status),
-		coordinationType,
-		time.Since(timer),
-		message.Size(),
-		message.Schema,
-	)
+	if s.metrics != nil {
+		s.metrics.RecordMessage(
+			string(result.Status),
+			coordinationType,
+			time.Since(timer),
+			message.Size(),
+			message.Schema,
+		)
+	}
 
 	// Log message processing
 	s.logger.LogMessageProcessing(

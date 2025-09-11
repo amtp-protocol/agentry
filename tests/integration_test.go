@@ -79,7 +79,6 @@ func createTestServer(t *testing.T) *httptest.Server {
 }
 
 func TestIntegration_MessageLifecycle(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
@@ -186,7 +185,6 @@ func TestIntegration_MessageLifecycle(t *testing.T) {
 }
 
 func TestIntegration_MultipleRecipients(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
@@ -239,7 +237,6 @@ func TestIntegration_MultipleRecipients(t *testing.T) {
 }
 
 func TestIntegration_CoordinationTypes(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
@@ -330,7 +327,6 @@ func TestIntegration_CoordinationTypes(t *testing.T) {
 }
 
 func TestIntegration_ErrorHandling(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
@@ -423,7 +419,6 @@ func TestIntegration_ErrorHandling(t *testing.T) {
 }
 
 func TestIntegration_HealthEndpoints(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
@@ -465,7 +460,6 @@ func TestIntegration_HealthEndpoints(t *testing.T) {
 }
 
 func TestIntegration_AgentDiscoveryEndpoint(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
@@ -503,7 +497,6 @@ func TestIntegration_AgentDiscoveryEndpoint(t *testing.T) {
 }
 
 func TestIntegration_InvalidMessageID(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
@@ -554,7 +547,6 @@ func TestIntegration_InvalidMessageID(t *testing.T) {
 }
 
 func TestIntegration_Idempotency(t *testing.T) {
-	t.Skip("Integration tests temporarily disabled due to Prometheus metrics registration conflicts")
 	testServer := createTestServer(t)
 	defer testServer.Close()
 
