@@ -177,7 +177,7 @@ func New(cfg *config.Config) (*Server, error) {
 	// Create HTTP server
 	server.httpServer = &http.Server{
 		Addr:         cfg.Server.Address,
-		Handler:      router,
+		Handler:      server.router,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
@@ -246,55 +246,58 @@ func (s *Server) setupMiddleware() {
 
 // setupRoutes configures routes for the server
 func (s *Server) setupRoutes() {
+	// Capture server instance to avoid method value binding issues
+	server := s
+
 	// Health check endpoints
-	s.router.GET("/health", s.handleHealth)
-	s.router.GET("/ready", s.handleReady)
+	server.router.GET("/health", func(c *gin.Context) { server.handleHealth(c) })
+	server.router.GET("/ready", func(c *gin.Context) { server.handleReady(c) })
 
 	// AMTP API v1
-	v1 := s.router.Group("/v1")
+	v1 := server.router.Group("/v1")
 	{
 		// Message endpoints (public)
-		v1.POST("/messages", s.withRequestMetrics(s.handleSendMessage))
-		v1.GET("/messages/:id", s.withRequestMetrics(s.handleGetMessage))
-		v1.GET("/messages/:id/status", s.withRequestMetrics(s.handleGetMessageStatus))
-		v1.GET("/messages", s.withRequestMetrics(s.handleListMessages))
+		v1.POST("/messages", server.withRequestMetrics(func(c *gin.Context) { server.handleSendMessage(c) }))
+		v1.GET("/messages/:id", server.withRequestMetrics(func(c *gin.Context) { server.handleGetMessage(c) }))
+		v1.GET("/messages/:id/status", server.withRequestMetrics(func(c *gin.Context) { server.handleGetMessageStatus(c) }))
+		v1.GET("/messages", server.withRequestMetrics(func(c *gin.Context) { server.handleListMessages(c) }))
 
 		// Discovery endpoints (public)
-		v1.GET("/capabilities/:domain", s.withRequestMetrics(s.handleGetCapabilities))
+		v1.GET("/capabilities/:domain", server.withRequestMetrics(func(c *gin.Context) { server.handleGetCapabilities(c) }))
 
 		// Agent discovery endpoints (public)
 		discoveryGroup := v1.Group("/discovery")
 		{
-			discoveryGroup.GET("/agents", s.withRequestMetrics(s.handleDiscoverAgents))
-			discoveryGroup.GET("/agents/:domain", s.withRequestMetrics(s.handleDiscoverAgentsByDomain))
+			discoveryGroup.GET("/agents", server.withRequestMetrics(func(c *gin.Context) { server.handleDiscoverAgents(c) }))
+			discoveryGroup.GET("/agents/:domain", server.withRequestMetrics(func(c *gin.Context) { server.handleDiscoverAgentsByDomain(c) }))
 		}
 
 		// Inbox endpoints (agent protected - these use agent API keys, not admin keys)
-		v1.GET("/inbox/:recipient", s.withRequestMetrics(s.handleGetInbox))
-		v1.DELETE("/inbox/:recipient/:messageId", s.withRequestMetrics(s.handleAcknowledgeMessage))
+		v1.GET("/inbox/:recipient", server.withRequestMetrics(func(c *gin.Context) { server.handleGetInbox(c) }))
+		v1.DELETE("/inbox/:recipient/:messageId", server.withRequestMetrics(func(c *gin.Context) { server.handleAcknowledgeMessage(c) }))
 
 		// Admin endpoints (admin protected)
 		admin := v1.Group("/admin")
-		admin.Use(middleware.AdminAuth(s.config.Auth))
+		admin.Use(middleware.AdminAuth(server.config.Auth))
 		{
 			// Agent management endpoints
-			admin.POST("/agents", s.withRequestMetrics(s.handleRegisterAgent))
-			admin.DELETE("/agents/:address", s.withRequestMetrics(s.handleUnregisterAgent))
-			admin.GET("/agents", s.withRequestMetrics(s.handleListAgents))
+			admin.POST("/agents", server.withRequestMetrics(func(c *gin.Context) { server.handleRegisterAgent(c) }))
+			admin.DELETE("/agents/:address", server.withRequestMetrics(func(c *gin.Context) { server.handleUnregisterAgent(c) }))
+			admin.GET("/agents", server.withRequestMetrics(func(c *gin.Context) { server.handleListAgents(c) }))
 
 			// Schema management endpoints
-			admin.POST("/schemas", s.withRequestMetrics(s.handleRegisterSchema))
-			admin.GET("/schemas", s.withRequestMetrics(s.handleListSchemas))
-			admin.GET("/schemas/:id", s.withRequestMetrics(s.handleGetSchema))
-			admin.PUT("/schemas/:id", s.withRequestMetrics(s.handleUpdateSchema))
-			admin.DELETE("/schemas/:id", s.withRequestMetrics(s.handleDeleteSchema))
-			admin.POST("/schemas/:id/validate", s.withRequestMetrics(s.handleValidateSchema))
-			admin.GET("/schemas/stats", s.withRequestMetrics(s.handleSchemaStats))
+			admin.POST("/schemas", server.withRequestMetrics(func(c *gin.Context) { server.handleRegisterSchema(c) }))
+			admin.GET("/schemas", server.withRequestMetrics(func(c *gin.Context) { server.handleListSchemas(c) }))
+			admin.GET("/schemas/:id", server.withRequestMetrics(func(c *gin.Context) { server.handleGetSchema(c) }))
+			admin.PUT("/schemas/:id", server.withRequestMetrics(func(c *gin.Context) { server.handleUpdateSchema(c) }))
+			admin.DELETE("/schemas/:id", server.withRequestMetrics(func(c *gin.Context) { server.handleDeleteSchema(c) }))
+			admin.POST("/schemas/:id/validate", server.withRequestMetrics(func(c *gin.Context) { server.handleValidateSchema(c) }))
+			admin.GET("/schemas/stats", server.withRequestMetrics(func(c *gin.Context) { server.handleSchemaStats(c) }))
 		}
 	}
 
-	if s.metrics != nil {
-		s.router.GET("/metrics", s.handleMetrics)
+	if server.metrics != nil {
+		server.router.GET("/metrics", func(c *gin.Context) { server.handleMetrics(c) })
 	}
 }
 
