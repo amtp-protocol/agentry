@@ -103,7 +103,7 @@ curl -X POST http://localhost:8080/v1/admin/agents \
 #   }
 # }
 
-# Send a local message (will work)
+# Send a local message
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
