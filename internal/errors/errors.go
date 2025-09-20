@@ -64,7 +64,7 @@ const (
 	// Authentication and authorization errors
 	ErrUnauthorized       ErrorCode = "UNAUTHORIZED"
 	ErrForbidden          ErrorCode = "FORBIDDEN"
-	ErrInvalidCredentials ErrorCode = "INVALID_CREDENTIALS"
+	ErrInvalidCredentials ErrorCode = "INVALID_CREDENTIALS" // #nosec G101 -- false positive
 	ErrTokenExpired       ErrorCode = "TOKEN_EXPIRED"
 
 	// Rate limiting errors

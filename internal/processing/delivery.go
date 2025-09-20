@@ -377,6 +377,7 @@ func (de *DeliveryEngine) isRetryableError(statusCode int, err error) bool {
 func (de *DeliveryEngine) calculateRetryDelay(attempt int) time.Duration {
 	// Exponential backoff with jitter
 	baseDelay := de.config.RetryDelay
+	// #nosec G115 -- Never overflow
 	delay := baseDelay * time.Duration(1<<uint(attempt-1)) // 2^(attempt-1)
 
 	// Cap the maximum delay

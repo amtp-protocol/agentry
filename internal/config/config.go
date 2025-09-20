@@ -23,6 +23,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -181,7 +182,7 @@ func loadFromYAML(cfg *Config, configFile string) error {
 		return nil
 	}
 
-	filePath := configFile
+	filePath := filepath.Clean(configFile)
 
 	// Read and parse YAML file
 	data, err := os.ReadFile(filePath)

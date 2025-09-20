@@ -225,7 +225,7 @@ type TestDataGenerator struct {
 // NewTestDataGenerator creates a new test data generator
 func NewTestDataGenerator() *TestDataGenerator {
 	return &TestDataGenerator{
-		rand: rand.New(rand.NewSource(time.Now().UnixNano())),
+		rand: rand.New(rand.NewSource(time.Now().UnixNano())), // #nosec G404 -- acceptable for test data
 	}
 }
 

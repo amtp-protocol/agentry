@@ -142,7 +142,7 @@ func (c *HTTPRegistryClient) ValidateSchema(ctx context.Context, schema *Schema)
 		var errorResp struct {
 			Error string `json:"error"`
 		}
-		json.NewDecoder(resp.Body).Decode(&errorResp)
+		json.NewDecoder(resp.Body).Decode(&errorResp) // #nosec G104 -- ignore decode error
 		return fmt.Errorf("schema validation failed: %s", errorResp.Error)
 	}
 

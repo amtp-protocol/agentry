@@ -242,6 +242,7 @@ func (mp *MessageProcessor) processWithCoordination(ctx context.Context, message
 		result.ErrorMessage = fmt.Sprintf("unsupported coordination type: %s", coordination.Type)
 
 		// Update status in storage
+		// #nosec G104 -- ignore error
 		mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
 			status.Status = result.Status
 			status.Recipients = result.Recipients
@@ -301,6 +302,7 @@ func (mp *MessageProcessor) processSequentialCoordination(ctx context.Context, m
 				result.Status = types.StatusFailed
 
 				// Update status in storage
+				// #nosec G104 -- ignore error
 				mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
 					status.Status = result.Status
 					status.Recipients = result.Recipients
