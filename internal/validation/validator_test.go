@@ -287,10 +287,6 @@ func TestNewWithAgentManager(t *testing.T) {
 	agentManager := NewMockAgentManager()
 	validator := NewWithAgentManager(10*1024*1024, nil, agentManager)
 
-	if validator == nil {
-		t.Error("NewWithAgentManager should return a validator")
-	}
-
 	if validator.agentManager != agentManager {
 		t.Error("Validator should have the provided agent manager")
 	}

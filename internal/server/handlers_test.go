@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/amtp-protocol/agentry/internal/discovery"
@@ -35,7 +37,6 @@ import (
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/internal/validation"
-	"github.com/gin-gonic/gin"
 )
 
 // MockMessageProcessor for testing

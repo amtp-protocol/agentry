@@ -134,9 +134,10 @@ func TestDiscoverAgents(t *testing.T) {
 	// Verify individual agents
 	var salesAgent, supportAgent *Agent
 	for i, agent := range agentResponse.Agents {
-		if agent.Address == "sales@example.com" {
+		switch agent.Address {
+		case "sales@example.com":
 			salesAgent = &agentResponse.Agents[i]
-		} else if agent.Address == "support@example.com" {
+		case "support@example.com":
 			supportAgent = &agentResponse.Agents[i]
 		}
 	}

@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/amtp-protocol/agentry/internal/discovery"
@@ -33,7 +35,6 @@ import (
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/validation"
-	"github.com/gin-gonic/gin"
 )
 
 // AgentManagerAdapter adapts agents.Registry to validation.AgentManager

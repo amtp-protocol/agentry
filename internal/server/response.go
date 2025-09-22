@@ -19,9 +19,10 @@ package server
 import (
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/amtp-protocol/agentry/internal/errors"
 	"github.com/amtp-protocol/agentry/internal/types"
-	"github.com/gin-gonic/gin"
 )
 
 // respondWithError sends a standardized error response

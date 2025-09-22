@@ -526,7 +526,7 @@ func TestValidationPipeline_EdgeCases(t *testing.T) {
 		}()
 
 		_, err := pipeline.ValidateMessage(context.TODO(), message, schemaID)
-		// Error is expected with nil context, but it shouldn't panic
+		//nolint:staticcheck // Error is expected with nil context, but it shouldn't panic
 		if err != nil {
 			// This is expected
 		}

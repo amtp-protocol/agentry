@@ -25,9 +25,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/amtp-protocol/agentry/internal/config"
 )
 
 // Logger creates a structured logging middleware
