@@ -33,8 +33,8 @@ func GenerateV7() (string, error) {
 	timestamp := time.Now().UnixMilli()
 
 	// Set timestamp (first 48 bits)
-	binary.BigEndian.PutUint32(uuid[0:4], uint32(timestamp>>16))
-	binary.BigEndian.PutUint16(uuid[4:6], uint16(timestamp))
+	binary.BigEndian.PutUint32(uuid[0:4], uint32(timestamp>>16)) // #nosec G115 -- false positive
+	binary.BigEndian.PutUint16(uuid[4:6], uint16(timestamp))     // #nosec G115 -- false positive
 
 	// Generate random bytes for the rest
 	if _, err := rand.Read(uuid[6:]); err != nil {
@@ -178,5 +178,5 @@ func ExtractTimestamp(uuid string) (time.Time, error) {
 		timestamp = timestamp*16 + digit
 	}
 
-	return time.UnixMilli(int64(timestamp)), nil
+	return time.UnixMilli(int64(timestamp)), nil // #nosec G115 -- Never overflow
 }

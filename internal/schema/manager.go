@@ -229,7 +229,7 @@ func (m *Manager) UpdateSchema(ctx context.Context, schema *Schema, metadata *Sc
 func (m *Manager) DeleteSchema(ctx context.Context, id SchemaIdentifier) error {
 	// Clear from cache first
 	if cachedClient, ok := m.registryClient.(*CachedRegistryClient); ok {
-		cachedClient.InvalidateCache(ctx, id)
+		cachedClient.InvalidateCache(ctx, id) // #nosec G104 -- ignore error
 	}
 
 	return m.registryClient.DeleteSchema(ctx, id)

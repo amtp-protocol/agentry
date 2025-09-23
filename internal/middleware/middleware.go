@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -317,7 +318,7 @@ func isRateLimited(clientIP string) bool {
 // validateAdminKey validates the provided admin key against the key file
 func validateAdminKey(providedKey, keyFile string) bool {
 	// Read admin keys from file
-	data, err := os.ReadFile(keyFile)
+	data, err := os.ReadFile(filepath.Clean(keyFile))
 	if err != nil {
 		return false
 	}

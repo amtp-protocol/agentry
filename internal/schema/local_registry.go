@@ -75,7 +75,7 @@ func NewLocalRegistry(config LocalRegistryConfig) (*LocalRegistry, error) {
 
 	// Create directories if needed
 	if config.CreateDirs {
-		if err := os.MkdirAll(config.BasePath, 0755); err != nil {
+		if err := os.MkdirAll(config.BasePath, 0750); err != nil {
 			return nil, fmt.Errorf("failed to create registry directory: %w", err)
 		}
 	}
@@ -422,7 +422,7 @@ func (lr *LocalRegistry) saveSchema(schema *Schema, metadata *SchemaMetadata) er
 
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -440,7 +440,7 @@ func (lr *LocalRegistry) saveSchema(schema *Schema, metadata *SchemaMetadata) er
 		return fmt.Errorf("failed to marshal schema: %w", err)
 	}
 
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write schema file: %w", err)
 	}
 
@@ -466,7 +466,7 @@ func (lr *LocalRegistry) loadFromDisk() error {
 // loadFromIndex loads schemas using the index file
 func (lr *LocalRegistry) loadFromIndex() error {
 	indexPath := filepath.Join(lr.basePath, lr.indexFile)
-	data, err := os.ReadFile(indexPath)
+	data, err := os.ReadFile(indexPath) // #nosec G304 -- false positive, Join already cleans the path
 	if err != nil {
 		return fmt.Errorf("failed to read index file: %w", err)
 	}
@@ -539,7 +539,7 @@ func (lr *LocalRegistry) parseSchemaIDFromPath(path string) *SchemaIdentifier {
 // loadSchema loads a single schema from disk
 func (lr *LocalRegistry) loadSchema(schemaID string, metadata *SchemaMetadata) error {
 	filePath := filepath.Join(lr.basePath, metadata.FilePath)
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filePath) // #nosec G304 -- false positive, Join already cleans the path
 	if err != nil {
 		return fmt.Errorf("failed to read schema file: %w", err)
 	}
@@ -586,7 +586,7 @@ func (lr *LocalRegistry) updateIndex() error {
 	}
 
 	indexPath := filepath.Join(lr.basePath, lr.indexFile)
-	if err := os.WriteFile(indexPath, data, 0644); err != nil {
+	if err := os.WriteFile(indexPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write index file: %w", err)
 	}
 

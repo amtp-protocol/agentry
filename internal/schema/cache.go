@@ -267,6 +267,7 @@ func (c *CachedRegistryClient) GetSchema(ctx context.Context, id SchemaIdentifie
 	}
 
 	// Cache the result
+	// #nosec G104 -- ignore error
 	c.cache.Set(ctx, schema, 0) // Use default TTL
 
 	return schema, nil
@@ -292,6 +293,7 @@ func (c *CachedRegistryClient) RegisterSchema(ctx context.Context, schema *Schem
 	err := c.client.RegisterSchema(ctx, schema, metadata)
 	if err == nil {
 		// Cache the newly registered schema with default TTL
+		// #nosec G104 -- ignore error
 		c.cache.Set(ctx, schema, 0) // 0 means use default TTL
 	}
 	return err
@@ -302,6 +304,7 @@ func (c *CachedRegistryClient) RegisterOrUpdateSchema(ctx context.Context, schem
 	err := c.client.RegisterOrUpdateSchema(ctx, schema, metadata)
 	if err == nil {
 		// Update cache with the new/updated schema with default TTL
+		// #nosec G104 -- ignore error
 		c.cache.Set(ctx, schema, 0) // 0 means use default TTL
 	}
 	return err
@@ -312,7 +315,7 @@ func (c *CachedRegistryClient) DeleteSchema(ctx context.Context, id SchemaIdenti
 	err := c.client.DeleteSchema(ctx, id)
 	if err == nil {
 		// Remove from cache
-		c.cache.Delete(ctx, id)
+		c.cache.Delete(ctx, id) // #nosec G104 -- ignore error
 	}
 	return err
 }

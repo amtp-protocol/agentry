@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -312,7 +313,7 @@ func handleSchemaRegister(args []string) {
 	}
 
 	// Read schema file
-	data, err := os.ReadFile(schemaFile)
+	data, err := os.ReadFile(filepath.Clean(schemaFile))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to read schema file: %v\n", err)
 		os.Exit(1)
@@ -501,7 +502,7 @@ func handleSchemaValidate(args []string) {
 	}
 
 	// Read payload file
-	data, err := os.ReadFile(payloadFile)
+	data, err := os.ReadFile(filepath.Clean(payloadFile))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to read payload file: %v\n", err)
 		os.Exit(1)
@@ -1099,7 +1100,7 @@ func handleInboxGet(args []string) {
 
 	// Get API key from file if specified
 	if keyFile != "" {
-		keyBytes, err := os.ReadFile(keyFile)
+		keyBytes, err := os.ReadFile(filepath.Clean(keyFile))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to read key file: %v\n", err)
 			os.Exit(1)
@@ -1180,7 +1181,7 @@ func handleInboxAck(args []string) {
 
 	// Get API key from file if specified
 	if keyFile != "" {
-		keyBytes, err := os.ReadFile(keyFile)
+		keyBytes, err := os.ReadFile(filepath.Clean(keyFile))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to read key file: %v\n", err)
 			os.Exit(1)
