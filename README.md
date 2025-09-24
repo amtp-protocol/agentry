@@ -774,7 +774,7 @@ This implementation follows the [AMTP Protocol Specification v1.0](./amtp_protoc
 
 Key features:
 - Universal addressing using `agent@domain` format
-- Transparent protocol upgrade with email fallback
+- Transparent protocol upgrade with SMTP bridging
 - At-least-once delivery with idempotency guarantees
 - Local agent management with pull/push delivery modes
 - Standard schema integration via AGNTCY framework
