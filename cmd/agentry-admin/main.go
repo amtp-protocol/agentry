@@ -584,69 +584,6 @@ func handleSchemaStats(args []string) {
 	fmt.Println(string(prettyJSON))
 }
 
-func makeAPIRequest(method, endpoint string, body interface{}) ([]byte, error) {
-	url := strings.TrimRight(gatewayURL, "/") + endpoint
-
-	if verbose {
-		fmt.Printf("Making %s request to: %s\n", method, url)
-	}
-
-	var reqBody io.Reader
-	if body != nil {
-		jsonData, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request body: %w", err)
-		}
-		reqBody = bytes.NewBuffer(jsonData)
-
-		if verbose {
-			fmt.Printf("Request body: %s\n", string(jsonData))
-		}
-	}
-
-	req, err := http.NewRequest(method, url, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if verbose {
-		fmt.Printf("Response status: %d\n", resp.StatusCode)
-		fmt.Printf("Response body: %s\n", string(respBody))
-	}
-
-	if resp.StatusCode >= 400 {
-		// Try to parse error response
-		var errorResp map[string]interface{}
-		if json.Unmarshal(respBody, &errorResp) == nil {
-			if msg, ok := errorResp["message"].(string); ok {
-				return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, msg)
-			}
-		}
-		return nil, fmt.Errorf("API error (%d): %s", resp.StatusCode, string(respBody))
-	}
-
-	return respBody, nil
-}
-
 func makeAdminAPIRequest(method, endpoint string, body interface{}) ([]byte, error) {
 	// Check if admin key file is provided
 	if adminKeyFile == "" {

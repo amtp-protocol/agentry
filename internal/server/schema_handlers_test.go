@@ -24,16 +24,7 @@ import (
 	"testing"
 
 	"github.com/amtp-protocol/agentry/internal/types"
-	"github.com/gin-gonic/gin"
 )
-
-func createTestServerWithSchema() *Server {
-	gin.SetMode(gin.TestMode)
-
-	// Skip schema tests for now due to complexity
-	// Just return a basic server without schema manager
-	return createTestServer()
-}
 
 // Test schema management handlers when schema manager is not configured
 func TestSchemaHandlers_NoSchemaManager(t *testing.T) {

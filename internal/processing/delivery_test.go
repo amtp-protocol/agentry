@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -197,11 +196,6 @@ func createTestDeliveryConfig() DeliveryConfig {
 		MaxMessageSize: 10485760,
 		LocalDomain:    "localhost",
 	}
-}
-
-// Helper function to convert HTTP test server URLs to HTTPS for validation
-func toHTTPS(url string) string {
-	return strings.Replace(url, "http://", "https://", 1)
 }
 
 func TestNewDeliveryEngine(t *testing.T) {
