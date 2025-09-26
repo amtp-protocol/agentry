@@ -337,8 +337,6 @@ func TestCompatibilityAnalysis_JSONSerialization(t *testing.T) {
 		},
 		Compatible: true,
 		Issues:     []string{"minor breaking change"},
-		Error:      "",
-		Timestamp:  time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
 	// Test JSON marshaling/unmarshaling
@@ -443,6 +441,7 @@ func TestCompatibilityChecker_EdgeCases(t *testing.T) {
 		}()
 
 		_, err := checker.CheckCompatibility(context.TODO(), schemaID, schemaID)
+		//nolint:staticcheck
 		if err != nil {
 			// Error is expected with nil context, but it shouldn't panic
 		}

@@ -394,10 +394,10 @@ func isValidAgentName(name string) bool {
 
 	// Allow letters, numbers, hyphens, underscores, and dots
 	for _, char := range name {
-		if !((char >= 'a' && char <= 'z') ||
-			(char >= 'A' && char <= 'Z') ||
-			(char >= '0' && char <= '9') ||
-			char == '-' || char == '_' || char == '.') {
+		if (char < 'a' || char > 'z') &&
+			(char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') &&
+			char != '-' && char != '_' && char != '.' {
 			return false
 		}
 	}

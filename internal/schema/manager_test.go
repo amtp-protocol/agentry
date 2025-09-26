@@ -1008,7 +1008,7 @@ func TestManager_EdgeCases(t *testing.T) {
 		}()
 
 		_, err := manager.ValidateMessage(context.TODO(), message)
-		// Error is expected with nil context, but it shouldn't panic
+		//nolint:staticcheck // Error is expected with nil context, but it shouldn't panic
 		if err != nil {
 			// This is expected
 		}

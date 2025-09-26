@@ -148,7 +148,8 @@ func main() {
 	commandIndex := 0
 
 	// Parse global flags until we hit a non-flag argument
-	for i, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		if !strings.HasPrefix(arg, "-") {
 			commandIndex = i
 			break

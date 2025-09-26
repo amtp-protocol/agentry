@@ -26,12 +26,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/pkg/uuid"
-	"github.com/gin-gonic/gin"
 )
 
 // generateIdempotencyKey creates a deterministic idempotency key based on request content

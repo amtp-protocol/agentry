@@ -68,7 +68,7 @@ func (vp *ValidationPipeline) ValidateMessage(ctx context.Context, message *type
 	// Convert payload to json.RawMessage
 	var payload json.RawMessage
 	if message.Payload != nil {
-		payload = json.RawMessage(message.Payload)
+		payload = message.Payload
 	}
 
 	// Validate payload against schema

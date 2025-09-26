@@ -219,8 +219,8 @@ func (de *DeliveryEngine) attemptDeliveryWithRetries(ctx context.Context, messag
 		select {
 		case <-ctx.Done():
 			result.Status = types.StatusFailed
-			result.ErrorCode = "CONTEXT_CANCELLED"
-			result.ErrorMessage = "delivery cancelled"
+			result.ErrorCode = "CONTEXT_CANCELED"
+			result.ErrorMessage = "delivery canceled"
 			return result, ctx.Err()
 		case <-time.After(retryDelay):
 			// Continue to next attempt

@@ -57,9 +57,9 @@ const (
 	ErrUnexpectedStatus      ErrorCode = "UNEXPECTED_STATUS"
 
 	// Resource errors
-	ErrMessageNotFound  ErrorCode = "MESSAGE_NOT_FOUND"
-	ErrStatusNotFound   ErrorCode = "STATUS_NOT_FOUND"
-	ErrContextCancelled ErrorCode = "CONTEXT_CANCELLED"
+	ErrMessageNotFound ErrorCode = "MESSAGE_NOT_FOUND"
+	ErrStatusNotFound  ErrorCode = "STATUS_NOT_FOUND"
+	ErrContextCanceled ErrorCode = "CONTEXT_CANCELED"
 
 	// Authentication and authorization errors
 	ErrUnauthorized       ErrorCode = "UNAUTHORIZED"

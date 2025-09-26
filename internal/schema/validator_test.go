@@ -614,7 +614,7 @@ func TestJSONSchemaValidator_ValidateWithSchema_EnumValidation(t *testing.T) {
 			"properties": {
 				"status": {
 					"type": "string",
-					"enum": ["pending", "completed", "cancelled"]
+					"enum": ["pending", "completed", "canceled"]
 				}
 			}
 		}`),

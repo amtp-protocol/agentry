@@ -26,12 +26,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/amtp-protocol/agentry/internal/errors"
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/types"
-	"github.com/gin-gonic/gin"
 )
 
 // Test Server creation with different configurations

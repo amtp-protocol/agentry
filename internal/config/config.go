@@ -29,8 +29,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/amtp-protocol/agentry/internal/schema"
 	"gopkg.in/yaml.v3"
+
+	"github.com/amtp-protocol/agentry/internal/schema"
 )
 
 // Config holds the application configuration

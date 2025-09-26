@@ -27,8 +27,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/gin-gonic/gin"
+
+	"github.com/amtp-protocol/agentry/internal/config"
 )
 
 func TestAdminAuth_Disabled(t *testing.T) {

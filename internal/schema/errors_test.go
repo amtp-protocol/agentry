@@ -365,7 +365,6 @@ func TestValidationReport_Fields(t *testing.T) {
 			},
 		},
 		Bypassed:       false,
-		BypassReason:   "",
 		ProcessingTime: processingTime,
 		Timestamp:      timestamp,
 	}
