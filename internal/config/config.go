@@ -42,6 +42,7 @@ type Config struct {
 	Message MessageConfig         `yaml:"message"`
 	Auth    AuthConfig            `yaml:"auth"`
 	Logging LoggingConfig         `yaml:"logging"`
+	Storage StorageConfig         `yaml:"storage,omitempty"`
 	Metrics *MetricsConfig        `yaml:"metrics,omitempty"`
 	Schema  *schema.ManagerConfig `yaml:"schema,omitempty"`
 }
@@ -87,6 +88,17 @@ type AuthConfig struct {
 	APIKeyHeader      string   `yaml:"api_key_header"`
 	AdminKeyFile      string   `yaml:"admin_key_file"`       // Path to admin API key file
 	AdminAPIKeyHeader string   `yaml:"admin_api_key_header"` // Header for admin API key
+}
+
+// StorageConfig holds storage configuration
+type StorageConfig struct {
+	Type     string `yaml:"type"`
+	Database struct {
+		Driver           string `yaml:"driver"`
+		ConnectionString string `yaml:"connection_string"`
+		MaxConnections   int    `yaml:"max_connections"`
+		MaxIdleTime      int    `yaml:"max_idle_time"`
+	} `yaml:"database,omitempty"`
 }
 
 // LoggingConfig holds logging configuration
@@ -172,6 +184,9 @@ func getDefaultConfig() *Config {
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
+		},
+		Storage: StorageConfig{
+			Type: "memory",
 		},
 	}
 }
@@ -284,6 +299,23 @@ func loadFromEnv(cfg *Config) {
 	}
 	if val := getEnv("AMTP_LOG_FORMAT", ""); val != "" {
 		cfg.Logging.Format = val
+	}
+
+	// Storage configuration
+	if val := getEnv("AMTP_STORAGE_TYPE", ""); val != "" {
+		cfg.Storage.Type = val
+	}
+	if val := getEnv("AMTP_STORAGE_DATABASE_DRIVER", ""); val != "" {
+		cfg.Storage.Database.Driver = val
+	}
+	if val := getEnv("AMTP_STORAGE_DATABASE_CONNECTION_STRING", ""); val != "" {
+		cfg.Storage.Database.ConnectionString = val
+	}
+	if val := getInt64Env("AMTP_STORAGE_DATABASE_MAX_CONNECTIONS", 0); val != 0 {
+		cfg.Storage.Database.MaxConnections = int(val)
+	}
+	if val := getInt64Env("AMTP_STORAGE_DATABASE_MAX_IDLE_TIME", 0); val != 0 {
+		cfg.Storage.Database.MaxIdleTime = int(val)
 	}
 
 	// Metrics configuration

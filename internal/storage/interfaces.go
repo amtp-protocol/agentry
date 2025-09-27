@@ -77,7 +77,7 @@ type StorageConfig struct {
 	// Memory storage config
 	Memory *MemoryStorageConfig `yaml:"memory,omitempty" json:"memory,omitempty"`
 
-	// Database storage config (for future use)
+	// Database storage config
 	Database *DatabaseStorageConfig `yaml:"database,omitempty" json:"database,omitempty"`
 
 	// Redis storage config (for future use)

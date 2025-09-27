@@ -1,0 +1,47 @@
+services:
+  agentry:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - AMTP_TLS_ENABLED=false
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_DOMAIN=localhost
+      - AMTP_LOG_LEVEL=debug
+      - AMTP_LOG_FORMAT=text
+      - AMTP_AUTH_REQUIRED=false
+      - AMTP_STORAGE_TYPE=database
+      - AMTP_STORAGE_DATABASE_CONN_STR="host=postgres port=5432 user=postgres password=postgres dbname=agentry sslmode=disable"
+      - AMTP_STORAGE_DATABASE_MAX_CONNS=100
+      - AMTP_STORAGE_DATABASE_MAX_IDLE_TIME=300
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agentry
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./deployment/db:/docker-entrypoint-initdb.d
+
+  test-client:
+    image: alpine:3.19
+    container_name: amtp-test-client
+    command: ["sh", "-c", "apk add --no-cache curl bind-tools jq && sleep 3600"]
+    depends_on:
+      - agentry
+      - postgres
