@@ -2,8 +2,6 @@
 # This example shows how to run multiple gateway instances,
 # each managing a different domain.
 
-version: '3.8'
-
 services:
   # Gateway for company-a.com
   gateway-company-a:
