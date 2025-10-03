@@ -36,6 +36,17 @@ func NewStorage(config StorageConfig) (MessageStorage, error) {
 		}
 		return NewMemoryStorage(memConfig), nil
 
+	case "database":
+		if config.Database == nil {
+			return nil, fmt.Errorf("database storage config is required")
+		}
+		dbConfig := *config.Database
+		messageStorage, err := NewDatabaseStorage(dbConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create database storage: %w", err)
+		}
+		return messageStorage, nil
+
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", config.Type)
 	}
