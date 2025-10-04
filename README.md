@@ -238,6 +238,15 @@ Options:
 | `AMTP_LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `AMTP_LOG_FORMAT` | `json` | Log format (json, text) |
 
+##### Storage Configuration
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AMTP_STORAGE_TYPE` | `memory` | Storage type (database, memory) |
+| `AMTP_STORAGE_DATABASE_DRIVER` | - | Database driver (pgx, cloudsqlpostgres, ...) |
+| `AMTP_STORAGE_DATABASE_CONNECTION_STRING` | - | Database connection string |
+| `AMTP_STORAGE_DATABASE_MAX_CONNS` | - | Max database connections |
+| `AMTP_STORAGE_DATABASE_MAX_IDLE_TIME` | - | Max idle time for database connections (seconds) |
+
 ##### Metrics Configuration
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -286,6 +295,13 @@ export AMTP_ADMIN_KEY_FILE="/etc/agentry/admin.keys"  # Optional: for admin API 
 # Logging
 export AMTP_LOG_LEVEL=info
 export AMTP_LOG_FORMAT=json
+
+# Storage configuration
+export AMTP_STORAGE_TYPE=database
+export AMTP_STORAGE_DATABASE_DRIVER=pgx
+export AMTP_STORAGE_DATABASE_CONNECTION_STRING="host=db.example.com port=5432 user=USER password=PASSWORD dbname=agentry"
+export AMTP_STORAGE_DATABASE_MAX_CONNS=100
+export AMTP_STORAGE_DATABASE_MAX_IDLE_TIME=300
 
 # Metrics (optional - enable for monitoring)
 export AMTP_METRICS_ENABLED=true
