@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # DNS Server for AMTP TXT records (no schemas in DNS anymore)
   dns-server:

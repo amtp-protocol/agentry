@@ -1,8 +1,6 @@
 # Local Development Multi-Domain Setup
 # This setup uses HTTP and mock DNS for local development
 
-version: '3.8'
-
 services:
   # Gateway for localhost (development)
   gateway-localhost:

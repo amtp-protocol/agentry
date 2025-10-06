@@ -38,3 +38,7 @@ auth:
 logging:
   level: "debug"
   format: "text"  # Easier to read in terminal
+
+# Storage configuration
+storage:
+  type: "memory"

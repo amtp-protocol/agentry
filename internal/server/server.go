@@ -136,7 +136,21 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// Create message storage
-	storageConfig := storage.DefaultStorageConfig()
+	var storageConfig storage.StorageConfig
+	if cfg.Storage.Type == "database" {
+		storageConfig = storage.StorageConfig{
+			Type: cfg.Storage.Type,
+			Database: &storage.DatabaseStorageConfig{
+				Driver:           cfg.Storage.Database.Driver,
+				ConnectionString: cfg.Storage.Database.ConnectionString,
+				MaxConnections:   cfg.Storage.Database.MaxConnections,
+				MaxIdleTime:      cfg.Storage.Database.MaxIdleTime,
+			},
+		}
+	} else {
+		storageConfig = storage.DefaultStorageConfig() // Default to memory storage
+	}
+
 	messageStorage, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create message storage: %w", err)
