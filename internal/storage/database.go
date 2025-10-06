@@ -34,31 +34,36 @@ type DatabaseStorage struct {
 	db     *gorm.DB
 }
 
-// NewDatabaseStorage creates a new database storage instance
-func NewDatabaseStorage(config DatabaseStorageConfig) (*DatabaseStorage, error) {
-	db, err := gorm.Open(
-		postgres.New(postgres.Config{
-			DriverName: config.Driver,
-			DSN:        config.ConnectionString,
-		}),
-		&gorm.Config{},
-	)
-	if err != nil {
-		return nil, err
-	}
+// NewDatabaseStorage creates a new database storage instance. If dbOverride is non-nil, it is used (for testing).
+func NewDatabaseStorage(config DatabaseStorageConfig, dbOverride ...*gorm.DB) (*DatabaseStorage, error) {
+	var db *gorm.DB
+	var err error
+	if len(dbOverride) > 0 && dbOverride[0] != nil {
+		db = dbOverride[0]
+	} else {
+		db, err = gorm.Open(
+			postgres.New(postgres.Config{
+				DriverName: config.Driver,
+				DSN:        config.ConnectionString,
+			}),
+			&gorm.Config{},
+		)
+		if err != nil {
+			return nil, err
+		}
 
-	// Set connection pool settings
-	sqlDB, err := db.DB()
-	if err != nil {
-		return nil, err
+		// Set connection pool settings
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, err
+		}
+		if config.MaxConnections > 0 {
+			sqlDB.SetMaxOpenConns(config.MaxConnections)
+		}
+		if config.MaxIdleTime > 0 {
+			sqlDB.SetConnMaxIdleTime(time.Duration(config.MaxIdleTime) * time.Second)
+		}
 	}
-	if config.MaxConnections > 0 {
-		sqlDB.SetMaxOpenConns(config.MaxConnections)
-	}
-	if config.MaxIdleTime > 0 {
-		sqlDB.SetConnMaxIdleTime(time.Duration(config.MaxIdleTime) * time.Second)
-	}
-
 	return &DatabaseStorage{
 		config: config,
 		db:     db,
@@ -458,6 +463,9 @@ func (ds *DatabaseStorage) AcknowledgeMessage(ctx context.Context, recipient, me
 
 // Close closes the database connection
 func (ds *DatabaseStorage) Close() error {
+	if ds.db == nil {
+		return fmt.Errorf("database instance is nil")
+	}
 	db, err := ds.db.DB()
 	if err != nil {
 		return fmt.Errorf("failed to get database instance: %w", err)
@@ -467,6 +475,9 @@ func (ds *DatabaseStorage) Close() error {
 
 // HealthCheck performs a health check on the database connection
 func (ds *DatabaseStorage) HealthCheck(ctx context.Context) error {
+	if ds.db == nil {
+		return fmt.Errorf("database instance is nil")
+	}
 	db, err := ds.db.DB()
 	if err != nil {
 		return fmt.Errorf("failed to get database instance: %w", err)
