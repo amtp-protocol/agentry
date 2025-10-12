@@ -77,7 +77,7 @@ type StorageConfig struct {
 	// Memory storage config
 	Memory *MemoryStorageConfig `yaml:"memory,omitempty" json:"memory,omitempty"`
 
-	// Database storage config (for future use)
+	// Database storage config
 	Database *DatabaseStorageConfig `yaml:"database,omitempty" json:"database,omitempty"`
 
 	// Redis storage config (for future use)
@@ -90,7 +90,7 @@ type MemoryStorageConfig struct {
 	TTL         int `yaml:"ttl_hours" json:"ttl_hours"`       // 0 = no expiration
 }
 
-// DatabaseStorageConfig configures database storage (placeholder for future)
+// DatabaseStorageConfig configures database storage
 type DatabaseStorageConfig struct {
 	Driver           string `yaml:"driver" json:"driver"`
 	ConnectionString string `yaml:"connection_string" json:"connection_string"`

@@ -44,3 +44,12 @@ auth:
 logging:
   level: "info"  # debug, info, warn, error
   format: "json"  # json, text
+
+# Storage configuration
+storage:
+  type: "database"
+  database:
+    driver: "pgx"
+    connection_string: "host=localhost port=5432 user=postgres password=postgres dbname=agentry sslmode=disable"
+    max_connections: 100
+    max_idle_time: 300

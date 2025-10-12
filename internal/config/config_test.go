@@ -135,6 +135,41 @@ func TestGetDefaultConfig_AdminAuth(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_Storage(t *testing.T) {
+	// Set environment variables
+	os.Setenv("AMTP_STORAGE_TYPE", "database")
+	os.Setenv("AMTP_STORAGE_DATABASE_DRIVER", "pgx")
+	os.Setenv("AMTP_STORAGE_DATABASE_CONNECTION_STRING", "postgres://user:pass@localhost/dbname")
+	os.Setenv("AMTP_STORAGE_DATABASE_MAX_CONNECTIONS", "100")
+	os.Setenv("AMTP_STORAGE_DATABASE_MAX_IDLE_TIME", "10")
+	defer func() {
+		os.Unsetenv("AMTP_STORAGE_TYPE")
+		os.Unsetenv("AMTP_STORAGE_DATABASE_DRIVER")
+		os.Unsetenv("AMTP_STORAGE_DATABASE_CONNECTION_STRING")
+		os.Unsetenv("AMTP_STORAGE_DATABASE_MAX_CONNECTIONS")
+		os.Unsetenv("AMTP_STORAGE_DATABASE_MAX_IDLE_TIME")
+	}()
+
+	cfg := getDefaultConfig()
+	loadFromEnv(cfg)
+
+	if cfg.Storage.Type != "database" {
+		t.Errorf("Expected storage type 'database', got '%s'", cfg.Storage.Type)
+	}
+	if cfg.Storage.Database.Driver != "pgx" {
+		t.Errorf("Expected database driver 'pgx', got '%s'", cfg.Storage.Database.Driver)
+	}
+	if cfg.Storage.Database.ConnectionString != "postgres://user:pass@localhost/dbname" {
+		t.Errorf("Expected connection string 'postgres://user:pass@localhost/dbname', got '%s'", cfg.Storage.Database.ConnectionString)
+	}
+	if cfg.Storage.Database.MaxConnections != 100 {
+		t.Errorf("Expected max connections 100, got %d", cfg.Storage.Database.MaxConnections)
+	}
+	if cfg.Storage.Database.MaxIdleTime != 10 {
+		t.Errorf("Expected max idle time 10, got %d", cfg.Storage.Database.MaxIdleTime)
+	}
+}
+
 func TestLoadFromEnv_AdminAuth(t *testing.T) {
 	// Set environment variables
 	os.Setenv("AMTP_ADMIN_KEY_FILE", "/path/to/admin.keys")

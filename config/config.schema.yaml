@@ -27,6 +27,10 @@ logging:
   level: "debug"
   format: "json"
 
+# Storage configuration
+storage:
+  type: "memory"
+
 # Schema management configuration
 schema:
   use_local_registry: true
