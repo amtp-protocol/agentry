@@ -332,7 +332,7 @@ func (s *Server) handleGetCapabilities(c *gin.Context) {
 
 	// If this is our own domain, return schemas supported by registered agents
 	if domain == s.config.Server.Domain {
-		capabilities.Schemas = s.agentRegistry.GetSupportedSchemas()
+		capabilities.Schemas = s.agentRegistry.GetSupportedSchemas(c.Request.Context())
 	}
 
 	c.JSON(http.StatusOK, capabilities)
@@ -651,7 +651,7 @@ func (s *Server) handleRegisterAgent(c *gin.Context) {
 	}
 
 	// Use the agent registry directly
-	if err := s.agentRegistry.RegisterAgent(&agent); err != nil {
+	if err := s.agentRegistry.RegisterAgent(c.Request.Context(), &agent); err != nil {
 		s.respondWithError(c, http.StatusBadRequest, "AGENT_REGISTRATION_FAILED",
 			"Failed to register agent", map[string]interface{}{
 				"error": err.Error(),
@@ -670,7 +670,7 @@ func (s *Server) handleUnregisterAgent(c *gin.Context) {
 	agentName := c.Param("address") // Keep param name for backward compatibility
 
 	// Use the agent registry directly
-	if err := s.agentRegistry.UnregisterAgent(agentName); err != nil {
+	if err := s.agentRegistry.UnregisterAgent(c.Request.Context(), agentName); err != nil {
 		s.respondWithError(c, http.StatusBadRequest, "AGENT_UNREGISTRATION_FAILED",
 			"Failed to unregister agent", map[string]interface{}{
 				"error": err.Error(),
@@ -687,7 +687,7 @@ func (s *Server) handleUnregisterAgent(c *gin.Context) {
 // handleListAgents handles GET /v1/admin/agents
 func (s *Server) handleListAgents(c *gin.Context) {
 	// Use the agent registry directly
-	agents := s.agentRegistry.GetAllAgents()
+	agents := s.agentRegistry.GetAllAgents(c.Request.Context())
 
 	s.respondWithSuccess(c, http.StatusOK, gin.H{
 		"agents": agents,
@@ -711,7 +711,7 @@ func (s *Server) handleGetInbox(c *gin.Context) {
 			"Failed to retrieve inbox messages", nil)
 		return
 	}
-	s.agentRegistry.UpdateLastAccess(recipient)
+	s.agentRegistry.UpdateLastAccess(c.Request.Context(), recipient)
 
 	s.respondWithSuccess(c, http.StatusOK, gin.H{
 		"recipient": recipient,
@@ -740,7 +740,7 @@ func (s *Server) handleAcknowledgeMessage(c *gin.Context) {
 	}
 
 	// Update last access timestamp
-	s.agentRegistry.UpdateLastAccess(recipient)
+	s.agentRegistry.UpdateLastAccess(c.Request.Context(), recipient)
 
 	s.respondWithSuccess(c, http.StatusOK, gin.H{
 		"message":    "Message acknowledged successfully",
@@ -772,7 +772,7 @@ func (s *Server) verifyAgentAccess(c *gin.Context, agentAddress string) bool {
 	}
 
 	// Verify agent access
-	if !s.agentRegistry.VerifyAPIKey(agentAddress, apiKey) {
+	if !s.agentRegistry.VerifyAPIKey(c.Request.Context(), agentAddress, apiKey) {
 		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
 			"Invalid API key for agent", map[string]interface{}{
 				"agent": agentAddress,
@@ -793,7 +793,7 @@ func (s *Server) handleDiscoverAgents(c *gin.Context) {
 	agents := make([]gin.H, 0)
 
 	// Get agents from the agent registry
-	localAgents := s.agentRegistry.GetAllAgents()
+	localAgents := s.agentRegistry.GetAllAgents(c.Request.Context())
 
 	// Build agent list for discovery (without sensitive information)
 	for address, agent := range localAgents {

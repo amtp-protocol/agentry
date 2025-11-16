@@ -19,6 +19,7 @@ package agents
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"testing"
 	"time"
 
@@ -44,12 +45,92 @@ func NewMockSchemaManager() *MockSchemaManager {
 	return &MockSchemaManager{}
 }
 
+type inMemoryAgentStore struct {
+	agents map[string]*LocalAgent
+}
+
+func newInMemoryAgentStore() *inMemoryAgentStore {
+	return &inMemoryAgentStore{
+		agents: make(map[string]*LocalAgent),
+	}
+}
+
+func (s *inMemoryAgentStore) CreateAgent(ctx context.Context, agent *LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+	if _, exists := s.agents[agent.Address]; exists {
+		return fmt.Errorf("agent already exists: %s", agent.Address)
+	}
+
+	agentCopy := *agent
+	s.agents[agent.Address] = &agentCopy
+	return nil
+}
+
+func (s *inMemoryAgentStore) DeleteAgent(ctx context.Context, agentAddress string) error {
+	if _, exists := s.agents[agentAddress]; !exists {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+	delete(s.agents, agentAddress)
+	return nil
+}
+
+func (s *inMemoryAgentStore) GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error) {
+	agent, exists := s.agents[agentAddress]
+	if !exists {
+		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+	}
+	agentCopy := *agent
+	return &agentCopy, nil
+}
+
+func (s *inMemoryAgentStore) UpdateAgent(ctx context.Context, agent *LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+	if _, exists := s.agents[agent.Address]; !exists {
+		return fmt.Errorf("agent not found: %s", agent.Address)
+	}
+
+	agentCopy := *agent
+	s.agents[agent.Address] = &agentCopy
+	return nil
+}
+
+func (s *inMemoryAgentStore) ListAgents(ctx context.Context) ([]*LocalAgent, error) {
+	var list []*LocalAgent
+	for _, agent := range s.agents {
+		agentCopy := *agent
+		list = append(list, &agentCopy)
+	}
+	return list, nil
+}
+
+func (s *inMemoryAgentStore) GetSupportedSchemas(ctx context.Context) ([]string, error) {
+	schemaSet := make(map[string]struct{})
+	for _, agent := range s.agents {
+		for _, schemaID := range agent.SupportedSchemas {
+			if schemaID == "" {
+				continue
+			}
+			schemaSet[schemaID] = struct{}{}
+		}
+	}
+
+	var schemas []string
+	for schemaID := range schemaSet {
+		schemas = append(schemas, schemaID)
+	}
+	return schemas, nil
+}
+
 func createTestRegistry() *Registry {
 	config := RegistryConfig{
 		LocalDomain:   "localhost",
 		SchemaManager: NewMockSchemaManager(),
 	}
-	return NewRegistry(config)
+	return NewRegistry(config, newInMemoryAgentStore())
 }
 
 // Test agent API key generation
@@ -85,6 +166,7 @@ func TestGenerateAPIKey(t *testing.T) {
 // Test agent API key verification
 func TestVerifyAPIKey(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
 	// Register an agent
 	agent := &LocalAgent{
@@ -92,13 +174,13 @@ func TestVerifyAPIKey(t *testing.T) {
 		DeliveryMode: "pull",
 	}
 
-	err := registry.RegisterAgent(agent)
+	err := registry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
 
 	// Get the registered agent to get the generated API key
-	registeredAgent, err := registry.GetAgent(agent.Address)
+	registeredAgent, err := registry.GetAgent(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Failed to get registered agent: %v", err)
 	}
@@ -109,28 +191,28 @@ func TestVerifyAPIKey(t *testing.T) {
 	}
 
 	// Test valid key verification
-	if !registry.VerifyAPIKey(agent.Address, validKey) {
+	if !registry.VerifyAPIKey(ctx, agent.Address, validKey) {
 		t.Error("Valid API key verification failed")
 	}
 
 	// Test invalid key verification
-	if registry.VerifyAPIKey(agent.Address, "invalid-key") {
+	if registry.VerifyAPIKey(ctx, agent.Address, "invalid-key") {
 		t.Error("Invalid API key verification should fail")
 	}
 
 	// Test non-existent agent
-	if registry.VerifyAPIKey("nonexistent@localhost", validKey) {
+	if registry.VerifyAPIKey(ctx, "nonexistent@localhost", validKey) {
 		t.Error("API key verification for non-existent agent should fail")
 	}
 
 	// Test empty key
-	if registry.VerifyAPIKey(agent.Address, "") {
+	if registry.VerifyAPIKey(ctx, agent.Address, "") {
 		t.Error("Empty API key verification should fail")
 	}
 
 	// Test similar but different key (timing attack protection)
 	similarKey := validKey[:len(validKey)-1] + "X" // Change last character
-	if registry.VerifyAPIKey(agent.Address, similarKey) {
+	if registry.VerifyAPIKey(ctx, agent.Address, similarKey) {
 		t.Error("Similar but different API key verification should fail")
 	}
 }
@@ -138,6 +220,7 @@ func TestVerifyAPIKey(t *testing.T) {
 // Test agent API key rotation
 func TestRotateAPIKey(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
 	// Register an agent
 	agent := &LocalAgent{
@@ -145,20 +228,20 @@ func TestRotateAPIKey(t *testing.T) {
 		DeliveryMode: "pull",
 	}
 
-	err := registry.RegisterAgent(agent)
+	err := registry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
 
 	// Get original API key
-	originalAgent, err := registry.GetAgent(agent.Address)
+	originalAgent, err := registry.GetAgent(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Failed to get registered agent: %v", err)
 	}
 	originalKey := originalAgent.APIKey
 
 	// Rotate the API key
-	newKey, err := registry.RotateAPIKey(agent.Address)
+	newKey, err := registry.RotateAPIKey(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Failed to rotate API key: %v", err)
 	}
@@ -169,17 +252,17 @@ func TestRotateAPIKey(t *testing.T) {
 	}
 
 	// Verify old key no longer works
-	if registry.VerifyAPIKey(agent.Address, originalKey) {
+	if registry.VerifyAPIKey(ctx, agent.Address, originalKey) {
 		t.Error("Original API key should no longer work after rotation")
 	}
 
 	// Verify new key works
-	if !registry.VerifyAPIKey(agent.Address, newKey) {
+	if !registry.VerifyAPIKey(ctx, agent.Address, newKey) {
 		t.Error("New API key should work after rotation")
 	}
 
 	// Test rotation for non-existent agent
-	_, err = registry.RotateAPIKey("nonexistent@localhost")
+	_, err = registry.RotateAPIKey(ctx, "nonexistent@localhost")
 	if err == nil {
 		t.Error("Rotating API key for non-existent agent should fail")
 	}
@@ -188,33 +271,28 @@ func TestRotateAPIKey(t *testing.T) {
 // Test agent last access update
 func TestUpdateLastAccess(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
-	// Register an agent
 	agent := &LocalAgent{
 		Address:      "test",
 		DeliveryMode: "pull",
 	}
 
-	err := registry.RegisterAgent(agent)
-	if err != nil {
+	if err := registry.RegisterAgent(ctx, agent); err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
 
-	// Get initial last access time
-	initialAgent, err := registry.GetAgent(agent.Address)
+	initialAgent, err := registry.GetAgent(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Failed to get registered agent: %v", err)
 	}
 	initialLastAccess := initialAgent.LastAccess
 
-	// Wait a bit to ensure time difference
 	time.Sleep(10 * time.Millisecond)
 
-	// Update last access
-	registry.UpdateLastAccess(agent.Address)
+	registry.UpdateLastAccess(ctx, agent.Address)
 
-	// Verify last access was updated
-	updatedAgent, err := registry.GetAgent(agent.Address)
+	updatedAgent, err := registry.GetAgent(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Failed to get updated agent: %v", err)
 	}
@@ -223,13 +301,17 @@ func TestUpdateLastAccess(t *testing.T) {
 		t.Error("Last access time should be updated")
 	}
 
-	// Test updating non-existent agent (should not panic)
-	registry.UpdateLastAccess("nonexistent@localhost")
+	registry.UpdateLastAccess(ctx, "nonexistent@localhost")
+
+	if _, err := registry.GetAgent(ctx, "nonexistent@localhost"); err == nil {
+		t.Error("Non-existent agent should not be created during last access update")
+	}
 }
 
 // Test agent registration with API key generation
 func TestRegisterAgentAPIKeyGeneration(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
 	tests := []struct {
 		name        string
@@ -282,7 +364,7 @@ func TestRegisterAgentAPIKeyGeneration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := registry.RegisterAgent(tt.agent)
+			err := registry.RegisterAgent(ctx, tt.agent)
 
 			if tt.expectError {
 				if err == nil {
@@ -296,7 +378,7 @@ func TestRegisterAgentAPIKeyGeneration(t *testing.T) {
 			}
 
 			// Verify agent was registered
-			registeredAgent, err := registry.GetAgent(tt.agent.Address)
+			registeredAgent, err := registry.GetAgent(ctx, tt.agent.Address)
 			if err != nil {
 				t.Fatalf("Failed to get registered agent: %v", err)
 			}
@@ -326,6 +408,7 @@ func TestRegisterAgentAPIKeyGeneration(t *testing.T) {
 // Test registry statistics
 func TestGetStats(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
 	// Register some test agents to verify stats
 	agent1 := &LocalAgent{
@@ -346,13 +429,13 @@ func TestGetStats(t *testing.T) {
 	}
 
 	// Register agents
-	if err := registry.RegisterAgent(agent1); err != nil {
+	if err := registry.RegisterAgent(ctx, agent1); err != nil {
 		t.Fatalf("Failed to register agent1: %v", err)
 	}
-	if err := registry.RegisterAgent(agent2); err != nil {
+	if err := registry.RegisterAgent(ctx, agent2); err != nil {
 		t.Fatalf("Failed to register agent2: %v", err)
 	}
-	if err := registry.RegisterAgent(agent3); err != nil {
+	if err := registry.RegisterAgent(ctx, agent3); err != nil {
 		t.Fatalf("Failed to register agent3: %v", err)
 	}
 
@@ -363,7 +446,7 @@ func TestGetStats(t *testing.T) {
 		Subject:   "Test Message",
 	}
 	// Use the full address that was generated by the registry
-	registeredAgent2, err := registry.GetAgent(agent2.Address)
+	registeredAgent2, err := registry.GetAgent(ctx, agent2.Address)
 	if err != nil {
 		t.Fatalf("Failed to get registered agent2: %v", err)
 	}
@@ -439,6 +522,7 @@ func TestInboxOperations(t *testing.T) {
 // Test agent unregistration
 func TestUnregisterAgent(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
 	// Register an agent
 	agent := &LocalAgent{
@@ -446,37 +530,37 @@ func TestUnregisterAgent(t *testing.T) {
 		DeliveryMode: "pull",
 	}
 
-	err := registry.RegisterAgent(agent)
+	err := registry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
 
 	// Verify agent exists
-	_, err = registry.GetAgent(agent.Address)
+	_, err = registry.GetAgent(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Agent should exist after registration: %v", err)
 	}
 
 	// Get the registered agent to get the full address
-	registeredAgent, err := registry.GetAgent(agent.Address)
+	registeredAgent, err := registry.GetAgent(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Failed to get registered agent: %v", err)
 	}
 
 	// Unregister agent using the agent name (not full address)
-	err = registry.UnregisterAgent("test") // Use agent name, not full address
+	err = registry.UnregisterAgent(ctx, "test") // Use agent name, not full address
 	if err != nil {
 		t.Fatalf("Failed to unregister agent: %v", err)
 	}
 
 	// Verify agent no longer exists
-	_, err = registry.GetAgent(registeredAgent.Address)
+	_, err = registry.GetAgent(ctx, registeredAgent.Address)
 	if err == nil {
 		t.Error("Agent should not exist after unregistration")
 	}
 
 	// Test unregistering non-existent agent
-	err = registry.UnregisterAgent("non-existent")
+	err = registry.UnregisterAgent(ctx, "non-existent")
 	if err == nil {
 		t.Error("Expected error when unregistering non-existent agent")
 	}
@@ -485,9 +569,10 @@ func TestUnregisterAgent(t *testing.T) {
 // Test getting all agents
 func TestGetAllAgents(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
 	// Initially should be empty
-	agents := registry.GetAllAgents()
+	agents := registry.GetAllAgents(ctx)
 	if len(agents) != 0 {
 		t.Errorf("Expected 0 agents initially, got %d", len(agents))
 	}
@@ -503,15 +588,15 @@ func TestGetAllAgents(t *testing.T) {
 		PushTarget:   "http://example.com/webhook",
 	}
 
-	if err := registry.RegisterAgent(agent1); err != nil {
+	if err := registry.RegisterAgent(ctx, agent1); err != nil {
 		t.Fatalf("Failed to register agent1: %v", err)
 	}
-	if err := registry.RegisterAgent(agent2); err != nil {
+	if err := registry.RegisterAgent(ctx, agent2); err != nil {
 		t.Fatalf("Failed to register agent2: %v", err)
 	}
 
 	// Get all agents
-	agents = registry.GetAllAgents()
+	agents = registry.GetAllAgents(ctx)
 	if len(agents) != 2 {
 		t.Errorf("Expected 2 agents, got %d", len(agents))
 	}
@@ -528,9 +613,10 @@ func TestGetAllAgents(t *testing.T) {
 // Test supported schemas functionality
 func TestGetSupportedSchemas(t *testing.T) {
 	registry := createTestRegistry()
+	ctx := context.Background()
 
 	// Initially should be empty
-	schemas := registry.GetSupportedSchemas()
+	schemas := registry.GetSupportedSchemas(ctx)
 	if len(schemas) != 0 {
 		t.Errorf("Expected 0 schemas initially, got %d", len(schemas))
 	}
@@ -547,15 +633,15 @@ func TestGetSupportedSchemas(t *testing.T) {
 		SupportedSchemas: []string{"agntcy:commerce.order.v1", "agntcy:auth.user.v1"}, // Overlapping schema
 	}
 
-	if err := registry.RegisterAgent(agent1); err != nil {
+	if err := registry.RegisterAgent(ctx, agent1); err != nil {
 		t.Fatalf("Failed to register agent1: %v", err)
 	}
-	if err := registry.RegisterAgent(agent2); err != nil {
+	if err := registry.RegisterAgent(ctx, agent2); err != nil {
 		t.Fatalf("Failed to register agent2: %v", err)
 	}
 
 	// Get supported schemas
-	schemas = registry.GetSupportedSchemas()
+	schemas = registry.GetSupportedSchemas(ctx)
 
 	// Should have 3 unique schemas
 	expectedSchemas := map[string]bool{

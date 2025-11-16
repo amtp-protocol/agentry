@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
@@ -723,5 +724,322 @@ func TestMemoryStorage_matchesFilter(t *testing.T) {
 	filter = MessageFilter{Since: &since}
 	if storage.matchesFilter(message, "test-msg", filter) {
 		t.Error("Expected message to not match since filter")
+	}
+}
+
+func TestMemoryStorage_CreateAgent(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+	agent := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	err := storage.CreateAgent(ctx, agent)
+	if err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	// Verify agent was created
+	storedAgent, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("Expected no error retrieving agent, got %v", err)
+	}
+
+	if storedAgent.Address != agent.Address {
+		t.Errorf("Expected Address %s, got %s", agent.Address, storedAgent.Address)
+	}
+}
+
+func TestMemoryStorage_CreateAgent_Duplicate(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+	agent := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	err := storage.CreateAgent(ctx, agent)
+	if err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	// Try to create duplicate agent
+	err = storage.CreateAgent(ctx, agent)
+	if err == nil {
+		t.Error("Expected error creating duplicate agent")
+	}
+
+	if err.Error() != "agent already exists: agent1@localhost" {
+		t.Errorf("Expected 'agent already exists' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_CreateAgent_NilAgent(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	err := storage.CreateAgent(ctx, nil)
+	if err == nil {
+		t.Error("Expected error creating nil agent")
+	}
+
+	if err.Error() != "agent cannot be nil" {
+		t.Errorf("Expected 'agent cannot be nil' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_GetAgent_NotFound(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	_, err := storage.GetAgent(ctx, "non-existent-agent")
+	if err == nil {
+		t.Error("Expected error retrieving non-existent agent")
+	}
+
+	if err.Error() != "agent not found: non-existent-agent" {
+		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_GetAgent_EmptyAddress(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	_, err := storage.GetAgent(ctx, "")
+	if err == nil {
+		t.Error("Expected error retrieving agent with empty address")
+	}
+
+	if err.Error() != "agent address cannot be empty" {
+		t.Errorf("Expected 'agent address cannot be empty' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_UpdateAgent(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+	agent := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	err := storage.CreateAgent(ctx, agent)
+	if err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	// Update agent
+	agent.PushTarget = "http://localhost:8080/agent1/new-webhook"
+	err = storage.UpdateAgent(ctx, agent)
+	if err != nil {
+		t.Fatalf("Expected no error updating agent, got %v", err)
+	}
+
+	// Verify update
+	updatedAgent, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("Expected no error retrieving agent, got %v", err)
+	}
+
+	if updatedAgent.PushTarget != "http://localhost:8080/agent1/new-webhook" {
+		t.Errorf("Expected PushTarget to be updated, got %s", updatedAgent.PushTarget)
+	}
+}
+
+func TestMemoryStorage_UpdateAgent_NotFound(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+	agent := &agents.LocalAgent{
+		Address:          "non-existent-agent",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	err := storage.UpdateAgent(ctx, agent)
+	if err == nil {
+		t.Error("Expected error updating non-existent agent")
+	}
+
+	if err.Error() != "agent not found: non-existent-agent" {
+		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_UpdateAgent_NilAgent(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	err := storage.UpdateAgent(ctx, nil)
+	if err == nil {
+		t.Error("Expected error updating nil agent")
+	}
+
+	if err.Error() != "agent cannot be nil" {
+		t.Errorf("Expected 'agent cannot be nil' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_DeleteAgent(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+	agent := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	err := storage.CreateAgent(ctx, agent)
+	if err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	// Delete agent
+	err = storage.DeleteAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("Expected no error deleting agent, got %v", err)
+	}
+
+	// Verify deletion
+	_, err = storage.GetAgent(ctx, "agent1@localhost")
+	if err == nil {
+		t.Error("Expected error retrieving deleted agent")
+	}
+}
+
+func TestMemoryStorage_DeleteAgent_NotFound(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	err := storage.DeleteAgent(ctx, "non-existent-agent")
+	if err == nil {
+		t.Error("Expected error deleting non-existent agent")
+	}
+
+	if err.Error() != "agent not found: non-existent-agent" {
+		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_DeleteAgent_EmptyAddress(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	err := storage.DeleteAgent(ctx, "")
+	if err == nil {
+		t.Error("Expected error deleting agent with empty address")
+	}
+
+	if err.Error() != "agent address cannot be empty" {
+		t.Errorf("Expected 'agent address cannot be empty' error, got %s", err.Error())
+	}
+}
+
+func TestMemoryStorage_ListAgents(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent1 := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	agent2 := &agents.LocalAgent{
+		Address:          "agent2@localhost",
+		DeliveryMode:     "pull",
+		SupportedSchemas: []string{"schema3"},
+		RequiresSchema:   false,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	storage.CreateAgent(ctx, agent1)
+	storage.CreateAgent(ctx, agent2)
+
+	agentsList, err := storage.ListAgents(ctx)
+	if err != nil {
+		t.Fatalf("Expected no error listing agents, got %v", err)
+	}
+
+	if len(agentsList) != 2 {
+		t.Errorf("Expected 2 agents, got %d", len(agentsList))
+	}
+}
+
+func TestMemoryStorage_GetSuportedSchemas(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent1 := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		SupportedSchemas: []string{"schema1", "schema2"},
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	agent2 := &agents.LocalAgent{
+		Address:          "agent2@localhost",
+		SupportedSchemas: []string{"schema2", "schema3"},
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	storage.CreateAgent(ctx, agent1)
+	storage.CreateAgent(ctx, agent2)
+
+	schemas, err := storage.GetSupportedSchemas(ctx)
+	if err != nil {
+		t.Fatalf("Expected no error getting supported schemas, got %v", err)
+	}
+
+	expectedSchemas := map[string]bool{
+		"schema1": true,
+		"schema2": true,
+		"schema3": true,
+	}
+
+	if len(schemas) != len(expectedSchemas) {
+		t.Errorf("Expected %d unique schemas, got %d", len(expectedSchemas), len(schemas))
+	}
+
+	for _, schema := range schemas {
+		if !expectedSchemas[schema] {
+			t.Errorf("Unexpected schema found: %s", schema)
+		}
 	}
 }

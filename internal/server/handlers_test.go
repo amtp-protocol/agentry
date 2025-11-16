@@ -50,6 +50,7 @@ type MockMessageProcessor struct {
 type MockStorage struct {
 	messages map[string]*types.Message
 	statuses map[string]*types.MessageStatus
+	agents   map[string]*agents.LocalAgent
 }
 
 func NewMockMessageProcessor() *MockMessageProcessor {
@@ -63,10 +64,11 @@ func NewMockStorage() *MockStorage {
 	return &MockStorage{
 		messages: make(map[string]*types.Message),
 		statuses: make(map[string]*types.MessageStatus),
+		agents:   make(map[string]*agents.LocalAgent),
 	}
 }
 
-// Implement storage.MessageStorage interface
+// Implement storage.Storage interface
 func (m *MockStorage) StoreMessage(ctx context.Context, message *types.Message) error {
 	m.messages[message.MessageID] = message
 	return nil
@@ -127,6 +129,67 @@ func (m *MockStorage) GetInboxMessages(ctx context.Context, recipient string) ([
 		}
 	}
 	return messages, nil
+}
+
+func (m *MockStorage) CreateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	m.agents[agent.Address] = agent
+	return nil
+}
+
+func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agents.LocalAgent, error) {
+	agent, exists := m.agents[agentAddress]
+	if !exists {
+		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	return agent, nil
+}
+
+func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+	if _, exists := m.agents[agent.Address]; !exists {
+		return fmt.Errorf("agent not found: %s", agent.Address)
+	}
+
+	agentCopy := *agent
+	m.agents[agent.Address] = &agentCopy
+	return nil
+}
+
+func (m *MockStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
+	if _, exists := m.agents[agentAddress]; !exists {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	delete(m.agents, agentAddress)
+	return nil
+}
+
+func (m *MockStorage) ListAgents(ctx context.Context) ([]*agents.LocalAgent, error) {
+	var list []*agents.LocalAgent
+	for _, agent := range m.agents {
+		agentCopy := *agent
+		list = append(list, &agentCopy)
+	}
+	return list, nil
+}
+
+func (m *MockStorage) GetSupportedSchemas(ctx context.Context) ([]string, error) {
+	schemaSet := make(map[string]struct{})
+	for _, agent := range m.agents {
+		for _, schemaID := range agent.SupportedSchemas {
+			schemaSet[schemaID] = struct{}{}
+		}
+	}
+
+	var schemas []string
+	for schemaID := range schemaSet {
+		schemas = append(schemas, schemaID)
+	}
+
+	return schemas, nil
 }
 
 func (m *MockStorage) AcknowledgeMessage(ctx context.Context, recipient, messageID string) error {
@@ -252,7 +315,7 @@ func createTestServer() *Server {
 		LocalDomain:   cfg.Server.Domain,
 		SchemaManager: nil, // No schema manager in basic test
 	}
-	agentRegistry := agents.NewRegistry(agentRegistryConfig)
+	agentRegistry := agents.NewRegistry(agentRegistryConfig, mockStorage)
 
 	testMetrics := metrics.NewMetricsProvider()
 
@@ -794,12 +857,16 @@ func createTestServerWithRealProcessor() *Server {
 	discoveryService := discovery.NewMockDiscovery(cfg.DNS.MockRecords, 5*time.Minute)
 	validator := validation.New(cfg.Message.MaxSize)
 
+	// Create message storage
+	storageConfig := storage.DefaultStorageConfig()
+	storage, _ := storage.NewStorage(storageConfig)
+
 	// Create agent registry
 	agentRegistryConfig := agents.RegistryConfig{
 		LocalDomain:   cfg.Server.Domain,
 		SchemaManager: nil, // No schema manager in tests
 	}
-	agentRegistry := agents.NewRegistry(agentRegistryConfig)
+	agentRegistry := agents.NewRegistry(agentRegistryConfig, storage)
 
 	// Create real delivery engine and processor
 	deliveryConfig := processing.DeliveryConfig{
@@ -815,11 +882,7 @@ func createTestServerWithRealProcessor() *Server {
 	}
 	deliveryEngine := processing.NewDeliveryEngine(discoveryService, agentRegistry, deliveryConfig)
 
-	// Create message storage
-	storageConfig := storage.DefaultStorageConfig()
-	messageStorage, _ := storage.NewStorage(storageConfig)
-
-	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, messageStorage)
+	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, storage)
 
 	logger := logging.NewLogger(cfg.Logging).WithComponent("server")
 
@@ -830,6 +893,7 @@ func createTestServerWithRealProcessor() *Server {
 		discovery:     discoveryService,
 		validator:     validator,
 		processor:     processor,
+		storage:       storage,
 		agentRegistry: agentRegistry,
 		logger:        logger,
 		metrics:       testMetrics,
@@ -857,12 +921,14 @@ func TestHandleAgentDiscovery(t *testing.T) {
 		PushTarget:   "https://support.example.com/webhook",
 	}
 
-	err := server.agentRegistry.RegisterAgent(agent1)
+	ctx := context.Background()
+
+	err := server.agentRegistry.RegisterAgent(ctx, agent1)
 	if err != nil {
 		t.Fatalf("Failed to register agent1: %v", err)
 	}
 
-	err = server.agentRegistry.RegisterAgent(agent2)
+	err = server.agentRegistry.RegisterAgent(ctx, agent2)
 	if err != nil {
 		t.Fatalf("Failed to register agent2: %v", err)
 	}
@@ -1214,6 +1280,7 @@ func TestHandleGetCapabilities_EmptyDomain(t *testing.T) {
 
 func TestHandleGetCapabilities_OwnDomain(t *testing.T) {
 	server := createTestServerWithRealProcessor()
+	ctx := context.Background()
 
 	// Register some agents to test schema inclusion
 	agent := &agents.LocalAgent{
@@ -1221,7 +1288,7 @@ func TestHandleGetCapabilities_OwnDomain(t *testing.T) {
 		DeliveryMode:     "pull",
 		SupportedSchemas: []string{"agntcy:example.test.v1", "agntcy:example.order.v1"},
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
@@ -1251,13 +1318,14 @@ func TestHandleGetCapabilities_OwnDomain(t *testing.T) {
 // Test handleDiscoverAgentsByDomain
 func TestHandleDiscoverAgentsByDomain_Success(t *testing.T) {
 	server := createTestServerWithRealProcessor()
+	ctx := context.Background()
 
 	// Register test agent
 	agent := &agents.LocalAgent{
 		Address:      "test",
 		DeliveryMode: "pull",
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
@@ -1362,13 +1430,14 @@ func TestHandleRegisterAgent_InvalidJSON(t *testing.T) {
 
 func TestHandleUnregisterAgent_Success(t *testing.T) {
 	server := createTestServer()
+	ctx := context.Background()
 
 	// First register an agent
 	agent := &agents.LocalAgent{
 		Address:      "testagent",
 		DeliveryMode: "pull",
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
@@ -1416,6 +1485,7 @@ func TestHandleUnregisterAgent_NotFound(t *testing.T) {
 
 func TestHandleListAgents_Success(t *testing.T) {
 	server := createTestServer()
+	ctx := context.Background()
 
 	// Register test agents
 	agent1 := &agents.LocalAgent{
@@ -1428,12 +1498,12 @@ func TestHandleListAgents_Success(t *testing.T) {
 		PushTarget:   "https://example.com/webhook",
 	}
 
-	err := server.agentRegistry.RegisterAgent(agent1)
+	err := server.agentRegistry.RegisterAgent(ctx, agent1)
 	if err != nil {
 		t.Fatalf("Failed to register agent1: %v", err)
 	}
 
-	err = server.agentRegistry.RegisterAgent(agent2)
+	err = server.agentRegistry.RegisterAgent(ctx, agent2)
 	if err != nil {
 		t.Fatalf("Failed to register agent2: %v", err)
 	}
@@ -1469,6 +1539,7 @@ func TestHandleListAgents_Success(t *testing.T) {
 // Test inbox handlers
 func TestHandleGetInbox_Success(t *testing.T) {
 	server := createTestServer()
+	ctx := context.Background()
 
 	// Register agent with API key
 	agent := &agents.LocalAgent{
@@ -1476,7 +1547,7 @@ func TestHandleGetInbox_Success(t *testing.T) {
 		DeliveryMode: "pull",
 		APIKey:       "valid-api-key",
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
@@ -1529,6 +1600,7 @@ func TestHandleGetInbox_Unauthorized(t *testing.T) {
 
 func TestHandleGetInbox_InvalidAPIKey(t *testing.T) {
 	server := createTestServer()
+	ctx := context.Background()
 
 	// Register agent with different API key
 	agent := &agents.LocalAgent{
@@ -1536,7 +1608,7 @@ func TestHandleGetInbox_InvalidAPIKey(t *testing.T) {
 		DeliveryMode: "pull",
 		APIKey:       "correct-api-key",
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
@@ -1564,6 +1636,7 @@ func TestHandleGetInbox_InvalidAPIKey(t *testing.T) {
 func TestHandleAcknowledgeMessage_Success(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
+	ctx := context.Background()
 
 	// Register agent with API key
 	agent := &agents.LocalAgent{
@@ -1571,7 +1644,7 @@ func TestHandleAcknowledgeMessage_Success(t *testing.T) {
 		DeliveryMode: "pull",
 		APIKey:       "valid-api-key",
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
@@ -1606,6 +1679,7 @@ func TestHandleAcknowledgeMessage_Success(t *testing.T) {
 
 func TestHandleAcknowledgeMessage_NotFound(t *testing.T) {
 	server := createTestServer()
+	ctx := context.Background()
 
 	// Register agent with API key
 	agent := &agents.LocalAgent{
@@ -1613,7 +1687,7 @@ func TestHandleAcknowledgeMessage_NotFound(t *testing.T) {
 		DeliveryMode: "pull",
 		APIKey:       "valid-api-key",
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
@@ -1641,6 +1715,7 @@ func TestHandleAcknowledgeMessage_NotFound(t *testing.T) {
 // Test verifyAgentAccess function
 func TestVerifyAgentAccess_Success(t *testing.T) {
 	server := createTestServer()
+	ctx := context.Background()
 
 	// Register agent with API key
 	agent := &agents.LocalAgent{
@@ -1648,7 +1723,7 @@ func TestVerifyAgentAccess_Success(t *testing.T) {
 		DeliveryMode: "pull",
 		APIKey:       "valid-api-key",
 	}
-	err := server.agentRegistry.RegisterAgent(agent)
+	err := server.agentRegistry.RegisterAgent(ctx, agent)
 	if err != nil {
 		t.Fatalf("Failed to register agent: %v", err)
 	}

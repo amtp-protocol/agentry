@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/amtp-protocol/agentry/internal/schema"
@@ -48,8 +47,7 @@ type LocalAgent struct {
 type Registry struct {
 	localDomain   string
 	schemaManager SchemaManager
-	agents        map[string]*LocalAgent // registered local agents by address
-	agentsMutex   sync.RWMutex
+	storage       AgentStore
 }
 
 // SchemaManager interface for schema validation
@@ -65,16 +63,16 @@ type RegistryConfig struct {
 }
 
 // NewRegistry creates a new agent registry
-func NewRegistry(config RegistryConfig) *Registry {
+func NewRegistry(config RegistryConfig, storage AgentStore) *Registry {
 	return &Registry{
 		localDomain:   config.LocalDomain,
 		schemaManager: config.SchemaManager,
-		agents:        make(map[string]*LocalAgent),
+		storage:       storage,
 	}
 }
 
 // RegisterAgent registers a local agent with delivery configuration
-func (r *Registry) RegisterAgent(agent *LocalAgent) error {
+func (r *Registry) RegisterAgent(ctx context.Context, agent *LocalAgent) error {
 	if agent.Address == "" {
 		return fmt.Errorf("agent address is required")
 	}
@@ -120,78 +118,66 @@ func (r *Registry) RegisterAgent(agent *LocalAgent) error {
 	agent.CreatedAt = now
 	agent.LastAccess = now
 
-	r.agentsMutex.Lock()
-	defer r.agentsMutex.Unlock()
-
-	r.agents[agent.Address] = agent
+	err = r.storage.CreateAgent(ctx, agent)
+	if err != nil {
+		return fmt.Errorf("failed to register agent: %w", err)
+	}
 	return nil
 }
 
 // UnregisterAgent removes a local agent
-func (r *Registry) UnregisterAgent(agentNameOrAddress string) error {
+func (r *Registry) UnregisterAgent(ctx context.Context, agentNameOrAddress string) error {
 	// Normalize the input to full address
 	fullAddress, err := r.normalizeAgentAddress(agentNameOrAddress)
 	if err != nil {
 		return fmt.Errorf("invalid agent identifier: %w", err)
 	}
 
-	r.agentsMutex.Lock()
-	defer r.agentsMutex.Unlock()
-
-	if _, exists := r.agents[fullAddress]; !exists {
-		return fmt.Errorf("agent not found: %s", fullAddress)
+	err = r.storage.DeleteAgent(ctx, fullAddress)
+	if err != nil {
+		return fmt.Errorf("failed to unregister agent: %w", err)
 	}
-
-	delete(r.agents, fullAddress)
 	return nil
 }
 
 // GetAgent returns a specific agent by address
-func (r *Registry) GetAgent(agentAddress string) (*LocalAgent, error) {
-	r.agentsMutex.RLock()
-	defer r.agentsMutex.RUnlock()
-
-	agent, exists := r.agents[agentAddress]
-	if !exists {
+func (r *Registry) GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error) {
+	agent, err := r.storage.GetAgent(ctx, agentAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get agent: %w", err)
+	}
+	if agent == nil {
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
 	}
-
 	// Return a copy to avoid race conditions
 	agentCopy := *agent
 	return &agentCopy, nil
 }
 
 // GetAllAgents returns all registered local agents
-func (r *Registry) GetAllAgents() map[string]*LocalAgent {
-	r.agentsMutex.RLock()
-	defer r.agentsMutex.RUnlock()
-
-	// Return a copy to avoid race conditions
-	agents := make(map[string]*LocalAgent)
-	for addr, agent := range r.agents {
-		agentCopy := *agent
-		agents[addr] = &agentCopy
+func (r *Registry) GetAllAgents(ctx context.Context) map[string]*LocalAgent {
+	result := make(map[string]*LocalAgent)
+	agents, err := r.storage.ListAgents(ctx)
+	if err != nil {
+		return result
 	}
-	return agents
+
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		agentCopy := *agent
+		result[agentCopy.Address] = &agentCopy
+	}
+
+	return result
 }
 
 // GetSupportedSchemas returns all schemas supported by registered agents
-func (r *Registry) GetSupportedSchemas() []string {
-	r.agentsMutex.RLock()
-	defer r.agentsMutex.RUnlock()
-
-	schemaSet := make(map[string]bool)
-	for _, agent := range r.agents {
-		for _, schema := range agent.SupportedSchemas {
-			if schema != "" {
-				schemaSet[schema] = true
-			}
-		}
-	}
-
-	schemas := make([]string, 0, len(schemaSet))
-	for schema := range schemaSet {
-		schemas = append(schemas, schema)
+func (r *Registry) GetSupportedSchemas(ctx context.Context) []string {
+	schemas, err := r.storage.GetSupportedSchemas(ctx)
+	if err != nil {
+		return []string{}
 	}
 	return schemas
 }
@@ -209,12 +195,9 @@ func (r *Registry) GenerateAPIKey() (string, error) {
 }
 
 // VerifyAPIKey verifies that the provided API key belongs to the specified agent
-func (r *Registry) VerifyAPIKey(agentAddress, apiKey string) bool {
-	r.agentsMutex.RLock()
-	defer r.agentsMutex.RUnlock()
-
-	agent, exists := r.agents[agentAddress]
-	if !exists {
+func (r *Registry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string) bool {
+	agent, err := r.GetAgent(ctx, agentAddress)
+	if err != nil || agent == nil {
 		return false
 	}
 
@@ -223,22 +206,23 @@ func (r *Registry) VerifyAPIKey(agentAddress, apiKey string) bool {
 }
 
 // UpdateLastAccess updates the last access timestamp for an agent
-func (r *Registry) UpdateLastAccess(agentAddress string) {
-	r.agentsMutex.Lock()
-	defer r.agentsMutex.Unlock()
+func (r *Registry) UpdateLastAccess(ctx context.Context, agentAddress string) {
+	agent, err := r.GetAgent(ctx, agentAddress)
+	if err != nil || agent == nil {
+		return
+	}
 
-	if agent, exists := r.agents[agentAddress]; exists {
-		agent.LastAccess = time.Now().UTC()
+	agent.LastAccess = time.Now().UTC()
+	err = r.storage.UpdateAgent(ctx, agent)
+	if err != nil {
+		return
 	}
 }
 
 // RotateAPIKey generates a new API key for an existing agent
-func (r *Registry) RotateAPIKey(agentAddress string) (string, error) {
-	r.agentsMutex.Lock()
-	defer r.agentsMutex.Unlock()
-
-	agent, exists := r.agents[agentAddress]
-	if !exists {
+func (r *Registry) RotateAPIKey(ctx context.Context, agentAddress string) (string, error) {
+	agent, err := r.GetAgent(ctx, agentAddress)
+	if err != nil || agent == nil {
 		return "", fmt.Errorf("agent not found: %s", agentAddress)
 	}
 
@@ -250,6 +234,10 @@ func (r *Registry) RotateAPIKey(agentAddress string) (string, error) {
 
 	// Update agent with new key
 	agent.APIKey = newAPIKey
+	err = r.storage.UpdateAgent(ctx, agent)
+	if err != nil {
+		return "", fmt.Errorf("failed to update agent with new API key: %w", err)
+	}
 
 	return newAPIKey, nil
 }
@@ -277,14 +265,20 @@ func (r *Registry) AcknowledgeMessage(recipient, messageID string) error {
 
 // GetStats returns agent registry statistics
 func (r *Registry) GetStats() map[string]interface{} {
-	r.agentsMutex.RLock()
-	defer r.agentsMutex.RUnlock()
+	agents, err := r.storage.ListAgents(context.Background())
+	if err != nil {
+		return map[string]interface{}{
+			"local_agents": 0,
+			"push_agents":  0,
+			"pull_agents":  0,
+		}
+	}
 
-	totalAgents := len(r.agents)
+	totalAgents := len(agents)
 	pushAgents := 0
 	pullAgents := 0
 
-	for _, agent := range r.agents {
+	for _, agent := range agents {
 		if agent.DeliveryMode == "push" {
 			pushAgents++
 		} else {

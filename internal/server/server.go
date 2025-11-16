@@ -43,7 +43,7 @@ type AgentManagerAdapter struct {
 }
 
 func (a *AgentManagerAdapter) GetLocalAgents() map[string]*validation.LocalAgent {
-	processingAgents := a.agentRegistry.GetAllAgents()
+	processingAgents := a.agentRegistry.GetAllAgents(context.Background())
 	validationAgents := make(map[string]*validation.LocalAgent)
 
 	for address, agent := range processingAgents {
@@ -65,7 +65,7 @@ type Server struct {
 	discovery     processing.DiscoveryService
 	validator     *validation.Validator
 	processor     processing.MessageProcessorService
-	storage       storage.MessageStorage
+	storage       storage.Storage
 	agentRegistry agents.AgentRegistry
 	schemaManager *schema.Manager
 	logger        *logging.Logger
@@ -105,12 +105,32 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 	}
 
+	// Create storage
+	var storageConfig storage.StorageConfig
+	if cfg.Storage.Type == "database" {
+		storageConfig = storage.StorageConfig{
+			Type: cfg.Storage.Type,
+			Database: &storage.DatabaseStorageConfig{
+				Driver:           cfg.Storage.Database.Driver,
+				ConnectionString: cfg.Storage.Database.ConnectionString,
+				MaxConnections:   cfg.Storage.Database.MaxConnections,
+				MaxIdleTime:      cfg.Storage.Database.MaxIdleTime,
+			},
+		}
+	} else {
+		storageConfig = storage.DefaultStorageConfig() // Default to memory storage
+	}
+	storage, err := storage.NewStorage(storageConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create message storage: %w", err)
+	}
+
 	// Create agent registry first
 	agentRegistryConfig := agents.RegistryConfig{
 		LocalDomain:   cfg.Server.Domain,
 		SchemaManager: schemaManager,
 	}
-	agentRegistry := agents.NewRegistry(agentRegistryConfig)
+	agentRegistry := agents.NewRegistry(agentRegistryConfig, storage)
 
 	// Create delivery engine with agent registry
 	deliveryConfig := processing.DeliveryConfig{
@@ -135,29 +155,8 @@ func New(cfg *config.Config) (*Server, error) {
 		validator = validation.NewWithAgentManager(cfg.Message.MaxSize, nil, agentManagerAdapter)
 	}
 
-	// Create message storage
-	var storageConfig storage.StorageConfig
-	if cfg.Storage.Type == "database" {
-		storageConfig = storage.StorageConfig{
-			Type: cfg.Storage.Type,
-			Database: &storage.DatabaseStorageConfig{
-				Driver:           cfg.Storage.Database.Driver,
-				ConnectionString: cfg.Storage.Database.ConnectionString,
-				MaxConnections:   cfg.Storage.Database.MaxConnections,
-				MaxIdleTime:      cfg.Storage.Database.MaxIdleTime,
-			},
-		}
-	} else {
-		storageConfig = storage.DefaultStorageConfig() // Default to memory storage
-	}
-
-	messageStorage, err := storage.NewStorage(storageConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create message storage: %w", err)
-	}
-
 	// Create message processor
-	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, messageStorage)
+	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, storage)
 
 	// Set Gin mode based on environment
 	if cfg.Logging.Level == "debug" {
@@ -176,7 +175,7 @@ func New(cfg *config.Config) (*Server, error) {
 		discovery:     discoveryService,
 		validator:     validator,
 		processor:     processor,
-		storage:       messageStorage,
+		storage:       storage,
 		agentRegistry: agentRegistry,
 		schemaManager: schemaManager,
 		logger:        logger,

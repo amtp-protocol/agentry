@@ -17,6 +17,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/amtp-protocol/agentry/internal/errors"
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
@@ -410,7 +412,9 @@ func TestAgentManagerAdapter_GetLocalAgents(t *testing.T) {
 	agentRegistryConfig := agents.RegistryConfig{
 		LocalDomain: "test.example.com",
 	}
-	agentRegistry := agents.NewRegistry(agentRegistryConfig)
+	memStorage := storage.NewMemoryStorage(storage.MemoryStorageConfig{})
+	agentRegistry := agents.NewRegistry(agentRegistryConfig, memStorage)
+	ctx := context.Background()
 
 	// Register test agents
 	agent1 := &agents.LocalAgent{
@@ -428,12 +432,12 @@ func TestAgentManagerAdapter_GetLocalAgents(t *testing.T) {
 		RequiresSchema:   false,
 	}
 
-	err := agentRegistry.RegisterAgent(agent1)
+	err := agentRegistry.RegisterAgent(ctx, agent1)
 	if err != nil {
 		t.Fatalf("Failed to register agent1: %v", err)
 	}
 
-	err = agentRegistry.RegisterAgent(agent2)
+	err = agentRegistry.RegisterAgent(ctx, agent2)
 	if err != nil {
 		t.Fatalf("Failed to register agent2: %v", err)
 	}

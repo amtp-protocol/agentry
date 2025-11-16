@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/discovery"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
@@ -110,6 +111,7 @@ func (m *MockDiscovery) SetError(err error) {
 type MockStorage struct {
 	messages map[string]*types.Message
 	statuses map[string]*types.MessageStatus
+	agents   map[string]*agents.LocalAgent
 	mutex    sync.RWMutex
 	error    error
 }
@@ -118,6 +120,7 @@ func NewMockStorage() *MockStorage {
 	return &MockStorage{
 		messages: make(map[string]*types.Message),
 		statuses: make(map[string]*types.MessageStatus),
+		agents:   make(map[string]*agents.LocalAgent),
 	}
 }
 
@@ -288,6 +291,67 @@ func (m *MockStorage) GetStats(ctx context.Context) (storage.StorageStats, error
 
 func (m *MockStorage) SetError(err error) {
 	m.error = err
+}
+
+func (m *MockStorage) CreateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	m.agents[agent.Address] = agent
+	return nil
+}
+
+func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agents.LocalAgent, error) {
+	agent, exists := m.agents[agentAddress]
+	if !exists {
+		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	return agent, nil
+}
+
+func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+	if _, exists := m.agents[agent.Address]; !exists {
+		return fmt.Errorf("agent not found: %s", agent.Address)
+	}
+
+	agentCopy := *agent
+	m.agents[agent.Address] = &agentCopy
+	return nil
+}
+
+func (m *MockStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
+	if _, exists := m.agents[agentAddress]; !exists {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	delete(m.agents, agentAddress)
+	return nil
+}
+
+func (m *MockStorage) ListAgents(ctx context.Context) ([]*agents.LocalAgent, error) {
+	var list []*agents.LocalAgent
+	for _, agent := range m.agents {
+		agentCopy := *agent
+		list = append(list, &agentCopy)
+	}
+	return list, nil
+}
+
+func (m *MockStorage) GetSupportedSchemas(ctx context.Context) ([]string, error) {
+	schemaSet := make(map[string]struct{})
+	for _, agent := range m.agents {
+		for _, schemaID := range agent.SupportedSchemas {
+			schemaSet[schemaID] = struct{}{}
+		}
+	}
+
+	var schemas []string
+	for schemaID := range schemaSet {
+		schemas = append(schemas, schemaID)
+	}
+
+	return schemas, nil
 }
 
 func (m *MockDiscovery) SupportsSchema(ctx context.Context, domain, schema string) (bool, error) {

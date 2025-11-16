@@ -22,16 +22,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
-// MemoryStorage implements MessageStorage using in-memory maps
+// MemoryStorage implements Storage using in-memory maps
 type MemoryStorage struct {
 	config      MemoryStorageConfig
 	messages    map[string]*types.Message
 	statuses    map[string]*types.MessageStatus
+	agents      map[string]*agents.LocalAgent
 	messagesMux sync.RWMutex
 	statusesMux sync.RWMutex
+	agentsMux   sync.RWMutex
 	createdAt   time.Time
 }
 
@@ -41,6 +44,7 @@ func NewMemoryStorage(config MemoryStorageConfig) *MemoryStorage {
 		config:    config,
 		messages:  make(map[string]*types.Message),
 		statuses:  make(map[string]*types.MessageStatus),
+		agents:    make(map[string]*agents.LocalAgent),
 		createdAt: time.Now().UTC(),
 	}
 }
@@ -369,4 +373,103 @@ func (ms *MemoryStorage) matchesFilter(message *types.Message, messageID string,
 	}
 
 	return true
+}
+
+// CreateAgent creates a new local agent
+func (ms *MemoryStorage) CreateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+	ms.agentsMux.Lock()
+	defer ms.agentsMux.Unlock()
+
+	if _, exists := ms.agents[agent.Address]; exists {
+		return fmt.Errorf("agent already exists: %s", agent.Address)
+	}
+
+	ms.agents[agent.Address] = agent
+	return nil
+}
+
+// GetAgent retrieves a local agent by address
+func (ms *MemoryStorage) GetAgent(ctx context.Context, agentAddress string) (*agents.LocalAgent, error) {
+	if agentAddress == "" {
+		return nil, fmt.Errorf("agent address cannot be empty")
+	}
+
+	ms.agentsMux.RLock()
+	defer ms.agentsMux.RUnlock()
+
+	agent, exists := ms.agents[agentAddress]
+	if !exists {
+		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	return agent, nil
+}
+
+// UpdateAgent updates an existing local agent
+func (ms *MemoryStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+	ms.agentsMux.Lock()
+	defer ms.agentsMux.Unlock()
+
+	if _, exists := ms.agents[agent.Address]; !exists {
+		return fmt.Errorf("agent not found: %s", agent.Address)
+	}
+
+	ms.agents[agent.Address] = agent
+	return nil
+}
+
+// DeleteAgent removes a local agent from storage
+func (ms *MemoryStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
+	if agentAddress == "" {
+		return fmt.Errorf("agent address cannot be empty")
+	}
+
+	ms.agentsMux.Lock()
+	defer ms.agentsMux.Unlock()
+
+	if _, exists := ms.agents[agentAddress]; !exists {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	delete(ms.agents, agentAddress)
+	return nil
+}
+
+// ListAgents returns all local agents
+func (ms *MemoryStorage) ListAgents(ctx context.Context) ([]*agents.LocalAgent, error) {
+	ms.agentsMux.RLock()
+	defer ms.agentsMux.RUnlock()
+
+	var agentList []*agents.LocalAgent
+	for _, agent := range ms.agents {
+		agentList = append(agentList, agent)
+	}
+
+	return agentList, nil
+}
+
+// GetSupportedSchemas returns all supported schemas across local agents
+func (ms *MemoryStorage) GetSupportedSchemas(ctx context.Context) ([]string, error) {
+	ms.agentsMux.RLock()
+	defer ms.agentsMux.RUnlock()
+
+	schemaSet := make(map[string]struct{})
+	for _, agent := range ms.agents {
+		for _, schemaID := range agent.SupportedSchemas {
+			schemaSet[schemaID] = struct{}{}
+		}
+	}
+
+	var schemas []string
+	for schemaID := range schemaSet {
+		schemas = append(schemas, schemaID)
+	}
+
+	return schemas, nil
 }

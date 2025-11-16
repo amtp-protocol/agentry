@@ -24,9 +24,9 @@ import (
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
-// TestMessageStorageInterface verifies that MemoryStorage implements MessageStorage interface
-func TestMessageStorageInterface(t *testing.T) {
-	var _ MessageStorage = (*MemoryStorage)(nil)
+// TestStorageInterface verifies that MemoryStorage implements Storage interface
+func TestStorageInterface(t *testing.T) {
+	var _ Storage = (*MemoryStorage)(nil)
 }
 
 // TestStorageStats verifies StorageStats structure
