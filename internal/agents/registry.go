@@ -19,8 +19,10 @@ package agents
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -48,6 +50,7 @@ type Registry struct {
 	localDomain   string
 	schemaManager SchemaManager
 	storage       AgentStore
+	apiKeySalt    string
 }
 
 // SchemaManager interface for schema validation
@@ -60,6 +63,7 @@ type SchemaManager interface {
 type RegistryConfig struct {
 	LocalDomain   string
 	SchemaManager SchemaManager
+	APIKeySalt    string
 }
 
 // NewRegistry creates a new agent registry
@@ -68,6 +72,7 @@ func NewRegistry(config RegistryConfig, storage AgentStore) *Registry {
 		localDomain:   config.LocalDomain,
 		schemaManager: config.SchemaManager,
 		storage:       storage,
+		apiKeySalt:    config.APIKeySalt,
 	}
 }
 
@@ -105,13 +110,17 @@ func (r *Registry) RegisterAgent(ctx context.Context, agent *LocalAgent) error {
 	agent.RequiresSchema = len(agent.SupportedSchemas) > 0
 
 	// Generate API key if not provided
-	if agent.APIKey == "" {
+	plainAPIKey := agent.APIKey
+	if plainAPIKey == "" {
 		apiKey, err := r.GenerateAPIKey()
 		if err != nil {
 			return fmt.Errorf("failed to generate API key: %w", err)
 		}
-		agent.APIKey = apiKey
+		plainAPIKey = apiKey
 	}
+
+	// Store hash
+	agent.APIKey = r.hashAPIKey(plainAPIKey)
 
 	// Set timestamps
 	now := time.Now().UTC()
@@ -119,6 +128,10 @@ func (r *Registry) RegisterAgent(ctx context.Context, agent *LocalAgent) error {
 	agent.LastAccess = now
 
 	err = r.storage.CreateAgent(ctx, agent)
+
+	// Restore plain key for the caller
+	agent.APIKey = plainAPIKey
+
 	if err != nil {
 		return fmt.Errorf("failed to register agent: %w", err)
 	}
@@ -141,7 +154,21 @@ func (r *Registry) UnregisterAgent(ctx context.Context, agentNameOrAddress strin
 }
 
 // GetAgent returns a specific agent by address
+// Note: API Key is redacted for security
 func (r *Registry) GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error) {
+	agent, err := r.getAgentInternal(ctx, agentAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return a copy to avoid race conditions and redact sensitive info
+	agentCopy := *agent
+	agentCopy.APIKey = "" // Redact API key
+	return &agentCopy, nil
+}
+
+// getAgentInternal returns the raw agent data including hashed API key
+func (r *Registry) getAgentInternal(ctx context.Context, agentAddress string) (*LocalAgent, error) {
 	agent, err := r.storage.GetAgent(ctx, agentAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent: %w", err)
@@ -149,9 +176,7 @@ func (r *Registry) GetAgent(ctx context.Context, agentAddress string) (*LocalAge
 	if agent == nil {
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
 	}
-	// Return a copy to avoid race conditions
-	agentCopy := *agent
-	return &agentCopy, nil
+	return agent, nil
 }
 
 // GetAllAgents returns all registered local agents
@@ -167,6 +192,7 @@ func (r *Registry) GetAllAgents(ctx context.Context) map[string]*LocalAgent {
 			continue
 		}
 		agentCopy := *agent
+		agentCopy.APIKey = "" // Redact API key
 		result[agentCopy.Address] = &agentCopy
 	}
 
@@ -196,13 +222,15 @@ func (r *Registry) GenerateAPIKey() (string, error) {
 
 // VerifyAPIKey verifies that the provided API key belongs to the specified agent
 func (r *Registry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string) bool {
-	agent, err := r.GetAgent(ctx, agentAddress)
+	agent, err := r.getAgentInternal(ctx, agentAddress)
 	if err != nil || agent == nil {
 		return false
 	}
 
+	hashedInput := r.hashAPIKey(apiKey)
+
 	// Use constant-time comparison to prevent timing attacks
-	return subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(apiKey)) == 1
+	return subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashedInput)) == 1
 }
 
 // UpdateLastAccess updates the last access timestamp for an agent
@@ -233,7 +261,7 @@ func (r *Registry) RotateAPIKey(ctx context.Context, agentAddress string) (strin
 	}
 
 	// Update agent with new key
-	agent.APIKey = newAPIKey
+	agent.APIKey = r.hashAPIKey(newAPIKey)
 	err = r.storage.UpdateAgent(ctx, agent)
 	if err != nil {
 		return "", fmt.Errorf("failed to update agent with new API key: %w", err)
@@ -403,4 +431,10 @@ func isValidAgentName(name string) bool {
 	}
 
 	return true
+}
+
+// hashAPIKey creates a SHA256 hash of the API key
+func (r *Registry) hashAPIKey(key string) string {
+	hash := sha256.Sum256([]byte(key + r.apiKeySalt))
+	return hex.EncodeToString(hash[:])
 }

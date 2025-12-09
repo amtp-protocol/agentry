@@ -132,7 +132,8 @@ func (m *MockStorage) GetInboxMessages(ctx context.Context, recipient string) ([
 }
 
 func (m *MockStorage) CreateAgent(ctx context.Context, agent *agents.LocalAgent) error {
-	m.agents[agent.Address] = agent
+	agentCopy := *agent
+	m.agents[agent.Address] = &agentCopy
 	return nil
 }
 
@@ -142,7 +143,8 @@ func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agent
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
 	}
 
-	return agent, nil
+	agentCopy := *agent
+	return &agentCopy, nil
 }
 
 func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
@@ -314,6 +316,7 @@ func createTestServer() *Server {
 	agentRegistryConfig := agents.RegistryConfig{
 		LocalDomain:   cfg.Server.Domain,
 		SchemaManager: nil, // No schema manager in basic test
+		APIKeySalt:    "test-salt",
 	}
 	agentRegistry := agents.NewRegistry(agentRegistryConfig, mockStorage)
 
@@ -865,6 +868,7 @@ func createTestServerWithRealProcessor() *Server {
 	agentRegistryConfig := agents.RegistryConfig{
 		LocalDomain:   cfg.Server.Domain,
 		SchemaManager: nil, // No schema manager in tests
+		APIKeySalt:    "test-salt",
 	}
 	agentRegistry := agents.NewRegistry(agentRegistryConfig, storage)
 

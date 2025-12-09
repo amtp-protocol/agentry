@@ -129,6 +129,7 @@ func createTestRegistry() *Registry {
 	config := RegistryConfig{
 		LocalDomain:   "localhost",
 		SchemaManager: NewMockSchemaManager(),
+		APIKeySalt:    "test-salt",
 	}
 	return NewRegistry(config, newInMemoryAgentStore())
 }
@@ -179,15 +180,20 @@ func TestVerifyAPIKey(t *testing.T) {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
 
-	// Get the registered agent to get the generated API key
+	// The agent object passed to RegisterAgent should have the plain text API key
+	validKey := agent.APIKey
+	if validKey == "" {
+		t.Fatal("Agent API key is empty after registration")
+	}
+
+	// Get the registered agent - API key should be redacted
 	registeredAgent, err := registry.GetAgent(ctx, agent.Address)
 	if err != nil {
 		t.Fatalf("Failed to get registered agent: %v", err)
 	}
 
-	validKey := registeredAgent.APIKey
-	if validKey == "" {
-		t.Fatal("Agent API key is empty")
+	if registeredAgent.APIKey != "" {
+		t.Error("GetAgent should redact API key")
 	}
 
 	// Test valid key verification
@@ -233,12 +239,11 @@ func TestRotateAPIKey(t *testing.T) {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
 
-	// Get original API key
-	originalAgent, err := registry.GetAgent(ctx, agent.Address)
-	if err != nil {
-		t.Fatalf("Failed to get registered agent: %v", err)
+	// Get original API key from the agent object
+	originalKey := agent.APIKey
+	if originalKey == "" {
+		t.Fatal("Original API key is empty")
 	}
-	originalKey := originalAgent.APIKey
 
 	// Rotate the API key
 	newKey, err := registry.RotateAPIKey(ctx, agent.Address)
@@ -383,14 +388,19 @@ func TestRegisterAgentAPIKeyGeneration(t *testing.T) {
 				t.Fatalf("Failed to get registered agent: %v", err)
 			}
 
-			// Verify API key was generated if not provided
-			if tt.agent.APIKey == "" && registeredAgent.APIKey == "" {
-				t.Error("API key should be generated if not provided")
+			// Verify GetAgent redacts API key
+			if registeredAgent.APIKey != "" {
+				t.Error("GetAgent should redact API key")
 			}
 
-			// Verify custom API key was preserved
-			if tt.agent.APIKey != "" && registeredAgent.APIKey != tt.agent.APIKey {
-				t.Error("Custom API key should be preserved")
+			// Verify API key was generated/preserved in the input struct
+			if tt.agent.APIKey == "" {
+				t.Error("API key should be present in the input struct after registration")
+			}
+
+			// Verify we can verify the key
+			if !registry.VerifyAPIKey(ctx, tt.agent.Address, tt.agent.APIKey) {
+				t.Error("Should be able to verify the API key")
 			}
 
 			// Verify timestamps were set

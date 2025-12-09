@@ -129,6 +129,7 @@ func New(cfg *config.Config) (*Server, error) {
 	agentRegistryConfig := agents.RegistryConfig{
 		LocalDomain:   cfg.Server.Domain,
 		SchemaManager: schemaManager,
+		APIKeySalt:    cfg.Auth.APIKeySalt,
 	}
 	agentRegistry := agents.NewRegistry(agentRegistryConfig, storage)
 
