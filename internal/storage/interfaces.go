@@ -19,11 +19,14 @@ package storage
 import (
 	"context"
 
+	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
-// MessageStorage defines the interface for message storage operations
-type MessageStorage interface {
+// Storage defines the interface for message storage operations
+type Storage interface {
+	agents.AgentStore
+
 	// Message operations
 	StoreMessage(ctx context.Context, message *types.Message) error
 	GetMessage(ctx context.Context, messageID string) (*types.Message, error)

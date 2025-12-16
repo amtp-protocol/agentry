@@ -231,6 +231,7 @@ Options:
 | `AMTP_AUTH_API_KEY_HEADER` | `X-API-Key` | API key header name |
 | `AMTP_ADMIN_KEY_FILE` | - | Path to admin API key file (can also be set via `-admin-key-file` flag) |
 | `AMTP_ADMIN_API_KEY_HEADER` | `X-Admin-Key` | Header name for admin API authentication |
+| `AMTP_AUTH_API_KEY_SALT` | - | Salt for API key hashing |
 
 ##### Logging Configuration
 | Variable | Default | Description |
@@ -291,6 +292,7 @@ export AMTP_IDEMPOTENCY_TTL="168h"  # 7 days
 export AMTP_AUTH_REQUIRED=false
 export AMTP_AUTH_API_KEY_HEADER="X-API-Key"
 export AMTP_ADMIN_KEY_FILE="/etc/agentry/admin.keys"  # Optional: for admin API access
+export AMTP_AUTH_API_KEY_SALT="your_salt"  # Optional: for api_key hash salt
 
 # Logging
 export AMTP_LOG_LEVEL=info

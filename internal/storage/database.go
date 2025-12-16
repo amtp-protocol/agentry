@@ -19,9 +19,11 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
 
 	"gorm.io/datatypes"
@@ -554,6 +556,154 @@ func (ds *DatabaseStorage) GetStats(ctx context.Context) (StorageStats, error) {
 	return stats, nil
 }
 
+// Agents operations
+
+// CreateAgent creates a new agent in the database
+func (ds *DatabaseStorage) CreateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+
+	dbAgent, err := ds.convertToDBAgent(agent)
+	if err != nil {
+		return fmt.Errorf("failed to convert agent: %w", err)
+	}
+
+	if err := ds.db.WithContext(ctx).Create(dbAgent).Error; err != nil {
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return fmt.Errorf("agent already exists: %s", agent.Address)
+		}
+		return fmt.Errorf("failed to create agent: %w", err)
+	}
+
+	return nil
+}
+
+// GetAgent retrieves an agent by address
+func (ds *DatabaseStorage) GetAgent(ctx context.Context, agentAddress string) (*agents.LocalAgent, error) {
+	if agentAddress == "" {
+		return nil, fmt.Errorf("agent address cannot be empty")
+	}
+
+	var dbAgent Agent
+	if err := ds.db.WithContext(ctx).
+		Where("address = ?", agentAddress).
+		First(&dbAgent).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("agent not found: %s", agentAddress)
+		}
+		return nil, fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	agent, err := ds.convertToLocalAgent(&dbAgent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert agent: %w", err)
+	}
+
+	return agent, nil
+}
+
+// UpdateAgent updates an existing agent in the database
+func (ds *DatabaseStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
+	if agent == nil {
+		return fmt.Errorf("agent cannot be nil")
+	}
+
+	updates, err := ds.agentToUpdateMap(agent)
+	if err != nil {
+		return fmt.Errorf("failed to prepare agent update: %w", err)
+	}
+
+	result := ds.db.WithContext(ctx).
+		Model(&Agent{}).
+		Where("address = ?", agent.Address).
+		Updates(updates)
+
+	if result.Error != nil {
+		return fmt.Errorf("failed to update agent: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("agent not found: %s", agent.Address)
+	}
+
+	return nil
+}
+
+// DeleteAgent deletes an agent from the database
+func (ds *DatabaseStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
+	if agentAddress == "" {
+		return fmt.Errorf("agent address cannot be empty")
+	}
+
+	result := ds.db.WithContext(ctx).
+		Where("address = ?", agentAddress).
+		Delete(&Agent{})
+
+	if result.Error != nil {
+		return fmt.Errorf("failed to delete agent: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	return nil
+}
+
+// ListAgents lists all agents in the database
+func (ds *DatabaseStorage) ListAgents(ctx context.Context) ([]*agents.LocalAgent, error) {
+	var dbAgents []Agent
+	if err := ds.db.WithContext(ctx).Find(&dbAgents).Error; err != nil {
+		return nil, fmt.Errorf("failed to list agents: %w", err)
+	}
+
+	var agentsList []*agents.LocalAgent
+	for i := range dbAgents {
+		agent, err := ds.convertToLocalAgent(&dbAgents[i])
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert agent: %w", err)
+		}
+		agentsList = append(agentsList, agent)
+	}
+
+	return agentsList, nil
+}
+
+// GetSupportedSchemas retrieves all unique supported schema IDs across agents
+func (ds *DatabaseStorage) GetSupportedSchemas(ctx context.Context) ([]string, error) {
+	var dbAgents []Agent
+	if err := ds.db.WithContext(ctx).
+		Select("supported_schemas").
+		Find(&dbAgents).Error; err != nil {
+		return nil, fmt.Errorf("failed to get supported schemas: %w", err)
+	}
+
+	schemaSet := make(map[string]struct{})
+	for i := range dbAgents {
+		var schemas []string
+		if len(dbAgents[i].SupportedSchemas) == 0 {
+			continue
+		}
+		if err := json.Unmarshal(dbAgents[i].SupportedSchemas, &schemas); err != nil {
+			return nil, fmt.Errorf("failed to parse supported schemas: %w", err)
+		}
+		for _, schemaID := range schemas {
+			if schemaID == "" {
+				continue
+			}
+			schemaSet[schemaID] = struct{}{}
+		}
+	}
+
+	var schemas []string
+	for schemaID := range schemaSet {
+		schemas = append(schemas, schemaID)
+	}
+
+	return schemas, nil
+}
+
 // Helper functions for conversion between types and models
 
 func (ds *DatabaseStorage) convertToDBMessage(message *types.Message) (*Message, error) {
@@ -779,4 +929,132 @@ func (ds *DatabaseStorage) convertToTypesMessageStatus(messageStatus *MessageSta
 	}
 
 	return status, nil
+}
+
+// convertToDBAgent converts a LocalAgent to Agent model
+func (ds *DatabaseStorage) convertToDBAgent(agent *agents.LocalAgent) (*Agent, error) {
+	if agent == nil {
+		return nil, fmt.Errorf("agent cannot be nil")
+	}
+
+	dbAgent := &Agent{
+		Address:        agent.Address,
+		DeliveryMode:   agent.DeliveryMode,
+		APIKey:         agent.APIKey,
+		RequiresSchema: agent.RequiresSchema,
+	}
+
+	if agent.PushTarget != "" {
+		pushTarget := agent.PushTarget
+		dbAgent.PushTarget = &pushTarget
+	}
+
+	if headersJSON, err := json.Marshal(agent.Headers); err != nil {
+		return nil, fmt.Errorf("failed to marshal headers: %w", err)
+	} else if string(headersJSON) != "null" {
+		dbAgent.Headers = datatypes.JSON(headersJSON)
+	}
+
+	schemasJSON, err := json.Marshal(agent.SupportedSchemas)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal supported schemas: %w", err)
+	}
+	if len(schemasJSON) == 0 || string(schemasJSON) == "null" {
+		schemasJSON = []byte("[]")
+	}
+	dbAgent.SupportedSchemas = datatypes.JSON(schemasJSON)
+
+	if agent.CreatedAt.IsZero() {
+		dbAgent.CreatedAt = time.Now().UTC()
+	} else {
+		dbAgent.CreatedAt = agent.CreatedAt
+	}
+
+	if !agent.LastAccess.IsZero() {
+		lastAccess := agent.LastAccess
+		dbAgent.LastAccess = &lastAccess
+	}
+
+	return dbAgent, nil
+}
+
+// convertToLocalAgent converts an Agent model to LocalAgent
+func (ds *DatabaseStorage) convertToLocalAgent(dbAgent *Agent) (*agents.LocalAgent, error) {
+	if dbAgent == nil {
+		return nil, fmt.Errorf("database agent cannot be nil")
+	}
+
+	var headers map[string]string
+	if len(dbAgent.Headers) > 0 {
+		if err := json.Unmarshal(dbAgent.Headers, &headers); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal headers: %w", err)
+		}
+	}
+
+	var supportedSchemas []string
+	if len(dbAgent.SupportedSchemas) > 0 {
+		if err := json.Unmarshal(dbAgent.SupportedSchemas, &supportedSchemas); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal supported schemas: %w", err)
+		}
+	}
+
+	localAgent := &agents.LocalAgent{
+		Address:          dbAgent.Address,
+		DeliveryMode:     dbAgent.DeliveryMode,
+		Headers:          headers,
+		APIKey:           dbAgent.APIKey,
+		SupportedSchemas: supportedSchemas,
+		RequiresSchema:   dbAgent.RequiresSchema,
+		CreatedAt:        dbAgent.CreatedAt,
+	}
+
+	if dbAgent.PushTarget != nil {
+		localAgent.PushTarget = *dbAgent.PushTarget
+	}
+
+	if dbAgent.LastAccess != nil {
+		localAgent.LastAccess = *dbAgent.LastAccess
+	}
+
+	return localAgent, nil
+}
+
+// agentToUpdateMap prepares a map of fields to update for an agent
+func (ds *DatabaseStorage) agentToUpdateMap(agent *agents.LocalAgent) (map[string]interface{}, error) {
+	updates := map[string]interface{}{
+		"delivery_mode":   agent.DeliveryMode,
+		"api_key":         agent.APIKey,
+		"requires_schema": agent.RequiresSchema,
+		"push_target":     nil,
+		"last_access":     nil,
+	}
+
+	if agent.PushTarget != "" {
+		updates["push_target"] = agent.PushTarget
+	}
+
+	if !agent.LastAccess.IsZero() {
+		updates["last_access"] = agent.LastAccess
+	}
+
+	headersJSON, err := json.Marshal(agent.Headers)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal headers: %w", err)
+	}
+	if string(headersJSON) != "null" {
+		updates["headers"] = datatypes.JSON(headersJSON)
+	} else {
+		updates["headers"] = datatypes.JSON([]byte("null"))
+	}
+
+	schemasJSON, err := json.Marshal(agent.SupportedSchemas)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal supported schemas: %w", err)
+	}
+	if len(schemasJSON) == 0 || string(schemasJSON) == "null" {
+		schemasJSON = []byte("[]")
+	}
+	updates["supported_schemas"] = datatypes.JSON(schemasJSON)
+
+	return updates, nil
 }

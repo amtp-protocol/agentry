@@ -61,17 +61,17 @@ func NewMockAgentRegistry() *MockAgentRegistry {
 	}
 }
 
-func (m *MockAgentRegistry) RegisterAgent(agent *agents.LocalAgent) error {
+func (m *MockAgentRegistry) RegisterAgent(ctx context.Context, agent *agents.LocalAgent) error {
 	m.agents[agent.Address] = agent
 	return nil
 }
 
-func (m *MockAgentRegistry) UnregisterAgent(agentNameOrAddress string) error {
+func (m *MockAgentRegistry) UnregisterAgent(ctx context.Context, agentNameOrAddress string) error {
 	delete(m.agents, agentNameOrAddress)
 	return nil
 }
 
-func (m *MockAgentRegistry) GetAgent(agentAddress string) (*agents.LocalAgent, error) {
+func (m *MockAgentRegistry) GetAgent(ctx context.Context, agentAddress string) (*agents.LocalAgent, error) {
 	agent, exists := m.agents[agentAddress]
 	if !exists {
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
@@ -80,7 +80,7 @@ func (m *MockAgentRegistry) GetAgent(agentAddress string) (*agents.LocalAgent, e
 	return &agentCopy, nil
 }
 
-func (m *MockAgentRegistry) GetAllAgents() map[string]*agents.LocalAgent {
+func (m *MockAgentRegistry) GetAllAgents(ctx context.Context) map[string]*agents.LocalAgent {
 	agents := make(map[string]*agents.LocalAgent)
 	for addr, agent := range m.agents {
 		agentCopy := *agent
@@ -89,7 +89,7 @@ func (m *MockAgentRegistry) GetAllAgents() map[string]*agents.LocalAgent {
 	return agents
 }
 
-func (m *MockAgentRegistry) GetSupportedSchemas() []string {
+func (m *MockAgentRegistry) GetSupportedSchemas(ctx context.Context) []string {
 	schemaSet := make(map[string]bool)
 	for _, agent := range m.agents {
 		for _, schema := range agent.SupportedSchemas {
@@ -109,18 +109,18 @@ func (m *MockAgentRegistry) GenerateAPIKey() (string, error) {
 	return "mock-api-key", nil
 }
 
-func (m *MockAgentRegistry) VerifyAPIKey(agentAddress, apiKey string) bool {
+func (m *MockAgentRegistry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string) bool {
 	agent, exists := m.agents[agentAddress]
 	return exists && agent.APIKey == apiKey
 }
 
-func (m *MockAgentRegistry) UpdateLastAccess(agentAddress string) {
+func (m *MockAgentRegistry) UpdateLastAccess(ctx context.Context, agentAddress string) {
 	if agent, exists := m.agents[agentAddress]; exists {
 		agent.LastAccess = time.Now().UTC()
 	}
 }
 
-func (m *MockAgentRegistry) RotateAPIKey(agentAddress string) (string, error) {
+func (m *MockAgentRegistry) RotateAPIKey(ctx context.Context, agentAddress string) (string, error) {
 	agent, exists := m.agents[agentAddress]
 	if !exists {
 		return "", fmt.Errorf("agent not found: %s", agentAddress)

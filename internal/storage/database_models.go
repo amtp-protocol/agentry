@@ -93,6 +93,20 @@ type RecipientStatus struct {
 	AcknowledgedAt *time.Time     `gorm:"type:timestamptz" json:"acknowledged_at,omitempty"`
 }
 
+// Agent model
+type Agent struct {
+	ID               uint           `gorm:"primarykey" json:"-"`
+	Address          string         `gorm:"size:255;uniqueIndex;not null" json:"address" validate:"required,email"`
+	DeliveryMode     string         `gorm:"size:10;not null;default:'push'" json:"delivery_mode" validate:"required,oneof=push pull"`
+	PushTarget       *string        `gorm:"type:text" json:"push_target,omitempty" validate:"omitempty,url"`
+	Headers          datatypes.JSON `gorm:"type:jsonb" json:"headers,omitempty"`
+	APIKey           string         `gorm:"size:64;not null" json:"api_key" validate:"required"`
+	SupportedSchemas datatypes.JSON `gorm:"type:jsonb;not null" json:"supported_schemas" validate:"required"`
+	RequiresSchema   bool           `gorm:"not null;default:false" json:"requires_schema"`
+	CreatedAt        time.Time      `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
+	LastAccess       *time.Time     `gorm:"type:timestamptz" json:"last_access,omitempty"`
+}
+
 // Custom Gorm hooks and utility methods
 
 // BeforeCreate hook before creation

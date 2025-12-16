@@ -88,6 +88,7 @@ type AuthConfig struct {
 	APIKeyHeader      string   `yaml:"api_key_header"`
 	AdminKeyFile      string   `yaml:"admin_key_file"`       // Path to admin API key file
 	AdminAPIKeyHeader string   `yaml:"admin_api_key_header"` // Header for admin API key
+	APIKeySalt        string   `yaml:"api_key_salt"`         // Salt for API key hashing
 }
 
 // StorageConfig holds storage configuration

@@ -30,7 +30,7 @@ import (
 type MessageProcessor struct {
 	discovery      DiscoveryService
 	deliveryEngine DeliveryService
-	storage        storage.MessageStorage
+	storage        storage.Storage
 	idempotencyMap map[string]*ProcessingResult
 	idempotencyMux sync.RWMutex
 }
@@ -54,11 +54,11 @@ type ProcessingOptions struct {
 }
 
 // NewMessageProcessor creates a new message processor
-func NewMessageProcessor(discovery DiscoveryService, deliveryEngine DeliveryService, messageStorage storage.MessageStorage) *MessageProcessor {
+func NewMessageProcessor(discovery DiscoveryService, deliveryEngine DeliveryService, storage storage.Storage) *MessageProcessor {
 	return &MessageProcessor{
 		discovery:      discovery,
 		deliveryEngine: deliveryEngine,
-		storage:        messageStorage,
+		storage:        storage,
 		idempotencyMap: make(map[string]*ProcessingResult),
 	}
 }

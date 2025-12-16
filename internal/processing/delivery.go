@@ -429,7 +429,7 @@ func (de *DeliveryEngine) DeliverBatch(ctx context.Context, message *types.Messa
 
 // deliverLocal handles local delivery for recipients in the same domain
 func (de *DeliveryEngine) deliverLocal(ctx context.Context, message *types.Message, recipient string, result *DeliveryResult) (*DeliveryResult, error) {
-	agent, err := de.agentRegistry.GetAgent(recipient)
+	agent, err := de.agentRegistry.GetAgent(ctx, recipient)
 	if err != nil {
 		// Default to pull mode if agent is not registered
 		return de.deliverLocalPull(ctx, message, recipient, result)

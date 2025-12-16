@@ -17,23 +17,35 @@
 package agents
 
 import (
+	"context"
+
 	"github.com/amtp-protocol/agentry/internal/types"
 )
+
+// AgentStore defines the storage operations required by the agent registry
+type AgentStore interface {
+	CreateAgent(ctx context.Context, agent *LocalAgent) error
+	DeleteAgent(ctx context.Context, agentAddress string) error
+	GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error)
+	UpdateAgent(ctx context.Context, agent *LocalAgent) error
+	ListAgents(ctx context.Context) ([]*LocalAgent, error)
+	GetSupportedSchemas(ctx context.Context) ([]string, error)
+}
 
 // AgentRegistry defines the interface for managing local agents
 type AgentRegistry interface {
 	// Agent management
-	RegisterAgent(agent *LocalAgent) error
-	UnregisterAgent(agentNameOrAddress string) error
-	GetAgent(agentAddress string) (*LocalAgent, error)
-	GetAllAgents() map[string]*LocalAgent
-	GetSupportedSchemas() []string
+	RegisterAgent(ctx context.Context, agent *LocalAgent) error
+	UnregisterAgent(ctx context.Context, agentNameOrAddress string) error
+	GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error)
+	GetAllAgents(ctx context.Context) map[string]*LocalAgent
+	GetSupportedSchemas(ctx context.Context) []string
 
 	// API key management
 	GenerateAPIKey() (string, error)
-	VerifyAPIKey(agentAddress, apiKey string) bool
-	UpdateLastAccess(agentAddress string)
-	RotateAPIKey(agentAddress string) (string, error)
+	VerifyAPIKey(ctx context.Context, agentAddress, apiKey string) bool
+	UpdateLastAccess(ctx context.Context, agentAddress string)
+	RotateAPIKey(ctx context.Context, agentAddress string) (string, error)
 
 	// Inbox management (for pull-mode agents)
 	StoreMessage(recipient string, message *types.Message) error

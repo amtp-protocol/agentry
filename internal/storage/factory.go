@@ -22,7 +22,7 @@ import (
 )
 
 // NewStorage creates a new storage instance based on the configuration
-func NewStorage(config StorageConfig) (MessageStorage, error) {
+func NewStorage(config StorageConfig) (Storage, error) {
 	storageType := strings.ToLower(config.Type)
 	if storageType == "" {
 		storageType = "memory" // Default to memory storage

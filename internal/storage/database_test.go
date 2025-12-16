@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"regexp"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"gorm.io/datatypes"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -762,5 +766,511 @@ func TestConvertToTypesMessageStatus(t *testing.T) {
 	}
 	if status.MessageID != "id" || status.Status != types.StatusPending {
 		t.Errorf("unexpected status: %+v", status)
+	}
+}
+
+func TestCreateAgent(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	agent := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "agents"`)).WithArgs(
+		agent.Address,
+		agent.DeliveryMode,
+		agent.PushTarget,
+		`{"accept":"application/json"}`,
+		agent.APIKey,
+		`["schema1","schema2"]`,
+		true,
+		sqlmock.AnyArg(),
+		sqlmock.AnyArg(),
+	).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	mock.ExpectCommit()
+
+	err := storage.CreateAgent(context.Background(), agent)
+	if err != nil {
+		t.Fatalf("CreateAgent failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestCreateAgent_NilAgent(t *testing.T) {
+	gormDB, _ := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	err := storage.CreateAgent(context.Background(), nil)
+	if err == nil || err.Error() != "agent cannot be nil" {
+		t.Fatalf("expected agent cannot be nil error, got: %v", err)
+	}
+}
+
+func TestCreateAgent_DuplicateAddress(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	agent1 := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1/webhook",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	agent2 := &agents.LocalAgent{
+		Address:          "agent1@localhost", // same address as agent1
+		DeliveryMode:     "pull",
+		Headers:          map[string]string{"accept": "application/xml"},
+		SupportedSchemas: []string{"schema3"},
+		RequiresSchema:   false,
+		CreatedAt:        time.Now(),
+		LastAccess:       time.Now(),
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "agents"`)).WithArgs(
+		agent1.Address,
+		agent1.DeliveryMode,
+		agent1.PushTarget,
+		`{"accept":"application/json"}`,
+		agent1.APIKey,
+		`["schema1","schema2"]`,
+		agent1.RequiresSchema,
+		sqlmock.AnyArg(),
+		sqlmock.AnyArg(),
+	).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+	mock.ExpectCommit()
+
+	err := storage.CreateAgent(context.Background(), agent1)
+	if err != nil {
+		t.Fatalf("CreateAgent for agent1 failed: %v", err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "agents"`)).WithArgs(
+		agent2.Address,
+		agent2.DeliveryMode,
+		nil,
+		`{"accept":"application/xml"}`,
+		agent2.APIKey,
+		`["schema3"]`,
+		agent2.RequiresSchema,
+		sqlmock.AnyArg(),
+		sqlmock.AnyArg(),
+	).WillReturnError(gorm.ErrDuplicatedKey)
+	mock.ExpectRollback()
+
+	err = storage.CreateAgent(context.Background(), agent2)
+	if err == nil || !regexp.MustCompile(`agent already exists`).MatchString(err.Error()) {
+		t.Fatalf("expected duplicate address error, got: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestGetAgent(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs("agent1@localhost", 1).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "address", "delivery_mode", "push_target", "headers", "api_key", "supported_schemas", "requires_schema", "created_at", "last_access"}).AddRow(
+			1,
+			"agent1@localhost",
+			"push",
+			"http://localhost:8080/agent1/webhook",
+			`{"accept":"application/json"}`,
+			"api-key-123",
+			`["schema1","schema2"]`,
+			true,
+			time.Now(),
+			time.Now(),
+		),
+	)
+
+	agent, err := storage.GetAgent(context.Background(), "agent1@localhost")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if agent == nil || agent.Address != "agent1@localhost" {
+		t.Fatalf("unexpected agent: %+v", agent)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestGetAgent_NotFound(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs("nonexistent@localhost", 1).WillReturnError(gorm.ErrRecordNotFound)
+
+	if _, err := storage.GetAgent(context.Background(), "nonexistent@localhost"); err == nil || !regexp.MustCompile(`agent not found`).MatchString(err.Error()) {
+		t.Fatalf("expected agent not found error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestGetAgent_EmptyAgentAddress(t *testing.T) {
+	gormDB, _ := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	_, err := storage.GetAgent(context.Background(), "")
+	if err == nil || err.Error() != "agent address cannot be empty" {
+		t.Fatalf("expected agent address cannot be empty error, got: %v", err)
+	}
+}
+
+func TestUpdateAgent(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	updatedAgent := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "pull",
+		Headers:          map[string]string{"accept": "application/xml"},
+		SupportedSchemas: []string{"schema3"},
+		RequiresSchema:   false,
+		LastAccess:       time.Now(),
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET`)).WithArgs(
+		updatedAgent.APIKey,
+		updatedAgent.DeliveryMode,
+		`{"accept":"application/xml"}`,
+		sqlmock.AnyArg(),
+		nil,
+		updatedAgent.RequiresSchema,
+		`["schema3"]`,
+		updatedAgent.Address,
+	).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := storage.UpdateAgent(context.Background(), updatedAgent)
+	if err != nil {
+		t.Fatalf("UpdateAgent failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestDeleteAgent_Success(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "agents" WHERE address = $1`)).WithArgs("agent1@localhost").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	if err := storage.DeleteAgent(context.Background(), "agent1@localhost"); err != nil {
+		t.Fatalf("DeleteAgent failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestDeleteAgent_NotFound(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "agents" WHERE address = $1`)).WithArgs("missing@localhost").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err := storage.DeleteAgent(context.Background(), "missing@localhost")
+	if err == nil || !regexp.MustCompile(`agent not found`).MatchString(err.Error()) {
+		t.Fatalf("expected agent not found error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestDeleteAgent_EmptyAddress(t *testing.T) {
+	storage := &DatabaseStorage{}
+	if err := storage.DeleteAgent(context.Background(), ""); err == nil || err.Error() != "agent address cannot be empty" {
+		t.Fatalf("expected empty address error, got: %v", err)
+	}
+}
+
+func TestListAgents_Success(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	now := time.Now()
+	pushTarget := "http://localhost:8080/agent1"
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents"`)).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "address", "delivery_mode", "push_target", "headers", "api_key", "supported_schemas", "requires_schema", "created_at", "last_access"}).
+			AddRow(1, "agent1@localhost", "push", pushTarget, `{"accept":"application/json"}`, "key1", `["schema1","schema2"]`, true, now, now).
+			AddRow(2, "agent2@localhost", "pull", nil, `{"accept":"text/plain"}`, "key2", `["schema3"]`, false, now, nil),
+	)
+
+	agentsList, err := storage.ListAgents(context.Background())
+	if err != nil {
+		t.Fatalf("ListAgents failed: %v", err)
+	}
+	if len(agentsList) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agentsList))
+	}
+	if agentsList[0].PushTarget != pushTarget {
+		t.Fatalf("unexpected push target: %s", agentsList[0].PushTarget)
+	}
+	if agentsList[1].DeliveryMode != "pull" || agentsList[1].LastAccess != (time.Time{}) {
+		t.Fatalf("unexpected agent: %+v", agentsList[1])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestListAgents_QueryError(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents"`)).WillReturnError(errors.New("query failed"))
+
+	if _, err := storage.ListAgents(context.Background()); err == nil || !regexp.MustCompile(`failed to list agents`).MatchString(err.Error()) {
+		t.Fatalf("expected list agents error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestGetSupportedSchemas(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "supported_schemas" FROM "agents"`)).WillReturnRows(
+		sqlmock.NewRows([]string{"supported_schemas"}).
+			AddRow(`["schema1"]`).
+			AddRow(`[]`).
+			AddRow(`["schema2","schema1"]`),
+	)
+
+	schemas, err := storage.GetSupportedSchemas(context.Background())
+	if err != nil {
+		t.Fatalf("GetSupportedSchemas failed: %v", err)
+	}
+	sort.Strings(schemas)
+	expected := []string{"schema1", "schema2"}
+	if !reflect.DeepEqual(schemas, expected) {
+		t.Fatalf("unexpected schemas: %v", schemas)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+func TestConvertToDBAgent(t *testing.T) {
+	ds := &DatabaseStorage{}
+	createdAt := time.Now().Add(-time.Hour).UTC()
+	lastAccess := time.Now().UTC()
+	agent := &agents.LocalAgent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       "http://localhost:8080/agent1",
+		Headers:          map[string]string{"accept": "application/json"},
+		APIKey:           "apikey",
+		SupportedSchemas: []string{"schema1", "schema2"},
+		RequiresSchema:   true,
+		CreatedAt:        createdAt,
+		LastAccess:       lastAccess,
+	}
+
+	dbAgent, err := ds.convertToDBAgent(agent)
+	if err != nil {
+		t.Fatalf("convertToDBAgent failed: %v", err)
+	}
+	if dbAgent.Address != agent.Address || dbAgent.APIKey != agent.APIKey || !dbAgent.RequiresSchema {
+		t.Fatalf("unexpected db agent core fields: %+v", dbAgent)
+	}
+	if dbAgent.PushTarget == nil || *dbAgent.PushTarget != agent.PushTarget {
+		t.Fatalf("unexpected push target: %v", dbAgent.PushTarget)
+	}
+	if dbAgent.LastAccess == nil || !dbAgent.LastAccess.Equal(lastAccess) {
+		t.Fatalf("unexpected last access: %v", dbAgent.LastAccess)
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(dbAgent.Headers, &headers); err != nil {
+		t.Fatalf("failed to unmarshal headers: %v", err)
+	}
+	if !reflect.DeepEqual(headers, agent.Headers) {
+		t.Fatalf("unexpected headers: %v", headers)
+	}
+	var schemas []string
+	if err := json.Unmarshal(dbAgent.SupportedSchemas, &schemas); err != nil {
+		t.Fatalf("failed to unmarshal schemas: %v", err)
+	}
+	if !reflect.DeepEqual(schemas, agent.SupportedSchemas) {
+		t.Fatalf("unexpected schemas: %v", schemas)
+	}
+	if !dbAgent.CreatedAt.Equal(createdAt) {
+		t.Fatalf("expected created at to match input, got %v", dbAgent.CreatedAt)
+	}
+}
+
+func TestConvertToDBAgent_NilAgent(t *testing.T) {
+	ds := &DatabaseStorage{}
+	if _, err := ds.convertToDBAgent(nil); err == nil || err.Error() != "agent cannot be nil" {
+		t.Fatalf("expected error for nil agent, got: %v", err)
+	}
+}
+
+func TestConvertToLocalAgent(t *testing.T) {
+	ds := &DatabaseStorage{}
+	pushTarget := "http://localhost:8080/agent1"
+	lastAccess := time.Now().UTC()
+	dbAgent := &Agent{
+		Address:          "agent1@localhost",
+		DeliveryMode:     "push",
+		PushTarget:       &pushTarget,
+		Headers:          datatypes.JSON([]byte(`{"accept":"application/json"}`)),
+		APIKey:           "apikey",
+		SupportedSchemas: datatypes.JSON([]byte(`["schema1","schema2"]`)),
+		RequiresSchema:   true,
+		CreatedAt:        time.Now().Add(-time.Hour).UTC(),
+		LastAccess:       &lastAccess,
+	}
+
+	agent, err := ds.convertToLocalAgent(dbAgent)
+	if err != nil {
+		t.Fatalf("convertToLocalAgent failed: %v", err)
+	}
+	if agent.Address != dbAgent.Address || agent.APIKey != dbAgent.APIKey || !agent.RequiresSchema {
+		t.Fatalf("unexpected agent core fields: %+v", agent)
+	}
+	if agent.PushTarget != pushTarget {
+		t.Fatalf("unexpected push target: %s", agent.PushTarget)
+	}
+	if !agent.LastAccess.Equal(lastAccess) {
+		t.Fatalf("unexpected last access: %v", agent.LastAccess)
+	}
+	if !agent.CreatedAt.Equal(dbAgent.CreatedAt) {
+		t.Fatalf("unexpected created at: %v", agent.CreatedAt)
+	}
+	if agent.Headers["accept"] != "application/json" {
+		t.Fatalf("unexpected headers: %v", agent.Headers)
+	}
+	if len(agent.SupportedSchemas) != 2 {
+		t.Fatalf("unexpected supported schemas: %v", agent.SupportedSchemas)
+	}
+}
+
+func TestConvertToLocalAgent_Nil(t *testing.T) {
+	ds := &DatabaseStorage{}
+	if _, err := ds.convertToLocalAgent(nil); err == nil || err.Error() != "database agent cannot be nil" {
+		t.Fatalf("expected error for nil database agent, got: %v", err)
+	}
+}
+
+func TestAgentToUpdateMap(t *testing.T) {
+	ds := &DatabaseStorage{}
+	lastAccess := time.Now().UTC()
+	agent := &agents.LocalAgent{
+		DeliveryMode:     "pull",
+		APIKey:           "apikey",
+		PushTarget:       "",
+		Headers:          map[string]string{"accept": "application/json"},
+		SupportedSchemas: []string{"schema1"},
+		RequiresSchema:   true,
+		LastAccess:       lastAccess,
+	}
+
+	updates, err := ds.agentToUpdateMap(agent)
+	if err != nil {
+		t.Fatalf("agentToUpdateMap failed: %v", err)
+	}
+	if updates["delivery_mode"] != agent.DeliveryMode {
+		t.Fatalf("unexpected delivery mode: %v", updates["delivery_mode"])
+	}
+	if updates["api_key"] != agent.APIKey {
+		t.Fatalf("unexpected api key: %v", updates["api_key"])
+	}
+	if updates["push_target"] != nil {
+		t.Fatalf("expected nil push target, got: %v", updates["push_target"])
+	}
+	if updates["last_access"] != lastAccess {
+		t.Fatalf("unexpected last access: %v", updates["last_access"])
+	}
+	headersJSON, ok := updates["headers"].(datatypes.JSON)
+	if !ok {
+		t.Fatalf("headers not datatypes.JSON: %T", updates["headers"])
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(headersJSON, &headers); err != nil {
+		t.Fatalf("failed to unmarshal headers: %v", err)
+	}
+	if !reflect.DeepEqual(headers, agent.Headers) {
+		t.Fatalf("unexpected headers: %v", headers)
+	}
+	schemasJSON, ok := updates["supported_schemas"].(datatypes.JSON)
+	if !ok {
+		t.Fatalf("supported schemas not datatypes.JSON: %T", updates["supported_schemas"])
+	}
+	var schemas []string
+	if err := json.Unmarshal(schemasJSON, &schemas); err != nil {
+		t.Fatalf("failed to unmarshal schemas: %v", err)
+	}
+	if !reflect.DeepEqual(schemas, agent.SupportedSchemas) {
+		t.Fatalf("unexpected schemas: %v", schemas)
+	}
+}
+
+func TestUpdateAgent_NilAgent(t *testing.T) {
+	gormDB, _ := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	err := storage.UpdateAgent(context.Background(), nil)
+	if err == nil || err.Error() != "agent cannot be nil" {
+		t.Fatalf("expected agent cannot be nil error, got: %v", err)
 	}
 }
