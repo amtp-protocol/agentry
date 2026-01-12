@@ -793,42 +793,6 @@ make setup
 make dev
 ```
 
-## Workflow Orchestration Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  AI Agent (Planner)                         │
-│  Generates dynamic workflow: "3 agents parallel → synthesis"│
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Agentry Workflow Orchestrator                  │
-│  ┌──────────────────┐  ┌──────────────────────────────┐    │
-│  │ Coordination     │  │ Context Manager              │    │
-│  │ Engine           │  │ - Shared workflow facts      │    │
-│  │ - Parallel       │  │ - Conversation history       │    │
-│  │ - Sequential     │  │ - Automatic injection        │    │
-│  │ - Conditional    │  │ - Token optimization         │    │
-│  └──────────────────┘  └──────────────────────────────┘    │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │         Agent Registry & Smart Router                │  │
-│  │  - Capability matching                               │  │
-│  │  - Dynamic agent selection                           │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Kubernetes / Container Runtime                 │
-│  Agentry provides workflow intelligence;                    │
-│  K8s provides execution infrastructure                      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Agentry fills the gap between "AI decides workflow" and "infrastructure executes it"**
-
 ## Architecture
 
 ```
