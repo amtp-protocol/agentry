@@ -8,13 +8,6 @@ Agentry provides intelligent workflow orchestration and organizational memory fo
 
 ## Features
 
-### Workflow Orchestration
-- **Dynamic Execution** - AI planners generate workflows; Agentry executes them (parallel, sequential, conditional)
-- **Automatic Context Sharing** - Workflow context injected seamlessly across agents
-- **Context Engineering** - Token-aware context selection, summarization, and relevance filtering
-- **Smart Routing** - Capability-based agent discovery without hardcoded addresses
-- **Framework Agnostic** - Works with LangGraph, CrewAI, or any custom agents
-
 ### Protocol & Messaging
 - **Universal Addressing** - `agent@domain` format with DNS-based discovery
 - **Federated Architecture** - Decentralized communication across organizational domains
@@ -27,12 +20,21 @@ Agentry provides intelligent workflow orchestration and organizational memory fo
 - **Security** - TLS 1.3, API key authentication, and access control
 - **Observability** - Health checks, metrics, and structured logging
 
+
+### Workflow Orchestration
+- **Dynamic Execution** - AI planners generate workflows; Agentry executes them (parallel, sequential, conditional)
+- **Automatic Context Sharing** - Workflow context injected seamlessly across agents
+- **Context Engineering** - Token-aware context selection, summarization, and relevance filtering
+- **Smart Routing** - Capability-based agent discovery without hardcoded addresses
+- **Framework Agnostic** - Works with LangGraph, CrewAI, or any custom agents
+
 ### Context Graph (Organizational Memory)
 - **Decision Traces** - Capture what was decided, why, and what alternatives were rejected
 - **Precedent Queries** - Agents query past decisions to inform current choices
 - **Cross-Agent Visibility** - Traces shared across agents and workflows
 - **Federation** - Query traces across organizational boundaries via AMTP
 - **Semantic Handoffs** - Preserve intent, reasoning, and constraints across agent handoffs
+> **See [ContextGraph.md](./docs/ContextGraph.md) for full documentation**
 
 ## Why Agentry?
 
@@ -705,22 +707,6 @@ echo "your-api-key" > user.key
 - Never log or expose API keys in plain text
 - Rotate API keys periodically using the admin tool
 - Use HTTPS in production to protect API keys in transit
-
-## Context Graph
-
-The Context Graph is Agentry's organizational memory - a queryable store of decision traces that enables agents to learn from past workflows.
-
-Key capabilities:
-- **Decision Traces** - Store what was decided, why, and what alternatives were rejected
-- **Precedent Queries** - Agents query past decisions by metadata (tags, entities, outcomes)
-- **Graph Links** - Connect related decisions (`based_on_precedent`, `supersedes`, `led_to`)
-- **Semantic Handoffs** - Preserve intent, reasoning, and constraints across agent handoffs
-- **Context Compression** - Tiered storage (hot/warm/cold) for long workflows
-- **Federation** - Query traces across organizational boundaries
-
-Agentry provides storage and query infrastructure. Agents provide understanding and interpretation.
-
-> **See [ContextGraph.md](./docs/ContextGraph.md) for full documentation** including API reference, permissions, storage schema, and implementation details.
 
 ## DNS Configuration
 
