@@ -1,10 +1,10 @@
 # Agentry
 
-An intelligent orchestration platform for dynamic AI agent workflows, implementing the Agent Message Transfer Protocol (AMTP) v1.0.
+Orchestration and memory for multi-agent systems, implementing the Agent Message Transfer Protocol (AMTP) v1.0.
 
 ## Overview
 
-Agentry provides intelligent workflow orchestration for multi-agent AI systems. When your AI planner generates a dynamic workflow at runtime, Agentry coordinates execution, manages context sharing, and handles agent communication - all automatically.
+Agentry provides intelligent workflow orchestration and organizational memory for multi-agent AI systems. When your AI planner generates a dynamic workflow at runtime, Agentry coordinates execution, shares context across agents, and accumulates decision traces that make your agents smarter over time.
 
 ## Features
 
@@ -27,6 +27,13 @@ Agentry provides intelligent workflow orchestration for multi-agent AI systems. 
 - **Security** - TLS 1.3, API key authentication, and access control
 - **Observability** - Health checks, metrics, and structured logging
 
+### Context Graph (Organizational Memory)
+- **Decision Traces** - Capture what was decided, why, and what alternatives were rejected
+- **Precedent Queries** - Agents query past decisions to inform current choices
+- **Cross-Agent Visibility** - Traces shared across agents and workflows
+- **Federation** - Query traces across organizational boundaries via AMTP
+- **Semantic Handoffs** - Preserve intent, reasoning, and constraints across agent handoffs
+
 ## Why Agentry?
 
 ### The Problem with Current Multi-Agent Systems
@@ -38,6 +45,8 @@ Agentry provides intelligent workflow orchestration for multi-agent AI systems. 
 **Agent Frameworks** (LangGraph, CrewAI) lock you into single-framework ecosystems and require manual context passing.
 
 **A2A Protocol** defines agent communication but lacks workflow orchestration - it's a wire protocol, not an execution engine.
+
+**Every agent framework** treats each workflow as starting from scratch - no memory of past decisions, no precedents, no organizational learning.
 
 ### Agentry's Solution
 
@@ -51,7 +60,7 @@ When your AI planner generates a workflow like:
 4. ✅ Manages state, timeouts, and retry logic
 5. ✅ Integrates with Kubernetes for actual execution
 
-**You get:** Workflow intelligence that Kubernetes lacks + Infrastructure orchestration that agent frameworks don't provide.
+**You get:** Workflow intelligence that Kubernetes lacks + Infrastructure orchestration that agent frameworks don't provide + Organizational memory that compounds over time.
 
 ### Key Differentiators
 
@@ -59,10 +68,11 @@ When your AI planner generates a workflow like:
 |------------|---------|------------|----------|------------------|-----|
 | Dynamic AI-generated workflows | ✅ | ❌ | ❌ | ✅ | ❌ |
 | Automatic context sharing | ✅ | ❌ | ❌ | Manual | ❌ |
+| Organizational memory (context graph) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Framework agnostic | ✅ | ✅ | ✅ | ❌ | ✅ |
 | Infrastructure orchestration | ✅ | ✅ | ✅ | ❌ | ❌ |
 | Workflow-aware scheduling | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Cross-service coordination | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Cross-org federation | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 ## Quick Start
 
@@ -696,6 +706,205 @@ echo "your-api-key" > user.key
 - Rotate API keys periodically using the admin tool
 - Use HTTPS in production to protect API keys in transit
 
+## Context Graph
+
+The Context Graph is Agentry's organizational memory system - a queryable store of decision traces that enables agents to learn from past workflows.
+
+### Why Context Graph?
+
+Without organizational memory:
+- Each workflow starts from scratch
+- Agents repeat the same mistakes
+- Precedents live in human heads, not systems
+- No learning across agents or workflows
+
+With Context Graph:
+- Agents query past decisions before acting
+- Precedents compound over time
+- Cross-agent, cross-workflow learning
+- Federated memory across organizations
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           AGENT                                     │
+│  (decides what to write, what to query, interprets results)         │
+└─────────────────────────────────────────────────────────────────────┘
+        │                                           ▲
+        │ 1. Write trace                           │ 4. Return raw data
+        │ 2. Query traces                          │    (agent interprets)
+        │ 3. Link traces                           │
+        ▼                                           │
+┌─────────────────────────────────────────────────────────────────────┐
+│                     AGENTRY (Infrastructure)                        │
+│                                                                     │
+│  - Stores traces (no interpretation)                                │
+│  - Queries by metadata (exact match, not semantic)                  │
+│  - Maintains links (agent tells it what to link)                    │
+│  - Returns raw data (agent decides what's relevant)                 │
+│                                                                     │
+│  Does NOT: parse content, determine similarity, decide relevance    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Agentry provides **storage and query infrastructure**. Agents provide **understanding and interpretation**.
+
+### Core Concepts
+
+**Decision Trace**: A record of what was decided, why, and what context informed the decision.
+
+```json
+{
+  "id": "trace-uuid",
+  "workflow_id": "workflow-uuid",
+  "agent": "sales-agent@acme.com",
+  "trace_type": "decision",
+  "entities": [
+    {"type": "customer", "id": "acme-123"},
+    {"type": "deal", "id": "deal-456"}
+  ],
+  "tags": ["discount", "enterprise", "renewal"],
+  "payload": {
+    "decision": "approve_27_percent",
+    "reasoning": "Based on precedent X and Y...",
+    "alternatives_rejected": ["30%: exceeds policy", "20%: customer walked before"]
+  },
+  "outcome": "approved"
+}
+```
+
+**Trace Links**: Relationships between traces that form the graph.
+
+| Link Type | Meaning |
+|-----------|---------|
+| `based_on_precedent` | This decision referenced a past decision |
+| `supersedes` | This decision overrides a previous one |
+| `led_to` | This decision caused a subsequent decision |
+| `approved_by` | Links decision to approval trace |
+
+### API Overview
+
+#### Trace Management
+
+```http
+# Create a decision trace
+POST /v1/traces
+{
+  "workflow_id": "uuid",
+  "agent": "sales-agent@acme.com",
+  "trace_type": "decision",
+  "entities": [{"type": "customer", "id": "acme-123"}],
+  "tags": ["discount", "enterprise"],
+  "visibility": "domain",
+  "payload": { ... }
+}
+
+# Get a trace
+GET /v1/traces/{trace_id}
+
+# Update a trace (add outcome)
+PATCH /v1/traces/{trace_id}
+```
+
+#### Trace Queries
+
+```http
+# Query by metadata
+POST /v1/traces/query
+{
+  "filters": {
+    "tags": ["discount", "enterprise"],
+    "outcome": "approved",
+    "entity_type": "customer"
+  }
+}
+
+# Get traces for a workflow
+GET /v1/workflows/{workflow_id}/traces
+
+# Get traces for an entity
+GET /v1/entities/{type}/{id}/traces
+```
+
+#### Trace Linking
+
+```http
+# Create a link
+POST /v1/traces/{trace_id}/links
+{
+  "target_trace_id": "uuid",
+  "link_type": "based_on_precedent"
+}
+
+# Traverse the graph
+GET /v1/traces/{trace_id}/chain?link_types=based_on_precedent&max_depth=5
+```
+
+### Permissions
+
+Traces use policy-based access control:
+
+```yaml
+policies:
+  # Default: domain isolation
+  - name: domain-isolation
+    effect: allow
+    actions: [read, write, link]
+    principal: "*.${trace.owner_domain}"
+
+  # Role-based access
+  - name: sales-discount-access
+    effect: allow
+    actions: [read]
+    principal: "sales-*@acme.com"
+    conditions:
+      tags_contain: ["discount"]
+
+  # Cross-domain sharing
+  - name: partner-access
+    effect: allow
+    actions: [read]
+    principal: "*@partner.com"
+    conditions:
+      tags_contain: ["partner-visible"]
+```
+
+### Semantic Handoffs
+
+Context Graph enhances agent handoffs beyond simple message passing:
+
+| What Gets Passed | Purpose |
+|------------------|---------|
+| **Output** | What was decided |
+| **Reasoning** | Why it was decided |
+| **Intent** | Original goal (preserved across workflow) |
+| **Constraints** | Requirements that must carry forward |
+| **Uncertainty** | Where the agent wasn't confident |
+| **Rejected alternatives** | What was considered and why not |
+
+### Context Compression
+
+For long workflows, Agentry manages context size through tiered storage:
+
+| Tier | Content | Use Case |
+|------|---------|----------|
+| **Hot** | Full detail | Last N steps |
+| **Warm** | Compressed summaries | Older steps |
+| **Cold** | References only | Archived, fetch on demand |
+
+Compression is pluggable - use a summarization agent, external service, or built-in structured extraction.
+
+### Value Summary
+
+| Without Context Graph | With Context Graph |
+|-----------------------|-------------------|
+| Each workflow starts fresh | Agents query precedents first |
+| Mistakes repeat | Learn from past failures |
+| Knowledge in human heads | Knowledge in queryable store |
+| No cross-agent learning | Shared organizational memory |
+| Build your own trace system | Standard format, federated |
+
 ## DNS Configuration
 
 To enable AMTP for your domain, add a DNS TXT record:
@@ -796,27 +1005,27 @@ make dev
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    AMTP Gateway                             │
-├─────────────────┬─────────────────┬─────────────────────────┤
-│  HTTP Server    │  Message Queue  │    Protocol Bridge     │
-│  - Receive      │  - Persistence  │    - AMTP ↔ SMTP       │
-│  - Send         │  - Retry Logic  │    - Schema Conversion  │
-│  - Status API   │  - DLQ          │    - Format Translation │
-├─────────────────┼─────────────────┼─────────────────────────┤
-│  DNS Resolver   │  Schema Engine  │    Coordination Engine  │
-│  - Discovery    │  - Validation   │    - Workflow State     │
-│  - Caching      │  - AGNTCY API   │    - Multi-Agent Logic  │
-├─────────────────┼─────────────────┼─────────────────────────┤
-│  Agent Registry │  Delivery Engine│    Local Inbox         │
-│  - Registration │  - Push Mode    │    - Pull Mode Storage  │
-│  - Configuration│  - Webhook HTTP │    - Message Queuing    │
-│  - Management   │  - Headers      │    - Acknowledgment     │
-├─────────────────┼─────────────────┼─────────────────────────┤
-│  Auth Manager   │  Policy Engine  │    Monitoring          │
-│  - TLS Certs    │  - Access Rules │    - Metrics           │
-│  - API Keys     │  - Rate Limits  │    - Logging           │
-└─────────────────┴─────────────────┴─────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                         AMTP Gateway                              │
+├─────────────────┬───────────────────┬─────────────────────────────┤
+│  HTTP Server    │  Message Queue    │    Protocol Bridge          │
+│  - Receive      │  - Persistence    │    - AMTP ↔ SMTP            │
+│  - Send         │  - Retry Logic    │    - Schema Conversion      │
+│  - Status API   │  - DLQ            │    - Format Translation     │
+├─────────────────┼───────────────────┼─────────────────────────────┤
+│  DNS Resolver   │  Schema Engine    │    Coordination Engine      │
+│  - Discovery    │  - Validation     │    - Workflow State         │
+│  - Caching      │  - AGNTCY API     │    - Multi-Agent Logic      │
+├─────────────────┼───────────────────┼─────────────────────────────┤
+│  Context Graph  │  Context Manager  │    Delivery Engine          │
+│  - Trace Store  │  - Workflow Ctx   │    - Push/Pull Modes        │
+│  - Precedent API│  - Handoff Schema │    - Webhook HTTP           │
+│  - Graph Links  │  - Compression    │    - Local Inbox            │
+├─────────────────┼───────────────────┼─────────────────────────────┤
+│  Auth Manager   │  Policy Engine    │    Monitoring               │
+│  - TLS Certs    │  - Access Rules   │    - Metrics                │
+│  - API Keys     │  - Trace Perms    │    - Logging                │
+└─────────────────┴───────────────────┴─────────────────────────────┘
 ```
 
 ## Protocol Specification
