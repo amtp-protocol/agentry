@@ -17,6 +17,7 @@ services:
       - AMTP_STORAGE_DATABASE_CONNECTION_STRING=host=postgres port=5432 user=postgres password=postgres dbname=agentry sslmode=disable
       - AMTP_STORAGE_DATABASE_MAX_CONNS=100
       - AMTP_STORAGE_DATABASE_MAX_IDLE_TIME=300
+      - AMTP_SCHEMA_REGISTRY_TYPE=database
     healthcheck:
       test: ["CMD", "/agentry", "--health-check"]
       interval: 30s
@@ -54,6 +55,11 @@ services:
     depends_on:
       - agentry
       - postgres
+    healthcheck:
+      test: ["CMD", "which", "curl"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
 networks:
   default:

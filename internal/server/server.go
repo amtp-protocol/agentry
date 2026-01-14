@@ -95,16 +95,6 @@ func New(cfg *config.Config) (*Server, error) {
 		metricsInstance = metrics.NewMetricsProvider()
 	}
 
-	// Create schema manager (if configured)
-	var schemaManager *schema.Manager
-	if cfg.Schema != nil {
-		var err error
-		schemaManager, err = schema.NewManager(*cfg.Schema)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create schema manager: %w", err)
-		}
-	}
-
 	// Create storage
 	var storageConfig storage.StorageConfig
 	if cfg.Storage.Type == "database" {
@@ -123,6 +113,21 @@ func New(cfg *config.Config) (*Server, error) {
 	storage, err := storage.NewStorage(storageConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create message storage: %w", err)
+	}
+
+	// Create schema manager (if configured)
+	var schemaManager *schema.Manager
+	if cfg.Schema != nil {
+		var err error
+		// Pass storage as schemaStore if configured for storage registry
+		var store schema.SchemaStore
+		if s, ok := storage.(schema.SchemaStore); ok {
+			store = s
+		}
+		schemaManager, err = schema.NewManager(*cfg.Schema, store)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create schema manager: %w", err)
+		}
 	}
 
 	// Create agent registry first

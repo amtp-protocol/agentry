@@ -42,7 +42,7 @@ func TestNewManager(t *testing.T) {
 		{
 			name: "with local registry",
 			config: ManagerConfig{
-				UseLocalRegistry: true,
+				RegistryType: "local",
 				LocalRegistry: LocalRegistryConfig{
 					BasePath:   tempDir,
 					CreateDirs: true,
@@ -71,7 +71,7 @@ func TestNewManager(t *testing.T) {
 		{
 			name: "with HTTP registry",
 			config: ManagerConfig{
-				UseLocalRegistry: false,
+				RegistryType: "http",
 				Registry: RegistryConfig{
 					BaseURL: "https://registry.example.com",
 				},
@@ -87,7 +87,6 @@ func TestNewManager(t *testing.T) {
 		{
 			name: "with mock registry (no config)",
 			config: ManagerConfig{
-				UseLocalRegistry: false,
 				Cache: CacheConfig{
 					Type: "memory",
 				},
@@ -97,7 +96,6 @@ func TestNewManager(t *testing.T) {
 		{
 			name: "invalid cache type",
 			config: ManagerConfig{
-				UseLocalRegistry: false,
 				Cache: CacheConfig{
 					Type: "invalid",
 				},
@@ -164,7 +162,6 @@ func TestNewManager(t *testing.T) {
 
 func TestManager_GetRegistry(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -188,7 +185,6 @@ func TestManager_GetRegistry(t *testing.T) {
 
 func TestManager_ValidateMessage_NoSchema(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -234,7 +230,6 @@ func TestManager_ValidateMessage_NoSchema(t *testing.T) {
 
 func TestManager_ValidateMessage_InvalidSchemaID(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -287,7 +282,7 @@ func TestManager_ValidateMessage_Success(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	config := ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: LocalRegistryConfig{
 			BasePath:   tempDir,
 			CreateDirs: true,
@@ -378,7 +373,7 @@ func TestManager_ValidateMessage_WithNegotiation(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	config := ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: LocalRegistryConfig{
 			BasePath:   tempDir,
 			CreateDirs: true,
@@ -479,7 +474,7 @@ func TestManager_GetSchema(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	config := ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: LocalRegistryConfig{
 			BasePath:   tempDir,
 			CreateDirs: true,
@@ -532,7 +527,7 @@ func TestManager_ListSchemas(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	config := ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: LocalRegistryConfig{
 			BasePath:   tempDir,
 			CreateDirs: true,
@@ -597,7 +592,7 @@ func TestManager_UpdateSchema(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	config := ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: LocalRegistryConfig{
 			BasePath:   tempDir,
 			CreateDirs: true,
@@ -660,7 +655,7 @@ func TestManager_DeleteSchema(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	config := ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: LocalRegistryConfig{
 			BasePath:   tempDir,
 			CreateDirs: true,
@@ -721,7 +716,7 @@ func TestManager_CheckCompatibility(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	config := ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: LocalRegistryConfig{
 			BasePath:   tempDir,
 			CreateDirs: true,
@@ -782,7 +777,6 @@ func TestManager_CheckCompatibility(t *testing.T) {
 
 func TestManager_ValidatePayload(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -813,7 +807,6 @@ func TestManager_ValidatePayload(t *testing.T) {
 
 func TestManager_ClearCache(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -835,7 +828,6 @@ func TestManager_ClearCache(t *testing.T) {
 
 func TestManager_GetStats(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -871,7 +863,6 @@ func TestManager_GetStats(t *testing.T) {
 
 func TestManager_Shutdown(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -892,7 +883,6 @@ func TestManager_Shutdown(t *testing.T) {
 
 func TestManager_ValidationWithErrorReporting(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},
@@ -956,7 +946,6 @@ func TestManagerConfig_DefaultValues(t *testing.T) {
 
 func TestManager_EdgeCases(t *testing.T) {
 	config := ManagerConfig{
-		UseLocalRegistry: false,
 		Cache: CacheConfig{
 			Type: "memory",
 		},

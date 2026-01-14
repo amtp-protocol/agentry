@@ -387,7 +387,9 @@ func (ms *MemoryStorage) CreateAgent(ctx context.Context, agent *agents.LocalAge
 		return fmt.Errorf("agent already exists: %s", agent.Address)
 	}
 
-	ms.agents[agent.Address] = agent
+	// Store a copy to prevent external modifications (like API key restoration) from affecting storage
+	agentCopy := *agent
+	ms.agents[agent.Address] = &agentCopy
 	return nil
 }
 
@@ -420,7 +422,9 @@ func (ms *MemoryStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAge
 		return fmt.Errorf("agent not found: %s", agent.Address)
 	}
 
-	ms.agents[agent.Address] = agent
+	// Store a copy to prevent external modifications from affecting storage
+	agentCopy := *agent
+	ms.agents[agent.Address] = &agentCopy
 	return nil
 }
 

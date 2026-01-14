@@ -32,8 +32,12 @@ services:
       - AMTP_LOGGING_FORMAT=text
       - AMTP_DNS_RESOLVERS=172.20.0.10:53
       - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SCHEMA_REGISTRY_TYPE=local
+      - AMTP_SCHEMA_REGISTRY_PATH=/schemas
     ports:
       - "8080:8080"
+    volumes:
+      - /tmp/amtp-schemas:/schemas
     networks:
       amtp-network:
         aliases:
@@ -64,8 +68,14 @@ services:
       - AMTP_AUTH_REQUIRED=false
       - AMTP_LOGGING_LEVEL=debug
       - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.20.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SCHEMA_REGISTRY_TYPE=local
+      - AMTP_SCHEMA_REGISTRY_PATH=/schemas
     ports:
       - "8081:8080"
+    volumes:
+      - /tmp/amtp-schemas:/schemas
     networks:
       amtp-network:
         aliases:
@@ -96,8 +106,14 @@ services:
       - AMTP_AUTH_REQUIRED=false
       - AMTP_LOGGING_LEVEL=debug
       - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.20.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SCHEMA_REGISTRY_TYPE=local
+      - AMTP_SCHEMA_REGISTRY_PATH=/schemas
     ports:
       - "8082:8080"
+    volumes:
+      - /tmp/amtp-schemas:/schemas
     networks:
       amtp-network:
         aliases:
@@ -128,6 +144,11 @@ services:
       - gateway-company-a
       - gateway-company-b
       - gateway-partner
+    healthcheck:
+      test: ["CMD", "which", "curl"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
 networks:
   amtp-network:
