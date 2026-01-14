@@ -334,8 +334,8 @@ func TestLoadSchemaFromEnv(t *testing.T) {
 					return
 				}
 
-				if !cfg.Schema.UseLocalRegistry {
-					t.Error("Expected UseLocalRegistry to be true")
+				if cfg.Schema.RegistryType != "local" {
+					t.Error("Expected RegistryType to be 'local'")
 				}
 
 				if cfg.Schema.LocalRegistry.BasePath != tt.expectPath {
@@ -617,7 +617,7 @@ func TestConfigIntegration_Schema(t *testing.T) {
 message:
   max_size: 10485760
 schema:
-  use_local_registry: true
+  registry_type: "local"
   local_registry:
     base_path: ` + schemaPath + `
     index_file: "index.json"
@@ -647,8 +647,8 @@ schema:
 		t.Fatal("Expected schema config to be loaded from YAML")
 	}
 
-	if !cfg.Schema.UseLocalRegistry {
-		t.Error("Expected UseLocalRegistry to be true")
+	if cfg.Schema.RegistryType != "local" {
+		t.Error("Expected RegistryType to be 'local'")
 	}
 
 	if cfg.Schema.LocalRegistry.BasePath != schemaPath {
@@ -678,7 +678,7 @@ func TestConfigIntegration_EnvOverrideYAML(t *testing.T) {
 message:
   max_size: 10485760
 schema:
-  use_local_registry: true
+  registry_type: "local"
   local_registry:
     base_path: ` + yamlSchemaPath + `
     index_file: "index.json"`

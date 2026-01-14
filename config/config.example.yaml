@@ -53,3 +53,11 @@ storage:
     connection_string: "host=localhost port=5432 user=postgres password=postgres dbname=agentry sslmode=disable"
     max_connections: 100
     max_idle_time: 300
+
+# Schema management configuration
+schema:
+  registry_type: "database" # or "local", "http"
+  # If local, configure local_registry path
+  # local_registry:
+  #   base_path: "./schemas"
+

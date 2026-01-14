@@ -478,7 +478,7 @@ func loadSchemaFromEnv(cfg *Config) {
 
 	if registryType == "local" || registryPath != "" || useLocalRegistry {
 		if registryPath == "" {
-			log.Printf("WARNING: Schema management enabled but AMTP_SCHEMA_REGISTRY_PATH not set. Schema registration will fail.")
+			log.Printf("WARNING: Schema management enabled (local) but AMTP_SCHEMA_REGISTRY_PATH not set. Schema registration will fail.")
 			return
 		}
 
@@ -488,10 +488,18 @@ func loadSchemaFromEnv(cfg *Config) {
 			cfg.Schema = &schema.ManagerConfig{}
 		}
 
-		cfg.Schema.UseLocalRegistry = true
+		cfg.Schema.RegistryType = "local"
 		cfg.Schema.LocalRegistry.BasePath = registryPath
+	} else if registryType == "database" {
+		log.Printf("INFO: Schema management enabled with database registry")
+
+		if cfg.Schema == nil {
+			cfg.Schema = &schema.ManagerConfig{}
+		}
+
+		cfg.Schema.RegistryType = "database"
 	} else {
-		log.Printf("INFO: Schema management not configured. Set AMTP_SCHEMA_REGISTRY_TYPE=local and AMTP_SCHEMA_REGISTRY_PATH to enable.")
+		log.Printf("INFO: Schema management not configured. Set AMTP_SCHEMA_REGISTRY_TYPE=local (with AMTP_SCHEMA_REGISTRY_PATH) or database to enable.")
 	}
 }
 

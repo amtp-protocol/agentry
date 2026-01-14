@@ -421,6 +421,9 @@ func (s *Server) handleListSchemas(c *gin.Context) {
 	}
 
 	pattern := c.Query("pattern")
+	if pattern == "" {
+		pattern = c.Query("domain")
+	}
 	schemas, err := s.schemaManager.GetRegistry().ListSchemas(c.Request.Context(), pattern)
 	if err != nil {
 		s.respondWithError(c, http.StatusInternalServerError, "SCHEMA_LIST_FAILED",

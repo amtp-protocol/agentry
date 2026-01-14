@@ -23,7 +23,7 @@ test_dns_discovery() {
     
     for domain in "${domains[@]}"; do
         log_info "Querying DNS TXT record for _amtp.$domain..."
-        local txt_record=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client dig +short @172.21.0.10 "_amtp.$domain" TXT || echo "")
+        local txt_record=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client dig +short @172.20.0.10 "_amtp.$domain" TXT || echo "")
         if [ -n "$txt_record" ]; then
             log_success "DNS TXT record found for $domain: $txt_record"
             # Verify no schemas in DNS record
@@ -45,6 +45,7 @@ create_temp_schemas() {
     
     # Create temporary directory
     mkdir -p /tmp/amtp-schemas
+    mkdir -p /tmp/amtp-keys
     
     # Create sample schema files for file-based registry (optional)
     cat > /tmp/amtp-schemas/commerce.order.v1.json << 'EOF'
@@ -91,7 +92,7 @@ register_schemas() {
         
         # Register commerce.order.v1 schema
         log_info "  - Registering agntcy:commerce.order.v1..."
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://$domain/v1/admin/schemas" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://$domain/v1/admin/schemas" \
             -H "Content-Type: application/json" \
             -d '{
                 "id": "agntcy:commerce.order.v1",
@@ -124,7 +125,7 @@ register_schemas() {
         
         # Register finance.payment.v1 schema
         log_info "  - Registering agntcy:finance.payment.v1..."
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://$domain/v1/admin/schemas" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://$domain/v1/admin/schemas" \
             -H "Content-Type: application/json" \
             -d '{
                 "id": "agntcy:finance.payment.v1",
@@ -148,7 +149,7 @@ register_schemas() {
         
         # Register logistics.shipment.v1 schema
         log_info "  - Registering agntcy:logistics.shipment.v1..."
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://$domain/v1/admin/schemas" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://$domain/v1/admin/schemas" \
             -H "Content-Type: application/json" \
             -d '{
                 "id": "agntcy:logistics.shipment.v1",
@@ -197,24 +198,28 @@ register_agents_with_schemas() {
     
     # Sales agent - supports commerce and finance (wildcards)
     log_info "  - Registering sales agent (supports commerce.* and finance.payment.*)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
+    local sales_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "sales",
             "delivery_mode": "pull",
             "supported_schemas": ["agntcy:commerce.*", "agntcy:finance.payment.*"]
-        }' | format_json
+        }')
+    echo "$sales_response" | format_json
+    echo "$sales_response" | jq -r '.agent.api_key' > /tmp/amtp-keys/sales.key
     echo ""
     
     # Order processing agent - only commerce orders (using pull mode for testing)
     log_info "  - Registering order-processor agent (supports only commerce.order.v1)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
+    local order_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "order-processor",
             "delivery_mode": "pull",
             "supported_schemas": ["agntcy:commerce.order.v1"]
-        }' | format_json
+        }')
+    echo "$order_response" | format_json
+    echo "$order_response" | jq -r '.agent.api_key' > /tmp/amtp-keys/order-processor.key
     echo ""
     
     # Company B agents (Finance focused)
@@ -222,24 +227,28 @@ register_agents_with_schemas() {
     
     # Payment processor - finance payments (wildcard)
     log_info "  - Registering payment-processor agent (supports finance.*)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-b.local:8080/v1/admin/agents" \
+    local payment_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-b.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "payment-processor",
             "delivery_mode": "pull",
             "supported_schemas": ["agntcy:finance.*"]
-        }' | format_json
+        }')
+    echo "$payment_response" | format_json
+    echo "$payment_response" | jq -r '.agent.api_key' > /tmp/amtp-keys/payment-processor.key
     echo ""
     
     # Accounting agent - specific finance payment schema (using pull mode for testing)
     log_info "  - Registering accounting agent (supports finance.payment.v1 only)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-b.local:8080/v1/admin/agents" \
+    local accounting_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-b.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "accounting",
             "delivery_mode": "pull",
             "supported_schemas": ["agntcy:finance.payment.v1"]
-        }' | format_json
+        }')
+    echo "$accounting_response" | format_json
+    echo "$accounting_response" | jq -r '.agent.api_key' > /tmp/amtp-keys/accounting.key
     echo ""
     
     # Partner agents (Logistics focused)
@@ -247,24 +256,28 @@ register_agents_with_schemas() {
     
     # Shipping agent - logistics only
     log_info "  - Registering shipping agent (supports logistics.*)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://partner.local:8080/v1/admin/agents" \
+    local shipping_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://partner.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "shipping",
             "delivery_mode": "pull",
             "supported_schemas": ["agntcy:logistics.*"]
-        }' | format_json
+        }')
+    echo "$shipping_response" | format_json
+    echo "$shipping_response" | jq -r '.agent.api_key' > /tmp/amtp-keys/shipping.key
     echo ""
     
     # Integration agent - supports all schemas (empty array means all, using pull mode for testing)
     log_info "  - Registering integration agent (supports all schemas)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://partner.local:8080/v1/admin/agents" \
+    local integration_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://partner.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "integration",
             "delivery_mode": "pull",
             "supported_schemas": []
-        }' | format_json
+        }')
+    echo "$integration_response" | format_json
+    echo "$integration_response" | jq -r '.agent.api_key' > /tmp/amtp-keys/integration.key
     echo ""
 }
 
@@ -276,7 +289,7 @@ test_gateway_capabilities() {
     
     for domain in "${domains[@]}"; do
         log_info "Testing capabilities for $domain:"
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://$domain/v1/capabilities/$domain" | format_json
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://$domain/v1/capabilities/$domain" | format_json
         echo ""
     done
 }
@@ -289,7 +302,7 @@ test_agent_discovery() {
     
     for domain in "${domains[@]}"; do
         log_info "Testing agent discovery for $domain (should show supported schemas):"
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://$domain/v1/discovery/agents" | format_json
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://$domain/v1/discovery/agents" | format_json
         echo ""
     done
 }
@@ -299,15 +312,15 @@ test_inter_gateway_communication() {
     log_step "Testing inter-gateway communication with schema validation..."
     
     log_info "Company A discovering Company B capabilities:"
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/capabilities/company-b.local" | format_json
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/capabilities/company-b.local" | format_json
     echo ""
     
     log_info "Company B discovering Partner capabilities:"
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/capabilities/partner.local" | format_json
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/capabilities/partner.local" | format_json
     echo ""
     
     log_info "Partner discovering Company A capabilities:"
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/capabilities/company-a.local" | format_json
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://partner.local:8080/v1/capabilities/company-a.local" | format_json
     echo ""
 }
 
@@ -317,7 +330,7 @@ test_schema_validation() {
     
     # Test 1: Valid message with supported schema (wildcard match)
     log_info "Test 1: Sending commerce order to sales agent (should succeed - wildcard match)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{
             "sender": "system@company-a.local",
@@ -342,7 +355,7 @@ test_schema_validation() {
     
     # Test 2: Valid message with exact schema match
     log_info "Test 2: Sending commerce order to order-processor (should succeed - exact match)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{
             "sender": "system@company-a.local",
@@ -367,7 +380,7 @@ test_schema_validation() {
     
     # Test 3: Invalid message - agent doesn'\''t support schema
     log_info "Test 3: Sending finance payment to order-processor (should fail - schema not supported)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{
             "sender": "system@company-a.local",
@@ -388,7 +401,7 @@ test_schema_validation() {
     
     # Test 4: Cross-domain message with schema validation
     log_info "Test 4: Cross-domain message (Company A to Company B payment processor)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{
             "sender": "sales@company-a.local",
@@ -409,7 +422,7 @@ test_schema_validation() {
     
     # Test 5: Message to agent with no schema restrictions (supports all)
     log_info "Test 5: Sending logistics message to integration agent (should succeed - supports all)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://partner.local:8080/v1/messages" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://partner.local:8080/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{
             "sender": "system@partner.local",
@@ -446,9 +459,9 @@ test_inbox_retrieval() {
     
     # Test 1: Check sales agent inbox (should have commerce order message)
     log_info "Test 1: Checking sales agent inbox (should have commerce order)..."
-    local sales_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/admin/agents" | jq -r '.agents."sales@company-a.local".api_key // empty')
+    local sales_response=$(cat /tmp/amtp-keys/sales.key)
     if [ -n "$sales_response" ] && [ "$sales_response" != "null" ]; then
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/inbox/sales@company-a.local" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/inbox/sales@company-a.local" \
             -H "Authorization: Bearer $sales_response" | format_json
     else
         log_warning "Could not retrieve sales agent API key for inbox access"
@@ -457,9 +470,9 @@ test_inbox_retrieval() {
     
     # Test 2: Check order-processor agent inbox (should have commerce order message)
     log_info "Test 2: Checking order-processor agent inbox (should have commerce order)..."
-    local processor_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/admin/agents" | jq -r '.agents."order-processor@company-a.local".api_key // empty')
+    local processor_response=$(cat /tmp/amtp-keys/order-processor.key)
     if [ -n "$processor_response" ] && [ "$processor_response" != "null" ]; then
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/inbox/order-processor@company-a.local" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://company-a.local:8080/v1/inbox/order-processor@company-a.local" \
             -H "Authorization: Bearer $processor_response" | format_json
     else
         log_warning "Could not retrieve order-processor agent API key for inbox access"
@@ -468,9 +481,9 @@ test_inbox_retrieval() {
     
     # Test 3: Check payment-processor agent inbox (should have finance payment message)
     log_info "Test 3: Checking payment-processor agent inbox (should have finance payment)..."
-    local payment_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/admin/agents" | jq -r '.agents."payment-processor@company-b.local".api_key // empty')
+    local payment_response=$(cat /tmp/amtp-keys/payment-processor.key)
     if [ -n "$payment_response" ] && [ "$payment_response" != "null" ]; then
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/inbox/payment-processor@company-b.local" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/inbox/payment-processor@company-b.local" \
             -H "Authorization: Bearer $payment_response" | format_json
     else
         log_warning "Could not retrieve payment-processor agent API key for inbox access"
@@ -479,9 +492,9 @@ test_inbox_retrieval() {
     
     # Test 4: Check accounting agent inbox (should be empty - finance payment was rejected)
     log_info "Test 4: Checking accounting agent inbox (should be empty - schema mismatch)..."
-    local accounting_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/admin/agents" | jq -r '.agents."accounting@company-b.local".api_key // empty')
+    local accounting_response=$(cat /tmp/amtp-keys/accounting.key)
     if [ -n "$accounting_response" ] && [ "$accounting_response" != "null" ]; then
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/inbox/accounting@company-b.local" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://company-b.local:8080/v1/inbox/accounting@company-b.local" \
             -H "Authorization: Bearer $accounting_response" | format_json
     else
         log_warning "Could not retrieve accounting agent API key for inbox access"
@@ -490,9 +503,9 @@ test_inbox_retrieval() {
     
     # Test 5: Check integration agent inbox (should have logistics message)
     log_info "Test 5: Checking integration agent inbox (should have logistics message)..."
-    local integration_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/admin/agents" | jq -r '.agents."integration@partner.local".api_key // empty')
+    local integration_response=$(cat /tmp/amtp-keys/integration.key)
     if [ -n "$integration_response" ] && [ "$integration_response" != "null" ]; then
-        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
             -H "Authorization: Bearer $integration_response" | format_json
     else
         log_warning "Could not retrieve integration agent API key for inbox access"
@@ -506,21 +519,21 @@ test_message_acknowledgment() {
     
     # Test acknowledging a message from the integration agent inbox
     log_info "Test: Acknowledging first message from integration agent inbox..."
-    local integration_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/admin/agents" | jq -r '.agents."integration@partner.local".api_key // empty')
+    local integration_response=$(cat /tmp/amtp-keys/integration.key)
     if [ -n "$integration_response" ] && [ "$integration_response" != "null" ]; then
         # Get the first message ID from inbox
-        local message_id=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
+        local message_id=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
             -H "Authorization: Bearer $integration_response" | jq -r 'if .messages and (.messages | length > 0) then .messages[0].message_id else empty end')
         
         if [ -n "$message_id" ] && [ "$message_id" != "null" ]; then
             log_info "  - Acknowledging message ID: $message_id"
-            docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X DELETE "http://partner.local:8080/v1/inbox/integration@partner.local/$message_id" \
+            docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X DELETE "http://partner.local:8080/v1/inbox/integration@partner.local/$message_id" \
                 -H "Authorization: Bearer $integration_response" | format_json
             echo ""
             
             # Verify message was removed
             log_info "  - Verifying message was removed from inbox..."
-            docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
+            docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -s "http://partner.local:8080/v1/inbox/integration@partner.local" \
                 -H "Authorization: Bearer $integration_response" | format_json
         else
             log_warning "No messages found in integration agent inbox to acknowledge"
@@ -537,7 +550,7 @@ test_invalid_scenarios() {
     
     # Test 1: Try to register agent with non-existent schema
     log_info "Test 1: Registering agent with non-existent schema (should fail)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "invalid-agent",
@@ -548,7 +561,7 @@ test_invalid_scenarios() {
     
     # Test 2: Try to register agent with malformed schema identifier
     log_info "Test 2: Registering agent with malformed schema identifier (should fail)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/admin/agents" \
         -H "Content-Type: application/json" \
         -d '{
             "address": "malformed-agent",
@@ -559,7 +572,7 @@ test_invalid_scenarios() {
     
     # Test 3: Send message with invalid schema
     log_info "Test 3: Sending message with non-existent schema (should fail)..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.schema-test.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml" exec -T test-client curl -X POST "http://company-a.local:8080/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{
             "sender": "system@company-a.local",
@@ -585,7 +598,7 @@ main() {
     echo "  • Cross-domain communication"
     echo ""
 
-    local compose_file="$PROJECT_ROOT/docker/docker-compose.schema-test.yml"
+    local compose_file="$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml"
     local domains=("company-a.local:8080" "company-b.local:8080" "partner.local:8080")
 
     case "${1:-start}" in
