@@ -197,7 +197,7 @@ The schema framework is built with a clean, modular architecture that provides:
 ```go
 // Create schema manager with local registry
 config := schema.ManagerConfig{
-    UseLocalRegistry: true,
+    RegistryType: "local",
     LocalRegistry: schema.LocalRegistryConfig{
         BasePath:   "./schemas",
         AutoSave:   true,

@@ -19,15 +19,16 @@ test_message_lifecycle() {
     domain="agentry:8080"
 
     # Register a agent to receive messages
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST -s -o /dev/null "http://$domain/v1/admin/agents" \
+    local register_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST -s "http://$domain/v1/admin/agents" \
             -H "Content-Type: application/json" \
             -d '{
                 "address": "user",
                 "delivery_mode": "pull"
-            }'
-    local api_key=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s "http://$domain/v1/admin/agents" | jq -r '.agents."user@localhost".api_key // empty')
+            }')
+    
+    local api_key=$(echo "$register_response" | jq -r '.agent.api_key // empty')
     if [ -z "$api_key" ]; then
-        log_error "❌ Failed to register agent"
+        log_error "❌ Failed to register agent. Response: $register_response"
         return 1
     fi
     log_success "✓ Agent registered successfully"
@@ -85,6 +86,56 @@ test_message_lifecycle() {
     log_success "✓ Message acknowledged successfully"
 }
 
+# Function to test schema lifecycle
+test_schema_lifecycle() {
+    log_step "Testing schema lifecycle with database storage enabled..."
+
+    domain="agentry:8080"
+    schema_id="agntcy:test-domain.user.v1"
+    encoded_schema_id="agntcy:test-domain.user.v1"
+
+    # Register a schema
+    log_info "1. Registering schema..."
+    local register_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST -s "http://$domain/v1/admin/schemas" \
+            -H "Content-Type: application/json" \
+            -d '{
+                "id": "'"$schema_id"'",
+                "definition": {
+                    "type": "record",
+                    "name": "User",
+                    "fields": [
+                        {"name": "id", "type": "string"},
+                        {"name": "name", "type": "string"}
+                    ]
+                }
+            }')
+
+    if echo "$register_response" | grep -q "error"; then
+        log_error "❌ Failed to register schema: $register_response"
+        return 1
+    fi
+    log_success "✓ Schema registered successfully"
+
+    # Retrieve the schema
+    log_info "2. Retrieving schema..."
+    local get_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s "http://$domain/v1/admin/schemas/$encoded_schema_id")
+    
+    if ! echo "$get_response" | grep -q "$schema_id"; then
+        log_error "❌ Failed to retrieve schema or schema ID mismatch. Response: $get_response"
+        return 1
+    fi
+    log_success "✓ Schema retrieved successfully"
+
+    # List schemas
+    log_info "3. Listing schemas..."
+    local list_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s "http://$domain/v1/admin/schemas?domain=test-domain")
+    if ! echo "$list_response" | grep -q "$schema_id"; then
+        log_error "❌ Failed to list schemas or find registered schema. Response: $list_response"
+        return 1
+    fi
+    log_success "✓ Schemas listed successfully"
+}
+
 # Main execution
 main() {
     echo "🚀 AMTP Gateway Database Storage Test"
@@ -99,9 +150,10 @@ main() {
 
     case "${1:-start}" in
         "start")
-            start_services "$compose_file" 1
+            start_services "$compose_file" 3
             test_connectivity "$compose_file" "agentry:8080"
             test_message_lifecycle
+            test_schema_lifecycle
             log_success "🎉 Database storage test completed!"
             log_info "💡 Services are still running. Use '$0 stop' to clean up."
             log_info "💡 Use '$0 logs' to view service logs."
@@ -122,8 +174,11 @@ main() {
         "test-message-lifecycle")
             test_message_lifecycle
             ;;
+        "test-schema-lifecycle")
+            test_schema_lifecycle
+            ;;
         *)
-            echo "Usage: $0 {start|stop|logs|status|test-connectivity|test-message-lifecycle}"
+            echo "Usage: $0 {start|stop|logs|status|test-connectivity|test-message-lifecycle|test-schema-lifecycle}"
             echo ""
             echo "Commands:"
             echo "  start             - Start services and run full comprehensive test suite"
