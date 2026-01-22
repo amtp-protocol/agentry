@@ -159,6 +159,20 @@ func (m *Message) SetCoordination(coordination *types.CoordinationConfig) error 
 	return nil
 }
 
+// Schema model for persistence
+type Schema struct {
+	ID          uint           `gorm:"primarykey" json:"-"`
+	Domain      string         `gorm:"size:255;not null;uniqueIndex:idx_schema_ver" json:"domain"`
+	Entity      string         `gorm:"size:255;not null;uniqueIndex:idx_schema_ver" json:"entity"`
+	Version     string         `gorm:"size:64;not null;uniqueIndex:idx_schema_ver" json:"version"`
+	Definition  datatypes.JSON `gorm:"type:jsonb;not null" json:"definition"`
+	PublishedAt time.Time      `gorm:"type:timestamptz" json:"published_at"`
+	Signature   string         `gorm:"size:512" json:"signature"`
+	Checksum    string         `gorm:"size:64" json:"checksum"`
+	Size        int64          `gorm:"not null;default:0" json:"size"`
+	UpdatedAt   time.Time      `gorm:"type:timestamptz;default:CURRENT_TIMESTAMP" json:"updated_at"`
+}
+
 // TableName specify table name
 func (Message) TableName() string {
 	return "messages"
@@ -170,4 +184,8 @@ func (MessageStatus) TableName() string {
 
 func (RecipientStatus) TableName() string {
 	return "recipient_statuses"
+}
+
+func (Schema) TableName() string {
+	return "schemas"
 }
