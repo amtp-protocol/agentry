@@ -209,7 +209,7 @@ func TestNew_WithSchema(t *testing.T) {
 			RequireAuth: false,
 		},
 		Schema: &schema.ManagerConfig{
-			UseLocalRegistry: true,
+			RegistryType: "local",
 			LocalRegistry: schema.LocalRegistryConfig{
 				BasePath:   tempDir,
 				IndexFile:  "index.json",
@@ -319,7 +319,7 @@ func TestIntegration_EnvToSchemaRegistration(t *testing.T) {
 	// We need to call the internal loadFromEnv function, but since it's not exported,
 	// we'll simulate the environment variable loading by creating the schema config directly
 	cfg.Schema = &schema.ManagerConfig{
-		UseLocalRegistry: true,
+		RegistryType: "local",
 		LocalRegistry: schema.LocalRegistryConfig{
 			BasePath:   tempDir,
 			IndexFile:  "index.json",

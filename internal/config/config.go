@@ -474,11 +474,16 @@ func loadMockRecords() map[string]string {
 func loadSchemaFromEnv(cfg *Config) {
 	registryType := getEnv("AMTP_SCHEMA_REGISTRY_TYPE", "")
 	registryPath := getEnv("AMTP_SCHEMA_REGISTRY_PATH", "")
-	useLocalRegistry := getBoolEnv("AMTP_SCHEMA_USE_LOCAL_REGISTRY", false)
+	registryURL := getEnv("AMTP_SCHEMA_REGISTRY_URL", "")
 
-	if registryType == "local" || registryPath != "" || useLocalRegistry {
+	// Backward compatibility for AMTP_SCHEMA_USE_LOCAL_REGISTRY
+	if registryType == "" && getBoolEnv("AMTP_SCHEMA_USE_LOCAL_REGISTRY", false) {
+		registryType = "local"
+	}
+
+	if registryType == "local" || registryPath != "" {
 		if registryPath == "" {
-			log.Printf("WARNING: Schema management enabled but AMTP_SCHEMA_REGISTRY_PATH not set. Schema registration will fail.")
+			log.Printf("WARNING: Schema management enabled (local) but AMTP_SCHEMA_REGISTRY_PATH not set. Schema registration will fail.")
 			return
 		}
 
@@ -488,10 +493,40 @@ func loadSchemaFromEnv(cfg *Config) {
 			cfg.Schema = &schema.ManagerConfig{}
 		}
 
-		cfg.Schema.UseLocalRegistry = true
+		cfg.Schema.RegistryType = "local"
 		cfg.Schema.LocalRegistry.BasePath = registryPath
+	} else if registryType == "database" {
+		log.Printf("INFO: Schema management enabled with database registry")
+
+		if cfg.Schema == nil {
+			cfg.Schema = &schema.ManagerConfig{}
+		}
+
+		cfg.Schema.RegistryType = "database"
+	} else if registryType == "http" || registryURL != "" {
+		if registryURL == "" {
+			log.Printf("WARNING: Schema management enabled (http) but AMTP_SCHEMA_REGISTRY_URL not set. Schema operations will fail.")
+			return
+		}
+
+		log.Printf("INFO: Schema management enabled with HTTP registry at: %s", registryURL)
+
+		if cfg.Schema == nil {
+			cfg.Schema = &schema.ManagerConfig{}
+		}
+
+		cfg.Schema.RegistryType = "http"
+		cfg.Schema.Registry.BaseURL = registryURL
+
+		// Optional additional HTTP registry settings
+		if auth := getEnv("AMTP_SCHEMA_REGISTRY_AUTH_TOKEN", ""); auth != "" {
+			cfg.Schema.Registry.AuthToken = auth
+		}
+		if to := getDurationEnv("AMTP_SCHEMA_REGISTRY_TIMEOUT", 0); to != 0 {
+			cfg.Schema.Registry.Timeout = to
+		}
 	} else {
-		log.Printf("INFO: Schema management not configured. Set AMTP_SCHEMA_REGISTRY_TYPE=local and AMTP_SCHEMA_REGISTRY_PATH to enable.")
+		log.Printf("INFO: Schema management not configured. Set AMTP_SCHEMA_REGISTRY_TYPE=local (with AMTP_SCHEMA_REGISTRY_PATH) or database or http to enable.")
 	}
 }
 

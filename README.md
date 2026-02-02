@@ -301,9 +301,9 @@ Options:
 ##### Schema Configuration
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AMTP_SCHEMA_REGISTRY_TYPE` | - | Schema registry type (set to `local` to enable) |
-| `AMTP_SCHEMA_REGISTRY_PATH` | - | Path to local schema registry directory |
-| `AMTP_SCHEMA_USE_LOCAL_REGISTRY` | `false` | Enable local schema registry (alternative to setting type) |
+| `AMTP_SCHEMA_REGISTRY_TYPE` | - | Schema registry type (set to `local` or `database` to enable) |
+| `AMTP_SCHEMA_REGISTRY_PATH` | - | Path to local schema registry directory (when type is `local`) |
+| `AMTP_SCHEMA_USE_LOCAL_REGISTRY` | `false` | (Deprecated) Enable local schema registry. Use `AMTP_SCHEMA_REGISTRY_TYPE=local` instead. |
 
 > ⚠️ **Security Note**: Variables marked with ⚠️ should only be used in development environments. Never enable `AMTP_DNS_ALLOW_HTTP=true` in production as it allows insecure HTTP gateway URLs.
 
@@ -354,8 +354,7 @@ export AMTP_STORAGE_DATABASE_MAX_IDLE_TIME=300
 export AMTP_METRICS_ENABLED=true
 
 # Schema management (optional - enable for schema validation)
-export AMTP_SCHEMA_REGISTRY_TYPE=local
-export AMTP_SCHEMA_REGISTRY_PATH="/var/lib/agentry/schemas"
+export AMTP_SCHEMA_REGISTRY_TYPE=database
 ```
 
 #### Development Configuration
@@ -385,7 +384,7 @@ export AMTP_LOG_FORMAT=text
 # Schema management (optional - enable for schema validation)
 export AMTP_SCHEMA_REGISTRY_TYPE=local
 export AMTP_SCHEMA_REGISTRY_PATH="/tmp/schemas"
-# Alternative: export AMTP_SCHEMA_USE_LOCAL_REGISTRY=true
+# Alternative: export AMTP_SCHEMA_REGISTRY_TYPE=database for database registry
 ```
 
 > 📝 **Development Note**: The development script `./scripts/local-dev.sh` automatically sets these variables for you.

@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -29,11 +31,42 @@ import (
 	"github.com/amtp-protocol/agentry/internal/server"
 )
 
+func runHealthCheck(addr string) error {
+	// If addr starts with :, prepend localhost
+	if len(addr) > 0 && addr[0] == ':' {
+		addr = "localhost" + addr
+	}
+	// Simple GET request to /health
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+	resp, err := client.Get("http://" + addr + "/health")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health check failed with status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func main() {
+	healthCheck := flag.Bool("health-check", false, "Run health check")
+	flag.Parse()
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	if *healthCheck {
+		if err := runHealthCheck(cfg.Server.Address); err != nil {
+			fmt.Fprintf(os.Stderr, "Health check failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	// Create HTTP server

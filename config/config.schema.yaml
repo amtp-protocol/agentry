@@ -33,7 +33,7 @@ storage:
 
 # Schema management configuration
 schema:
-  use_local_registry: true
+  registry_type: "local"
   local_registry:
     base_path: "./schemas"
     index_file: "index.json"
