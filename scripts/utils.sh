@@ -75,8 +75,8 @@ start_services() {
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
-        if docker-compose -f "$compose_file" ps | grep -q "healthy"; then
-            local healthy_count=$(docker-compose -f "$compose_file" ps | grep -c "healthy" || echo "0")
+        if docker-compose -f "$compose_file" ps | grep -q "(healthy)"; then
+            local healthy_count=$(docker-compose -f "$compose_file" ps | grep -c "(healthy)" || echo "0")
             if [ "$healthy_count" -ge "$expected_healthy_count" ]; then
                 log_success "All services are healthy!"
                 break

@@ -59,6 +59,13 @@ type ValidationError struct {
 	Value   interface{} `json:"value,omitempty"`
 }
 
+// RegistryStats represents registry statistics
+type RegistryStats struct {
+	TotalSchemas int            `json:"total_schemas"`
+	Domains      map[string]int `json:"domains"`
+	Entities     map[string]int `json:"entities"`
+}
+
 // RegistryClient defines the interface for schema registry operations
 type RegistryClient interface {
 	// GetSchema retrieves a schema by identifier

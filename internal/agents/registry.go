@@ -235,7 +235,7 @@ func (r *Registry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string
 
 // UpdateLastAccess updates the last access timestamp for an agent
 func (r *Registry) UpdateLastAccess(ctx context.Context, agentAddress string) {
-	agent, err := r.GetAgent(ctx, agentAddress)
+	agent, err := r.getAgentInternal(ctx, agentAddress)
 	if err != nil || agent == nil {
 		return
 	}

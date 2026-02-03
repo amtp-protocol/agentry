@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestConfigValidation_AdminAuth(t *testing.T) {
@@ -278,15 +279,6 @@ func TestLoadSchemaFromEnv(t *testing.T) {
 			expectPath:   "/tmp/test-schemas",
 		},
 		{
-			name: "use local registry flag",
-			envVars: map[string]string{
-				"AMTP_SCHEMA_USE_LOCAL_REGISTRY": "true",
-				"AMTP_SCHEMA_REGISTRY_PATH":      "/tmp/test-schemas",
-			},
-			expectSchema: true,
-			expectPath:   "/tmp/test-schemas",
-		},
-		{
 			name: "registry type without path - should warn",
 			envVars: map[string]string{
 				"AMTP_SCHEMA_REGISTRY_TYPE": "local",
@@ -297,7 +289,7 @@ func TestLoadSchemaFromEnv(t *testing.T) {
 		{
 			name: "use local registry without path - should warn",
 			envVars: map[string]string{
-				"AMTP_SCHEMA_USE_LOCAL_REGISTRY": "true",
+				"AMTP_SCHEMA_REGISTRY_TYPE": "local",
 			},
 			expectSchema: false,
 			expectWarn:   true,
@@ -309,7 +301,6 @@ func TestLoadSchemaFromEnv(t *testing.T) {
 			// Clean environment
 			os.Unsetenv("AMTP_SCHEMA_REGISTRY_TYPE")
 			os.Unsetenv("AMTP_SCHEMA_REGISTRY_PATH")
-			os.Unsetenv("AMTP_SCHEMA_USE_LOCAL_REGISTRY")
 
 			// Set test environment variables
 			for key, value := range tt.envVars {
@@ -334,8 +325,8 @@ func TestLoadSchemaFromEnv(t *testing.T) {
 					return
 				}
 
-				if !cfg.Schema.UseLocalRegistry {
-					t.Error("Expected UseLocalRegistry to be true")
+				if cfg.Schema.RegistryType != "local" {
+					t.Error("Expected RegistryType to be 'local'")
 				}
 
 				if cfg.Schema.LocalRegistry.BasePath != tt.expectPath {
@@ -390,6 +381,44 @@ func TestLoadFromEnv_Schema(t *testing.T) {
 
 	if cfg.Schema.LocalRegistry.BasePath != "/tmp/env-test-schemas" {
 		t.Errorf("Expected registry path '/tmp/env-test-schemas', got '%s'", cfg.Schema.LocalRegistry.BasePath)
+	}
+}
+
+// Test HTTP registry environment parsing
+func TestLoadSchemaFromEnv_HTTP(t *testing.T) {
+	// Set HTTP registry env vars
+	os.Setenv("AMTP_SCHEMA_REGISTRY_TYPE", "http")
+	os.Setenv("AMTP_SCHEMA_REGISTRY_URL", "https://registry.example.com")
+	os.Setenv("AMTP_SCHEMA_REGISTRY_AUTH_TOKEN", "test-token")
+	os.Setenv("AMTP_SCHEMA_REGISTRY_TIMEOUT", "5s")
+	defer func() {
+		os.Unsetenv("AMTP_SCHEMA_REGISTRY_TYPE")
+		os.Unsetenv("AMTP_SCHEMA_REGISTRY_URL")
+		os.Unsetenv("AMTP_SCHEMA_REGISTRY_AUTH_TOKEN")
+		os.Unsetenv("AMTP_SCHEMA_REGISTRY_TIMEOUT")
+	}()
+
+	cfg := getDefaultConfig()
+	loadSchemaFromEnv(cfg)
+
+	if cfg.Schema == nil {
+		t.Fatal("Expected schema config to be created for http registry")
+	}
+
+	if cfg.Schema.RegistryType != "http" {
+		t.Fatalf("Expected RegistryType 'http', got '%s'", cfg.Schema.RegistryType)
+	}
+
+	if cfg.Schema.Registry.BaseURL != "https://registry.example.com" {
+		t.Fatalf("Expected BaseURL 'https://registry.example.com', got '%s'", cfg.Schema.Registry.BaseURL)
+	}
+
+	if cfg.Schema.Registry.AuthToken != "test-token" {
+		t.Fatalf("Expected AuthToken 'test-token', got '%s'", cfg.Schema.Registry.AuthToken)
+	}
+
+	if cfg.Schema.Registry.Timeout != 5*time.Second {
+		t.Fatalf("Expected Timeout 5s, got %v", cfg.Schema.Registry.Timeout)
 	}
 }
 
@@ -617,7 +646,7 @@ func TestConfigIntegration_Schema(t *testing.T) {
 message:
   max_size: 10485760
 schema:
-  use_local_registry: true
+  registry_type: "local"
   local_registry:
     base_path: ` + schemaPath + `
     index_file: "index.json"
@@ -647,8 +676,8 @@ schema:
 		t.Fatal("Expected schema config to be loaded from YAML")
 	}
 
-	if !cfg.Schema.UseLocalRegistry {
-		t.Error("Expected UseLocalRegistry to be true")
+	if cfg.Schema.RegistryType != "local" {
+		t.Error("Expected RegistryType to be 'local'")
 	}
 
 	if cfg.Schema.LocalRegistry.BasePath != schemaPath {
@@ -678,7 +707,7 @@ func TestConfigIntegration_EnvOverrideYAML(t *testing.T) {
 message:
   max_size: 10485760
 schema:
-  use_local_registry: true
+  registry_type: "local"
   local_registry:
     base_path: ` + yamlSchemaPath + `
     index_file: "index.json"`

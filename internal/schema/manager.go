@@ -38,32 +38,44 @@ type Manager struct {
 
 // ManagerConfig holds configuration for the schema manager
 type ManagerConfig struct {
-	Registry         RegistryConfig      `yaml:"registry" json:"registry"`
-	LocalRegistry    LocalRegistryConfig `yaml:"local_registry" json:"local_registry"`
-	Cache            CacheConfig         `yaml:"cache" json:"cache"`
-	Validation       ValidatorConfig     `yaml:"validation" json:"validation"`
-	Negotiation      NegotiationConfig   `yaml:"negotiation" json:"negotiation"`
-	Compatibility    CompatibilityConfig `yaml:"compatibility" json:"compatibility"`
-	Pipeline         PipelineConfig      `yaml:"pipeline" json:"pipeline"`
-	ErrorReporting   ErrorReportConfig   `yaml:"error_reporting" json:"error_reporting"`
-	UseLocalRegistry bool                `yaml:"use_local_registry" json:"use_local_registry"`
+	Registry       RegistryConfig      `yaml:"registry" json:"registry"`
+	LocalRegistry  LocalRegistryConfig `yaml:"local_registry" json:"local_registry"`
+	Cache          CacheConfig         `yaml:"cache" json:"cache"`
+	Validation     ValidatorConfig     `yaml:"validation" json:"validation"`
+	Negotiation    NegotiationConfig   `yaml:"negotiation" json:"negotiation"`
+	Compatibility  CompatibilityConfig `yaml:"compatibility" json:"compatibility"`
+	Pipeline       PipelineConfig      `yaml:"pipeline" json:"pipeline"`
+	ErrorReporting ErrorReportConfig   `yaml:"error_reporting" json:"error_reporting"`
+	RegistryType   string              `yaml:"registry_type" json:"registry_type"` // "local", "http", or "database"
 }
 
 // NewManager creates a new schema manager with all components
-func NewManager(config ManagerConfig) (*Manager, error) {
+func NewManager(config ManagerConfig, schemaStore ...SchemaStore) (*Manager, error) {
 	// Create registry client
 	var registryClient RegistryClient
-	if config.UseLocalRegistry {
-		// Use local registry
-		localRegistry, err := NewLocalRegistry(config.LocalRegistry)
+	var err error
+
+	// Determine registry type
+	registryType := config.RegistryType
+	if registryType == "" {
+		registryType = "local"
+	}
+
+	switch registryType {
+	case "local":
+		registryClient, err = NewLocalRegistry(config.LocalRegistry)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create local registry: %w", err)
 		}
-		registryClient = localRegistry
-	} else if config.Registry.BaseURL != "" {
+	case "database":
+		if len(schemaStore) == 0 || schemaStore[0] == nil {
+			return nil, fmt.Errorf("database registry requires a SchemaStore")
+		}
+		registryClient = NewDatabaseRegistry(schemaStore[0])
+	case "http":
 		registryClient = NewHTTPRegistryClient(config.Registry)
-	} else {
-		registryClient = NewMockRegistryClient()
+	default:
+		return nil, fmt.Errorf("unknown registry type: %s", registryType)
 	}
 
 	// Create cache

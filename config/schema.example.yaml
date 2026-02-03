@@ -1,10 +1,10 @@
 # AMTP Gateway Schema Configuration Example
 
 schema:
-  # Use local registry (recommended for most deployments)
-  use_local_registry: true
+  # Registry type: "local", "http", or "database"
+  registry_type: "local"
   
-  # Local registry configuration
+  # Local registry configuration (when registry_type is "local")
   local_registry:
     base_path: "./schemas"
     auto_save: true
@@ -12,7 +12,7 @@ schema:
     create_dirs: true
     backup_count: 5
   
-  # External registry configuration (if use_local_registry is false)
+  # External registry configuration (when registry_type is "http")
   registry:
     base_url: "https://schemas.example.com"
     api_key: "your-api-key"

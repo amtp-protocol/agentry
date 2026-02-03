@@ -197,7 +197,7 @@ The schema framework is built with a clean, modular architecture that provides:
 ```go
 // Create schema manager with local registry
 config := schema.ManagerConfig{
-    UseLocalRegistry: true,
+    RegistryType: "local",
     LocalRegistry: schema.LocalRegistryConfig{
         BasePath:   "./schemas",
         AutoSave:   true,
@@ -219,6 +219,27 @@ if err != nil {
     log.Fatal(err)
 }
 ```
+
+### HTTP Registry Example
+
+You can configure the schema manager to use a remote HTTP registry. Set `RegistryType` to `http` and provide a `Registry` configuration with the `base_url` (and optional auth/token, timeout).
+
+YAML example:
+
+```yaml
+registry_type: "http"
+registry:
+    base_url: "https://schema-registry.example.com"
+    timeout: "15s"
+    auth_token: "your-token-here"
+```
+
+Environment variables (alternatively):
+
+- `AMTP_SCHEMA_REGISTRY_TYPE=http` or set `AMTP_SCHEMA_REGISTRY_URL`
+- `AMTP_SCHEMA_REGISTRY_URL=https://schema-registry.example.com`
+- `AMTP_SCHEMA_REGISTRY_AUTH_TOKEN=your-token-here`
+- `AMTP_SCHEMA_REGISTRY_TIMEOUT=15s`
 
 ### Schema Registration
 
