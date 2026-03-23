@@ -116,14 +116,19 @@ const (
 
 // SendMessageRequest represents the API request to send a message
 type SendMessageRequest struct {
-	Sender       string                 `json:"sender" validate:"required,email"`
-	Recipients   []string               `json:"recipients" validate:"required,min=1,dive,email"`
-	Subject      string                 `json:"subject,omitempty"`
-	Schema       string                 `json:"schema,omitempty"`
-	Coordination *CoordinationConfig    `json:"coordination,omitempty"`
-	Headers      map[string]interface{} `json:"headers,omitempty"`
-	Payload      json.RawMessage        `json:"payload,omitempty"`
-	Attachments  []Attachment           `json:"attachments,omitempty"`
+	MessageID      string                 `json:"message_id,omitempty"`
+	IdempotencyKey string                 `json:"idempotency_key,omitempty"`
+	Timestamp      string                 `json:"timestamp,omitempty"`
+	Sender         string                 `json:"sender" validate:"required,email"`
+	Recipients     []string               `json:"recipients" validate:"required,min=1,dive,email"`
+	Subject        string                 `json:"subject,omitempty"`
+	Schema         string                 `json:"schema,omitempty"`
+	Coordination   *CoordinationConfig    `json:"coordination,omitempty"`
+	Headers        map[string]interface{} `json:"headers,omitempty"`
+	ResponseType   string                 `json:"response_type,omitempty"`
+	InReplyTo      string                 `json:"in_reply_to,omitempty"`
+	Payload        json.RawMessage        `json:"payload,omitempty"`
+	Attachments    []Attachment           `json:"attachments,omitempty"`
 }
 
 // SendMessageResponse represents the API response for sending a message

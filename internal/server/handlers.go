@@ -46,6 +46,8 @@ func generateIdempotencyKey(req *types.SendMessageRequest) string {
 		Coordination *types.CoordinationConfig `json:"coordination"`
 		Headers      map[string]interface{}    `json:"headers"`
 		Payload      json.RawMessage           `json:"payload"`
+		ResponseType string                    `json:"response_type"`
+		InReplyTo    string                    `json:"in_reply_to"`
 		Attachments  []types.Attachment        `json:"attachments"`
 	}{
 		Sender:       req.Sender,
@@ -55,6 +57,8 @@ func generateIdempotencyKey(req *types.SendMessageRequest) string {
 		Coordination: req.Coordination,
 		Headers:      req.Headers,
 		Payload:      req.Payload,
+		ResponseType: req.ResponseType,
+		InReplyTo:    req.InReplyTo,
 		Attachments:  req.Attachments,
 	}
 
@@ -104,22 +108,36 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	}
 
 	// Generate message ID and deterministic idempotency key
-	messageID, err := uuid.GenerateV7()
-	if err != nil {
-		s.respondWithError(c, http.StatusInternalServerError, "ID_GENERATION_FAILED",
-			"Failed to generate message ID", nil)
-		return
+	messageID := req.MessageID
+	if messageID == "" {
+		var err error
+		messageID, err = uuid.GenerateV7()
+		if err != nil {
+			s.respondWithError(c, http.StatusInternalServerError, "ID_GENERATION_FAILED",
+				"Failed to generate message ID", nil)
+			return
+		}
 	}
 
 	// Generate deterministic idempotency key based on request content
-	idempotencyKey := generateIdempotencyKey(&req)
+	idempotencyKey := req.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = generateIdempotencyKey(&req)
+	}
+
+	timestamp := time.Now().UTC()
+	if req.Timestamp != "" {
+		if parsed, err := time.Parse(time.RFC3339, req.Timestamp); err == nil {
+			timestamp = parsed.UTC()
+		}
+	}
 
 	// Create AMTP message
 	message := &types.Message{
 		Version:        "1.0",
 		MessageID:      messageID,
 		IdempotencyKey: idempotencyKey,
-		Timestamp:      time.Now().UTC(),
+		Timestamp:      timestamp,
 		Sender:         req.Sender,
 		Recipients:     req.Recipients,
 		Subject:        req.Subject,
@@ -127,6 +145,8 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		Coordination:   req.Coordination,
 		Headers:        req.Headers,
 		Payload:        req.Payload,
+		ResponseType:   req.ResponseType,
+		InReplyTo:      req.InReplyTo,
 		Attachments:    req.Attachments,
 	}
 
@@ -139,9 +159,37 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		return
 	}
 
+	// Intercept workflow responses
+	if message.ResponseType == "workflow_response" && message.InReplyTo != "" {
+		if s.workflow != nil {
+			err := s.workflow.ProcessResponse(c.Request.Context(), message.InReplyTo, message)
+			if err != nil {
+				// If it's a "not found" error, it means this gateway doesn't own the workflow,
+				// which is perfectly normal for distributed routing. Just ignore and continue routing.
+				if !strings.Contains(err.Error(), "not found") {
+					s.respondWithError(c, http.StatusInternalServerError, "WORKFLOW_UPDATE_FAILED",
+						"Failed to process workflow response", map[string]interface{}{
+							"error": err.Error(),
+						})
+					return
+				}
+			}
+			// If successful or not found, we fall through to let the normal message
+			// routing/delivery mechanism deliver this response to the recipient.
+		}
+	}
+
+	// Is sender a local user?
+	senderDomain := ""
+	parts := strings.Split(message.Sender, "@")
+	if len(parts) == 2 {
+		senderDomain = parts[1]
+	}
+	isSenderLocal := senderDomain == s.config.Server.Domain
+
 	// Process message using the message processor
 	processingOptions := processing.ProcessingOptions{
-		ImmediatePath: true, // Use immediate path for now
+		ImmediatePath: message.Coordination == nil || !isSenderLocal,
 		Timeout:       30 * time.Second,
 		MaxRetries:    3,
 	}
@@ -559,11 +607,7 @@ func (s *Server) handleDeleteSchema(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":   "Schema deleted successfully",
-		"schema_id": schemaIDStr,
-		"timestamp": time.Now().UTC(),
-	})
+	c.Status(http.StatusNoContent)
 }
 
 // handleValidateSchema handles POST /v1/admin/schemas/:id/validate

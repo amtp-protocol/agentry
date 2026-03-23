@@ -1780,3 +1780,19 @@ func TestVerifyAgentAccess_EmptyAPIKey(t *testing.T) {
 		t.Errorf("Expected error code 'EMPTY_API_KEY', got %s", errorResponse.Error.Code)
 	}
 }
+
+func (m *MockStorage) StoreWorkflow(ctx context.Context, state *types.Workflow) error {
+	return nil
+}
+func (m *MockStorage) GetWorkflow(ctx context.Context, workflowID string) (*types.Workflow, error) {
+	return nil, fmt.Errorf("not found")
+}
+func (m *MockStorage) UpdateWorkflowStatus(ctx context.Context, workflowID string, status types.WorkflowStatus) error {
+	return nil
+}
+func (m *MockStorage) UpdateWorkflowParticipant(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte) error {
+	return nil
+}
+func (m *MockStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Workflow, error) {
+	return nil, nil
+}

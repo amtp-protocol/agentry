@@ -39,6 +39,13 @@ type Storage interface {
 	UpdateStatus(ctx context.Context, messageID string, updater StatusUpdater) error
 	DeleteStatus(ctx context.Context, messageID string) error
 
+	// Workflow operations
+	StoreWorkflow(ctx context.Context, state *types.Workflow) error
+	GetWorkflow(ctx context.Context, workflowID string) (*types.Workflow, error)
+	UpdateWorkflowStatus(ctx context.Context, workflowID string, status types.WorkflowStatus) error
+	UpdateWorkflowParticipant(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte) error
+	ListTimedOutWorkflows(ctx context.Context) ([]*types.Workflow, error)
+
 	// Inbox operations (view-based queries)
 	GetInboxMessages(ctx context.Context, recipient string) ([]*types.Message, error)
 	AcknowledgeMessage(ctx context.Context, recipient, messageID string) error

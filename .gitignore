@@ -25,6 +25,7 @@ dist/
 coverage/
 *.cover
 *.coverprofile
+coverage.html
 
 # IDE files
 .vscode/

@@ -104,7 +104,7 @@ test_connectivity() {
 
     for domain in "${domains[@]}"; do
         log_info "Testing $domain health endpoint..."
-        if docker-compose -f "$compose_file" exec -T test-client curl -f -s "http://$domain/health" > /dev/null; then
+        for i in {1..5}; do if docker-compose -f "$compose_file" exec -T test-client curl -f -s "http://$domain/health" > /dev/null; then break; else sleep 1; fi; done; if docker-compose -f "$compose_file" exec -T test-client curl -f -s "http://$domain/health" > /dev/null; then
             log_success "✓ $domain is responding"
         else
             log_error "✗ $domain is not responding"
