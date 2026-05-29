@@ -25,17 +25,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var schemaCmd = &cobra.Command{
-	Use:   "schema",
-	Short: "Schema management commands (requires admin key)",
-}
+func newSchemaCmd(c *Client) *cobra.Command {
+	schemaCmd := &cobra.Command{
+		Use:   "schema",
+		Short: "Schema management commands (requires admin key)",
+	}
 
-func init() {
 	registerCmd := &cobra.Command{
 		Use:   "register <schema-id>",
 		Short: "Register a new schema",
 		Args:  cobra.ExactArgs(1),
-		Run:   runSchemaRegister,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSchemaRegister(c, cmd, args)
+		},
 	}
 	registerCmd.Flags().StringP("file", "f", "", "Schema definition file (required)")
 	registerCmd.Flags().Bool("force", false, "Overwrite existing schema")
@@ -44,28 +46,36 @@ func init() {
 		Use:   "list",
 		Short: "List all schemas",
 		Args:  cobra.NoArgs,
-		Run:   runSchemaList,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSchemaList(c, cmd, args)
+		},
 	}
 
 	getCmd := &cobra.Command{
 		Use:   "get <schema-id>",
 		Short: "Get a schema definition",
 		Args:  cobra.ExactArgs(1),
-		Run:   runSchemaGet,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSchemaGet(c, cmd, args)
+		},
 	}
 
 	deleteCmd := &cobra.Command{
 		Use:   "delete <schema-id>",
 		Short: "Delete a schema",
 		Args:  cobra.ExactArgs(1),
-		Run:   runSchemaDelete,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSchemaDelete(c, cmd, args)
+		},
 	}
 
 	validateCmd := &cobra.Command{
 		Use:   "validate <schema-id>",
 		Short: "Validate a payload against a schema",
 		Args:  cobra.ExactArgs(1),
-		Run:   runSchemaValidate,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSchemaValidate(c, cmd, args)
+		},
 	}
 	validateCmd.Flags().StringP("file", "f", "", "Payload file to validate (required)")
 
@@ -73,35 +83,38 @@ func init() {
 		Use:   "stats",
 		Short: "Show schema registry statistics",
 		Args:  cobra.NoArgs,
-		Run:   runSchemaStats,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSchemaStats(c, cmd, args)
+		},
 	}
 
 	schemaCmd.AddCommand(registerCmd, listCmd, getCmd, deleteCmd, validateCmd, statsCmd)
+	return schemaCmd
 }
 
-func runSchemaRegister(cmd *cobra.Command, args []string) {
+func runSchemaRegister(c *Client, cmd *cobra.Command, args []string) error {
 	schemaID := args[0]
 	schemaFile, _ := cmd.Flags().GetString("file")
 	force, _ := cmd.Flags().GetBool("force")
 
 	if schemaFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: Schema file is required (-f or --file flag)\n")
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: Schema file is required (-f or --file flag)\n")
 		_ = cmd.Usage()
-		os.Exit(1)
+		return errExit
 	}
 
 	// Read schema file
 	data, err := os.ReadFile(filepath.Clean(schemaFile))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read schema file: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to read schema file: %v\n", err)
+		return errExit
 	}
 
 	// Validate JSON
 	var jsonData interface{}
 	if err := json.Unmarshal(data, &jsonData); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid JSON in schema file: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Invalid JSON in schema file: %v\n", err)
+		return errExit
 	}
 
 	// Create request
@@ -112,123 +125,127 @@ func runSchemaRegister(cmd *cobra.Command, args []string) {
 	}
 
 	// Make HTTP request with admin authentication
-	resp, err := makeAdminAPIRequest("POST", "/v1/admin/schemas", req)
+	resp, err := c.AdminRequest("POST", "/v1/admin/schemas", req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to register schema: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to register schema: %v\n", err)
+		return errExit
 	}
 
 	var response SchemaResponse
 	if err := json.Unmarshal(resp, &response); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse response: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to parse response: %v\n", err)
+		return errExit
 	}
 
 	if response.Error != "" {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", response.Error)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", response.Error)
+		return errExit
 	}
 
-	fmt.Printf("Successfully registered schema: %s\n", schemaID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Successfully registered schema: %s\n", schemaID)
+	return nil
 }
 
-func runSchemaList(cmd *cobra.Command, args []string) {
+func runSchemaList(c *Client, cmd *cobra.Command, args []string) error {
 	// Make HTTP request with admin authentication
-	resp, err := makeAdminAPIRequest("GET", "/v1/admin/schemas", nil)
+	resp, err := c.AdminRequest("GET", "/v1/admin/schemas", nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to list schemas: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to list schemas: %v\n", err)
+		return errExit
 	}
 
 	var response ListSchemasResponse
 	if err := json.Unmarshal(resp, &response); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse response: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to parse response: %v\n", err)
+		return errExit
 	}
 
-	fmt.Printf("Found %d schema(s):\n\n", response.Count)
+	fmt.Fprintf(cmd.OutOrStdout(), "Found %d schema(s):\n\n", response.Count)
 	for _, schema := range response.Schemas {
 		if schema.Raw != "" {
-			fmt.Printf("  %s\n", schema.Raw)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", schema.Raw)
 		} else {
-			fmt.Printf("  agntcy:%s.%s.%s\n", schema.Domain, schema.Entity, schema.Version)
+			fmt.Fprintf(cmd.OutOrStdout(), "  agntcy:%s.%s.%s\n", schema.Domain, schema.Entity, schema.Version)
 		}
 	}
+	return nil
 }
 
-func runSchemaGet(cmd *cobra.Command, args []string) {
+func runSchemaGet(c *Client, cmd *cobra.Command, args []string) error {
 	schemaID := args[0]
 
 	// Make HTTP request with admin authentication
-	resp, err := makeAdminAPIRequest("GET", "/v1/admin/schemas/"+schemaID, nil)
+	resp, err := c.AdminRequest("GET", "/v1/admin/schemas/"+schemaID, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get schema: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to get schema: %v\n", err)
+		return errExit
 	}
 
 	var response map[string]interface{}
 	if err := json.Unmarshal(resp, &response); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse response: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to parse response: %v\n", err)
+		return errExit
 	}
 
 	// Pretty print the schema
 	prettyJSON, err := json.MarshalIndent(response["schema"], "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to format schema: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to format schema: %v\n", err)
+		return errExit
 	}
 
-	fmt.Printf("Schema: %s\n\n", schemaID)
-	fmt.Println(string(prettyJSON))
+	fmt.Fprintf(cmd.OutOrStdout(), "Schema: %s\n\n", schemaID)
+	fmt.Fprintln(cmd.OutOrStdout(), string(prettyJSON))
+	return nil
 }
 
-func runSchemaDelete(cmd *cobra.Command, args []string) {
+func runSchemaDelete(c *Client, cmd *cobra.Command, args []string) error {
 	schemaID := args[0]
 
 	// Make HTTP request with admin authentication
-	resp, err := makeAdminAPIRequest("DELETE", "/v1/admin/schemas/"+schemaID, nil)
+	resp, err := c.AdminRequest("DELETE", "/v1/admin/schemas/"+schemaID, nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to delete schema: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to delete schema: %v\n", err)
+		return errExit
 	}
 
 	var response SchemaResponse
 	if err := json.Unmarshal(resp, &response); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse response: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to parse response: %v\n", err)
+		return errExit
 	}
 
 	if response.Error != "" {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", response.Error)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", response.Error)
+		return errExit
 	}
 
-	fmt.Printf("Successfully deleted schema: %s\n", schemaID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Successfully deleted schema: %s\n", schemaID)
+	return nil
 }
 
-func runSchemaValidate(cmd *cobra.Command, args []string) {
+func runSchemaValidate(c *Client, cmd *cobra.Command, args []string) error {
 	schemaID := args[0]
 	payloadFile, _ := cmd.Flags().GetString("file")
 
 	if payloadFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: Payload file is required (-f or --file flag)\n")
+		fmt.Fprintf(cmd.ErrOrStderr(), "Error: Payload file is required (-f or --file flag)\n")
 		_ = cmd.Usage()
-		os.Exit(1)
+		return errExit
 	}
 
 	// Read payload file
 	data, err := os.ReadFile(filepath.Clean(payloadFile))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read payload file: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to read payload file: %v\n", err)
+		return errExit
 	}
 
 	// Validate JSON
 	var jsonData interface{}
 	if err := json.Unmarshal(data, &jsonData); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid JSON in payload file: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Invalid JSON in payload file: %v\n", err)
+		return errExit
 	}
 
 	// Create request
@@ -237,58 +254,60 @@ func runSchemaValidate(cmd *cobra.Command, args []string) {
 	}
 
 	// Make HTTP request with admin authentication
-	resp, err := makeAdminAPIRequest("POST", "/v1/admin/schemas/"+schemaID+"/validate", req)
+	resp, err := c.AdminRequest("POST", "/v1/admin/schemas/"+schemaID+"/validate", req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to validate payload: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to validate payload: %v\n", err)
+		return errExit
 	}
 
 	var response ValidationResponse
 	if err := json.Unmarshal(resp, &response); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse response: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to parse response: %v\n", err)
+		return errExit
 	}
 
 	if response.Valid {
-		fmt.Printf("✓ Payload is valid against schema: %s\n", schemaID)
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Payload is valid against schema: %s\n", schemaID)
 	} else {
-		fmt.Printf("✗ Payload is invalid against schema: %s\n", schemaID)
+		fmt.Fprintf(cmd.OutOrStdout(), "✗ Payload is invalid against schema: %s\n", schemaID)
 		if len(response.Errors) > 0 {
-			fmt.Println("\nErrors:")
+			fmt.Fprintln(cmd.OutOrStdout(), "\nErrors:")
 			for _, err := range response.Errors {
-				fmt.Printf("  - %v\n", err)
+				fmt.Fprintf(cmd.OutOrStdout(), "  - %v\n", err)
 			}
 		}
 		if len(response.Warnings) > 0 {
-			fmt.Println("\nWarnings:")
+			fmt.Fprintln(cmd.OutOrStdout(), "\nWarnings:")
 			for _, warning := range response.Warnings {
-				fmt.Printf("  - %v\n", warning)
+				fmt.Fprintf(cmd.OutOrStdout(), "  - %v\n", warning)
 			}
 		}
-		os.Exit(1)
+		return errExit
 	}
+	return nil
 }
 
-func runSchemaStats(cmd *cobra.Command, args []string) {
+func runSchemaStats(c *Client, cmd *cobra.Command, args []string) error {
 	// Make HTTP request with admin authentication
-	resp, err := makeAdminAPIRequest("GET", "/v1/admin/schemas/stats", nil)
+	resp, err := c.AdminRequest("GET", "/v1/admin/schemas/stats", nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get schema statistics: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to get schema statistics: %v\n", err)
+		return errExit
 	}
 
 	var response SchemaStatsResponse
 	if err := json.Unmarshal(resp, &response); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse response: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to parse response: %v\n", err)
+		return errExit
 	}
 
-	fmt.Println("Schema Registry Statistics:")
+	fmt.Fprintln(cmd.OutOrStdout(), "Schema Registry Statistics:")
 	prettyJSON, err := json.MarshalIndent(response.Stats, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to format stats: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Failed to format stats: %v\n", err)
+		return errExit
 	}
 
-	fmt.Println(string(prettyJSON))
+	fmt.Fprintln(cmd.OutOrStdout(), string(prettyJSON))
+	return nil
 }

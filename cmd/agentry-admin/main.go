@@ -17,13 +17,20 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	root := buildRootCmd(newClient())
+	if err := root.Execute(); err != nil {
+		// Command handlers report their own errors to stderr and return
+		// errExit; anything else is an error cobra surfaced (e.g. unknown
+		// command or flag) that we still need to print.
+		if !errors.Is(err, errExit) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }

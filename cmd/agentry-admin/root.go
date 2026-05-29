@@ -17,37 +17,41 @@
 package main
 
 import (
-	"os"
+	"errors"
 
 	"github.com/spf13/cobra"
 )
 
-// Global flags shared across all commands.
-var (
-	gatewayURL   = "http://localhost:8080"
-	verbose      = false
-	adminKeyFile = ""
-)
+// errExit signals that a command already reported its failure to stderr and the
+// process should exit non-zero without printing anything further. It lets
+// command handlers preserve their exact error output while routing the actual
+// exit through main().
+var errExit = errors.New("")
 
-var rootCmd = &cobra.Command{
-	Use:   "agentry-admin",
-	Short: "Agentry Admin Tool",
-	Long:  "Agentry Admin Tool - manage schemas, local agents, and inboxes on an Agentry gateway.",
-	// Mirror the original behavior: bare invocation prints usage and exits
-	// non-zero. (`--help` is intercepted by cobra before Run and exits 0.)
-	Run: func(cmd *cobra.Command, args []string) {
-		_ = cmd.Help()
-		os.Exit(1)
-	},
-	SilenceUsage:  true,
-	SilenceErrors: true,
-}
+// buildRootCmd assembles the full command tree around the given client. The
+// client's configuration fields are bound to the persistent flags, so they are
+// populated when the flags are parsed and shared with every subcommand.
+func buildRootCmd(c *Client) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "agentry-admin",
+		Short: "Agentry Admin Tool",
+		Long:  "Agentry Admin Tool - manage schemas, local agents, and inboxes on an Agentry gateway.",
+		// Mirror the original behavior: bare invocation prints usage and exits
+		// non-zero. (`--help` is intercepted by cobra before RunE and exits 0.)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_ = cmd.Help()
+			return errExit
+		},
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
 
-func init() {
-	pf := rootCmd.PersistentFlags()
-	pf.StringVar(&gatewayURL, "gateway-url", "http://localhost:8080", "Gateway URL")
-	pf.BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
-	pf.StringVar(&adminKeyFile, "admin-key-file", "", "Admin API key file for administrative operations")
+	pf := root.PersistentFlags()
+	pf.StringVar(&c.GatewayURL, "gateway-url", "http://localhost:8080", "Gateway URL")
+	pf.BoolVarP(&c.Verbose, "verbose", "v", false, "Verbose output")
+	pf.StringVar(&c.AdminKeyFile, "admin-key-file", "", "Admin API key file for administrative operations")
 
-	rootCmd.AddCommand(schemaCmd, agentCmd, inboxCmd)
+	root.AddCommand(newSchemaCmd(c), newAgentCmd(c), newInboxCmd(c))
+
+	return root
 }
