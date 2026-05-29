@@ -10,7 +10,7 @@ GO_VERSION=1.21
 # Build variables
 BUILD_DIR=build
 MAIN_PATH=./main.go
-ADMIN_MAIN_PATH=./cmd/agentry-admin/main.go
+ADMIN_MAIN_PATH=./cmd/agentry-admin
 LDFLAGS=-ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo 'dev') -X main.buildTime=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Test variables
