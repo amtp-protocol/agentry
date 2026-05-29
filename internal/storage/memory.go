@@ -19,6 +19,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -111,29 +112,41 @@ func (ms *MemoryStorage) ListMessages(ctx context.Context, filter MessageFilter)
 	defer ms.messagesMux.RUnlock()
 	defer ms.statusesMux.RUnlock()
 
-	var results []*types.Message
-	count := 0
-
+	// Collect all matching messages first, then apply ordering and pagination.
+	// Applying offset/limit during the raw map iteration is wrong because the
+	// offset would be consumed by non-matching messages, and map iteration
+	// order is non-deterministic.
+	var matched []*types.Message
 	for messageID, message := range ms.messages {
-		// Skip offset
-		if count < filter.Offset {
-			count++
-			continue
-		}
-
-		// Check limit
-		if filter.Limit > 0 && len(results) >= filter.Limit {
-			break
-		}
-
-		// Apply filters
 		if ms.matchesFilter(message, messageID, filter) {
-			results = append(results, message)
+			matched = append(matched, message)
 		}
-		count++
 	}
 
-	return results, nil
+	// Order newest-first to mirror the database backend (ORDER BY created_at
+	// DESC) and to make pagination deterministic. Ties are broken by message
+	// ID so the ordering is total.
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].Timestamp.Equal(matched[j].Timestamp) {
+			return matched[i].MessageID > matched[j].MessageID
+		}
+		return matched[i].Timestamp.After(matched[j].Timestamp)
+	})
+
+	// Apply offset.
+	if filter.Offset > 0 {
+		if filter.Offset >= len(matched) {
+			return []*types.Message{}, nil
+		}
+		matched = matched[filter.Offset:]
+	}
+
+	// Apply limit.
+	if filter.Limit > 0 && len(matched) > filter.Limit {
+		matched = matched[:filter.Limit]
+	}
+
+	return matched, nil
 }
 
 // StoreStatus stores message status

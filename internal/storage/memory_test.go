@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -596,6 +597,60 @@ func TestMemoryStorage_ListMessages(t *testing.T) {
 
 	if len(result) != 1 {
 		t.Errorf("Expected 1 message with limit, got %d", len(result))
+	}
+}
+
+// TestMemoryStorage_ListMessages_FilterWithPagination verifies that offset and
+// limit are applied to the filtered result set (not to the raw, unfiltered
+// iteration) and that results are returned in a deterministic order.
+func TestMemoryStorage_ListMessages_FilterWithPagination(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	base := time.Now()
+	// Interleave matching (sender1) and non-matching (sender2) messages so a
+	// pagination bug that counts non-matching rows against the offset is exposed.
+	// sender1 messages, newest first: match-0 (newest) .. match-4 (oldest).
+	for i := 0; i < 5; i++ {
+		if err := storage.StoreMessage(ctx, &types.Message{
+			MessageID:  fmt.Sprintf("match-%d", i),
+			Sender:     "sender1@example.com",
+			Recipients: []string{"recipient@example.com"},
+			Timestamp:  base.Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("store match-%d: %v", i, err)
+		}
+		if err := storage.StoreMessage(ctx, &types.Message{
+			MessageID:  fmt.Sprintf("other-%d", i),
+			Sender:     "sender2@example.com",
+			Recipients: []string{"recipient@example.com"},
+			Timestamp:  base.Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("store other-%d: %v", i, err)
+		}
+	}
+
+	// Page through the 5 matching messages 2 at a time, newest first.
+	filter := MessageFilter{Sender: "sender1@example.com", Offset: 2, Limit: 2}
+	result, err := storage.ListMessages(ctx, filter)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages for offset=2 limit=2, got %d", len(result))
+	}
+
+	// Every returned message must match the filter.
+	for _, msg := range result {
+		if msg.Sender != "sender1@example.com" {
+			t.Errorf("Expected only sender1 messages, got sender %q (id %s)", msg.Sender, msg.MessageID)
+		}
+	}
+
+	// Newest-first ordering means offset=2 skips match-0 and match-1.
+	if result[0].MessageID != "match-2" || result[1].MessageID != "match-3" {
+		t.Errorf("Expected [match-2, match-3], got [%s, %s]", result[0].MessageID, result[1].MessageID)
 	}
 }
 
