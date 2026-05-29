@@ -18,6 +18,8 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -599,6 +601,60 @@ func TestMemoryStorage_ListMessages(t *testing.T) {
 	}
 }
 
+// TestMemoryStorage_ListMessages_FilterWithPagination verifies that offset and
+// limit are applied to the filtered result set (not to the raw, unfiltered
+// iteration) and that results are returned in a deterministic order.
+func TestMemoryStorage_ListMessages_FilterWithPagination(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	base := time.Now()
+	// Interleave matching (sender1) and non-matching (sender2) messages so a
+	// pagination bug that counts non-matching rows against the offset is exposed.
+	// sender1 messages, newest first: match-0 (newest) .. match-4 (oldest).
+	for i := 0; i < 5; i++ {
+		if err := storage.StoreMessage(ctx, &types.Message{
+			MessageID:  fmt.Sprintf("match-%d", i),
+			Sender:     "sender1@example.com",
+			Recipients: []string{"recipient@example.com"},
+			Timestamp:  base.Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("store match-%d: %v", i, err)
+		}
+		if err := storage.StoreMessage(ctx, &types.Message{
+			MessageID:  fmt.Sprintf("other-%d", i),
+			Sender:     "sender2@example.com",
+			Recipients: []string{"recipient@example.com"},
+			Timestamp:  base.Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("store other-%d: %v", i, err)
+		}
+	}
+
+	// Page through the 5 matching messages 2 at a time, newest first.
+	filter := MessageFilter{Sender: "sender1@example.com", Offset: 2, Limit: 2}
+	result, err := storage.ListMessages(ctx, filter)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages for offset=2 limit=2, got %d", len(result))
+	}
+
+	// Every returned message must match the filter.
+	for _, msg := range result {
+		if msg.Sender != "sender1@example.com" {
+			t.Errorf("Expected only sender1 messages, got sender %q (id %s)", msg.Sender, msg.MessageID)
+		}
+	}
+
+	// Newest-first ordering means offset=2 skips match-0 and match-1.
+	if result[0].MessageID != "match-2" || result[1].MessageID != "match-3" {
+		t.Errorf("Expected [match-2, match-3], got [%s, %s]", result[0].MessageID, result[1].MessageID)
+	}
+}
+
 func TestMemoryStorage_GetStats(t *testing.T) {
 	storage := NewMemoryStorage(MemoryStorageConfig{})
 	ctx := context.Background()
@@ -1042,4 +1098,135 @@ func TestMemoryStorage_GetSuportedSchemas(t *testing.T) {
 			t.Errorf("Unexpected schema found: %s", schema)
 		}
 	}
+}
+
+// TestMemoryStorage_ReturnedValuesAreIsolated verifies that the in-memory
+// store hands callers independent copies, so mutating a returned value (or the
+// value originally passed to a Store/Create call) never alters stored state.
+func TestMemoryStorage_ReturnedValuesAreIsolated(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	// --- Message: mutation of the stored input and of a returned value must
+	//     not affect what the store holds. ---
+	msg := &types.Message{
+		MessageID:  "iso-msg",
+		Sender:     "a@example.com",
+		Recipients: []string{"b@example.com"},
+		Headers:    map[string]interface{}{"k": "v"},
+		Payload:    []byte(`{"n":1}`),
+		Timestamp:  time.Now(),
+	}
+	if err := storage.StoreMessage(ctx, msg); err != nil {
+		t.Fatalf("StoreMessage: %v", err)
+	}
+	// Mutate the original after storing.
+	msg.Recipients[0] = "tampered@example.com"
+	msg.Headers["k"] = "tampered"
+	msg.Payload[2] = 'X'
+
+	got, err := storage.GetMessage(ctx, "iso-msg")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.Recipients[0] != "b@example.com" {
+		t.Errorf("stored recipient mutated via input alias: %s", got.Recipients[0])
+	}
+	if got.Headers["k"] != "v" {
+		t.Errorf("stored header mutated via input alias: %v", got.Headers["k"])
+	}
+	if string(got.Payload) != `{"n":1}` {
+		t.Errorf("stored payload mutated via input alias: %s", got.Payload)
+	}
+	// Mutate the returned value; a fresh Get must be unaffected.
+	got.Recipients[0] = "tampered2@example.com"
+	got.Headers["k"] = "tampered2"
+	got2, _ := storage.GetMessage(ctx, "iso-msg")
+	if got2.Recipients[0] != "b@example.com" || got2.Headers["k"] != "v" {
+		t.Errorf("stored message mutated via returned alias: %v / %v", got2.Recipients[0], got2.Headers["k"])
+	}
+
+	// --- MessageStatus: Recipients slice is mutated in place by Update/Ack,
+	//     so returned values must own a distinct backing array. ---
+	st := &types.MessageStatus{
+		MessageID:  "iso-msg",
+		Status:     types.StatusQueued,
+		Recipients: []types.RecipientStatus{{Address: "b@example.com", Status: types.StatusQueued}},
+	}
+	if err := storage.StoreStatus(ctx, "iso-msg", st); err != nil {
+		t.Fatalf("StoreStatus: %v", err)
+	}
+	gotSt, _ := storage.GetStatus(ctx, "iso-msg")
+	gotSt.Recipients[0].Status = types.StatusDelivered
+	gotSt.Status = types.StatusDelivered
+	gotSt2, _ := storage.GetStatus(ctx, "iso-msg")
+	if gotSt2.Status != types.StatusQueued || gotSt2.Recipients[0].Status != types.StatusQueued {
+		t.Errorf("stored status mutated via returned alias: %v / %v", gotSt2.Status, gotSt2.Recipients[0].Status)
+	}
+
+	// --- LocalAgent: Headers map and SupportedSchemas slice must be isolated. ---
+	ag := &agents.LocalAgent{
+		Address:          "agent@example.com",
+		DeliveryMode:     "pull",
+		Headers:          map[string]string{"h": "1"},
+		SupportedSchemas: []string{"agntcy:test.*"},
+	}
+	if err := storage.CreateAgent(ctx, ag); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	ag.Headers["h"] = "tampered"
+	ag.SupportedSchemas[0] = "tampered"
+	gotAg, _ := storage.GetAgent(ctx, "agent@example.com")
+	if gotAg.Headers["h"] != "1" || gotAg.SupportedSchemas[0] != "agntcy:test.*" {
+		t.Errorf("stored agent mutated via input alias: %v / %v", gotAg.Headers["h"], gotAg.SupportedSchemas[0])
+	}
+	gotAg.Headers["h"] = "tampered2"
+	gotAg.SupportedSchemas[0] = "tampered2"
+	gotAg2, _ := storage.GetAgent(ctx, "agent@example.com")
+	if gotAg2.Headers["h"] != "1" || gotAg2.SupportedSchemas[0] != "agntcy:test.*" {
+		t.Errorf("stored agent mutated via returned alias: %v / %v", gotAg2.Headers["h"], gotAg2.SupportedSchemas[0])
+	}
+}
+
+// TestMemoryStorage_ConcurrentReadDuringUpdate exercises the data race between a
+// reader holding a returned status and a concurrent in-place status update.
+// Run with -race.
+func TestMemoryStorage_ConcurrentReadDuringUpdate(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	if err := storage.StoreStatus(ctx, "race-msg", &types.MessageStatus{
+		MessageID:  "race-msg",
+		Status:     types.StatusQueued,
+		Recipients: []types.RecipientStatus{{Address: "b@example.com", Status: types.StatusQueued}},
+	}); err != nil {
+		t.Fatalf("StoreStatus: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// Writer: repeatedly mutate the stored status in place.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			_ = storage.UpdateStatus(ctx, "race-msg", func(s *types.MessageStatus) error {
+				s.Attempts++
+				s.Recipients[0].Status = types.StatusDelivered
+				return nil
+			})
+		}
+	}()
+	// Reader: read returned snapshots' mutable fields.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			if s, err := storage.GetStatus(ctx, "race-msg"); err == nil {
+				_ = s.Attempts
+				if len(s.Recipients) > 0 {
+					_ = s.Recipients[0].Status
+				}
+			}
+		}
+	}()
+	wg.Wait()
 }

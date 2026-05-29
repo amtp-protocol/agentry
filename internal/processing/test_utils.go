@@ -354,14 +354,6 @@ func (m *MockStorage) GetSupportedSchemas(ctx context.Context) ([]string, error)
 	return schemas, nil
 }
 
-func (m *MockDiscovery) SupportsSchema(ctx context.Context, domain, schema string) (bool, error) {
-	if m.error != nil {
-		return false, m.error
-	}
-	// Default to supporting all schemas
-	return true, nil
-}
-
 // Test message creation helper
 func createTestMessage() *types.Message {
 	return &types.Message{

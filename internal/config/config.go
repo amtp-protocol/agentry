@@ -448,11 +448,13 @@ func getBoolEnvWithDefault(key string, defaultValue bool) bool {
 
 // getDefaultMockRecords returns default mock DNS records
 func getDefaultMockRecords() map[string]string {
+	// Schemas are intentionally not advertised via DNS; a gateway's supported
+	// schemas come from its agent registry and are served over HTTP discovery.
 	return map[string]string{
-		"localhost":   "v=amtp1;gateway=http://localhost:8080;schemas=agntcy:test.*,agntcy:dev.*",
-		"test.local":  "v=amtp1;gateway=http://localhost:8080;schemas=agntcy:test.*",
-		"dev.local":   "v=amtp1;gateway=http://localhost:8080;schemas=agntcy:dev.*",
-		"example.com": "v=amtp1;gateway=http://localhost:8080;schemas=agntcy:example.*",
+		"localhost":   "v=amtp1;gateway=http://localhost:8080",
+		"test.local":  "v=amtp1;gateway=http://localhost:8080",
+		"dev.local":   "v=amtp1;gateway=http://localhost:8080",
+		"example.com": "v=amtp1;gateway=http://localhost:8080",
 	}
 }
 

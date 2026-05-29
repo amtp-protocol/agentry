@@ -19,6 +19,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -66,7 +67,7 @@ func (ms *MemoryStorage) StoreMessage(ctx context.Context, message *types.Messag
 		return fmt.Errorf("storage capacity exceeded: max %d messages", ms.config.MaxMessages)
 	}
 
-	ms.messages[message.MessageID] = message
+	ms.messages[message.MessageID] = cloneMessage(message)
 	return nil
 }
 
@@ -84,7 +85,7 @@ func (ms *MemoryStorage) GetMessage(ctx context.Context, messageID string) (*typ
 		return nil, fmt.Errorf("message not found: %s", messageID)
 	}
 
-	return message, nil
+	return cloneMessage(message), nil
 }
 
 // DeleteMessage removes a message from storage
@@ -111,29 +112,41 @@ func (ms *MemoryStorage) ListMessages(ctx context.Context, filter MessageFilter)
 	defer ms.messagesMux.RUnlock()
 	defer ms.statusesMux.RUnlock()
 
-	var results []*types.Message
-	count := 0
-
+	// Collect all matching messages first, then apply ordering and pagination.
+	// Applying offset/limit during the raw map iteration is wrong because the
+	// offset would be consumed by non-matching messages, and map iteration
+	// order is non-deterministic.
+	var matched []*types.Message
 	for messageID, message := range ms.messages {
-		// Skip offset
-		if count < filter.Offset {
-			count++
-			continue
-		}
-
-		// Check limit
-		if filter.Limit > 0 && len(results) >= filter.Limit {
-			break
-		}
-
-		// Apply filters
 		if ms.matchesFilter(message, messageID, filter) {
-			results = append(results, message)
+			matched = append(matched, cloneMessage(message))
 		}
-		count++
 	}
 
-	return results, nil
+	// Order newest-first to mirror the database backend (ORDER BY created_at
+	// DESC) and to make pagination deterministic. Ties are broken by message
+	// ID so the ordering is total.
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].Timestamp.Equal(matched[j].Timestamp) {
+			return matched[i].MessageID > matched[j].MessageID
+		}
+		return matched[i].Timestamp.After(matched[j].Timestamp)
+	})
+
+	// Apply offset.
+	if filter.Offset > 0 {
+		if filter.Offset >= len(matched) {
+			return []*types.Message{}, nil
+		}
+		matched = matched[filter.Offset:]
+	}
+
+	// Apply limit.
+	if filter.Limit > 0 && len(matched) > filter.Limit {
+		matched = matched[:filter.Limit]
+	}
+
+	return matched, nil
 }
 
 // StoreStatus stores message status
@@ -148,7 +161,7 @@ func (ms *MemoryStorage) StoreStatus(ctx context.Context, messageID string, stat
 	ms.statusesMux.Lock()
 	defer ms.statusesMux.Unlock()
 
-	ms.statuses[messageID] = status
+	ms.statuses[messageID] = cloneStatus(status)
 	return nil
 }
 
@@ -166,7 +179,7 @@ func (ms *MemoryStorage) GetStatus(ctx context.Context, messageID string) (*type
 		return nil, fmt.Errorf("message status not found: %s", messageID)
 	}
 
-	return status, nil
+	return cloneStatus(status), nil
 }
 
 // UpdateStatus updates message status using the provided updater function
@@ -232,7 +245,7 @@ func (ms *MemoryStorage) GetInboxMessages(ctx context.Context, recipient string)
 				recipientStatus.LocalDelivery &&
 				recipientStatus.InboxDelivered &&
 				!recipientStatus.Acknowledged {
-				inboxMessages = append(inboxMessages, message)
+				inboxMessages = append(inboxMessages, cloneMessage(message))
 				break
 			}
 		}
@@ -388,8 +401,7 @@ func (ms *MemoryStorage) CreateAgent(ctx context.Context, agent *agents.LocalAge
 	}
 
 	// Store a copy to prevent external modifications (like API key restoration) from affecting storage
-	agentCopy := *agent
-	ms.agents[agent.Address] = &agentCopy
+	ms.agents[agent.Address] = cloneAgent(agent)
 	return nil
 }
 
@@ -407,7 +419,7 @@ func (ms *MemoryStorage) GetAgent(ctx context.Context, agentAddress string) (*ag
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
 	}
 
-	return agent, nil
+	return cloneAgent(agent), nil
 }
 
 // UpdateAgent updates an existing local agent
@@ -423,8 +435,7 @@ func (ms *MemoryStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAge
 	}
 
 	// Store a copy to prevent external modifications from affecting storage
-	agentCopy := *agent
-	ms.agents[agent.Address] = &agentCopy
+	ms.agents[agent.Address] = cloneAgent(agent)
 	return nil
 }
 
@@ -452,7 +463,7 @@ func (ms *MemoryStorage) ListAgents(ctx context.Context) ([]*agents.LocalAgent, 
 
 	var agentList []*agents.LocalAgent
 	for _, agent := range ms.agents {
-		agentList = append(agentList, agent)
+		agentList = append(agentList, cloneAgent(agent))
 	}
 
 	return agentList, nil
@@ -476,4 +487,79 @@ func (ms *MemoryStorage) GetSupportedSchemas(ctx context.Context) ([]string, err
 	}
 
 	return schemas, nil
+}
+
+// The clone helpers below give the in-memory store sole ownership of the values
+// it holds. Every value is copied on the way in (Store/Create/Update) and on
+// the way out (Get/List), so neither the caller's original nor a returned value
+// shares mutable state (slices, maps, payload bytes, pointer fields) with the
+// stored object. Without this, a caller mutating a returned value would race
+// with concurrent readers/writers and silently corrupt stored state. This
+// mirrors the database backend, which returns freshly converted structs.
+
+func cloneMessage(m *types.Message) *types.Message {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	if m.Recipients != nil {
+		c.Recipients = append([]string(nil), m.Recipients...)
+	}
+	if m.Headers != nil {
+		c.Headers = make(map[string]interface{}, len(m.Headers))
+		for k, v := range m.Headers {
+			c.Headers[k] = v
+		}
+	}
+	if m.Payload != nil {
+		c.Payload = append([]byte(nil), m.Payload...)
+	}
+	if m.Attachments != nil {
+		c.Attachments = append([]types.Attachment(nil), m.Attachments...)
+	}
+	if m.Coordination != nil {
+		coord := *m.Coordination
+		c.Coordination = &coord
+	}
+	if m.Signature != nil {
+		sig := *m.Signature
+		c.Signature = &sig
+	}
+	return &c
+}
+
+func cloneStatus(s *types.MessageStatus) *types.MessageStatus {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	if s.Recipients != nil {
+		c.Recipients = append([]types.RecipientStatus(nil), s.Recipients...)
+	}
+	if s.NextRetry != nil {
+		t := *s.NextRetry
+		c.NextRetry = &t
+	}
+	if s.DeliveredAt != nil {
+		t := *s.DeliveredAt
+		c.DeliveredAt = &t
+	}
+	return &c
+}
+
+func cloneAgent(a *agents.LocalAgent) *agents.LocalAgent {
+	if a == nil {
+		return nil
+	}
+	c := *a
+	if a.Headers != nil {
+		c.Headers = make(map[string]string, len(a.Headers))
+		for k, v := range a.Headers {
+			c.Headers[k] = v
+		}
+	}
+	if a.SupportedSchemas != nil {
+		c.SupportedSchemas = append([]string(nil), a.SupportedSchemas...)
+	}
+	return &c
 }

@@ -140,36 +140,6 @@ func (m *MockDiscovery) DiscoverCapabilities(ctx context.Context, domain string)
 	return nil, fmt.Errorf("no AMTP capabilities found for domain %s", domain)
 }
 
-// SupportsSchema checks if a domain supports a specific schema using mock data
-func (m *MockDiscovery) SupportsSchema(ctx context.Context, domain, schema string) (bool, error) {
-	capabilities, err := m.DiscoverCapabilities(ctx, domain)
-	if err != nil {
-		return false, err
-	}
-
-	// If no schemas specified, assume all are supported
-	if len(capabilities.Schemas) == 0 {
-		return true, nil
-	}
-
-	// Check for exact match or wildcard match
-	for _, supportedSchema := range capabilities.Schemas {
-		if supportedSchema == schema {
-			return true, nil
-		}
-
-		// Check wildcard patterns (e.g., "agntcy:test.*")
-		if strings.HasSuffix(supportedSchema, "*") {
-			prefix := strings.TrimSuffix(supportedSchema, "*")
-			if strings.HasPrefix(schema, prefix) {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
-}
-
 // parseAMTPRecord parses an AMTP DNS TXT record (reused from Discovery)
 func (m *MockDiscovery) parseAMTPRecord(record string) *AMTPCapabilities {
 	// Clean up the record - remove extra quotes that may be added by DNS servers
@@ -475,36 +445,6 @@ func (d *Discovery) DiscoverMXRecords(ctx context.Context, domain string) ([]*ne
 func (d *Discovery) HasAMTPSupport(ctx context.Context, domain string) bool {
 	_, err := d.DiscoverCapabilities(ctx, domain)
 	return err == nil
-}
-
-// SupportsSchema checks if a domain supports a specific schema
-func (d *Discovery) SupportsSchema(ctx context.Context, domain, schema string) (bool, error) {
-	capabilities, err := d.DiscoverCapabilities(ctx, domain)
-	if err != nil {
-		return false, err
-	}
-
-	// If no schemas specified, assume all are supported
-	if len(capabilities.Schemas) == 0 {
-		return true, nil
-	}
-
-	// Check for exact match or wildcard match
-	for _, supportedSchema := range capabilities.Schemas {
-		if supportedSchema == schema {
-			return true, nil
-		}
-
-		// Check wildcard patterns (e.g., "agntcy:commerce.*")
-		if strings.HasSuffix(supportedSchema, "*") {
-			prefix := strings.TrimSuffix(supportedSchema, "*")
-			if strings.HasPrefix(schema, prefix) {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
 }
 
 // getCached retrieves cached capabilities if still valid
