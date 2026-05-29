@@ -20,6 +20,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/amtp-protocol/agentry/internal/version"
 )
 
 func TestBareInvocation_PrintsHelpAndExitsNonZero(t *testing.T) {
@@ -56,6 +58,16 @@ func TestGlobalFlagsAfterSubcommand(t *testing.T) {
 	}
 	if cap.Header.Get("X-Admin-Key") != "admin-key" {
 		t.Errorf("admin key not applied when flag placed after subcommand")
+	}
+}
+
+func TestVersionFlag_PrintsSharedVersion(t *testing.T) {
+	stdout, _, err := runCLI(t, "http://127.0.0.1:0", nil, "--version")
+	if err != nil {
+		t.Fatalf("--version should exit cleanly, got %v", err)
+	}
+	if !strings.Contains(stdout, version.Version) {
+		t.Errorf("version output = %q, want it to contain %q", stdout, version.Version)
 	}
 }
 

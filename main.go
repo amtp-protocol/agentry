@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -29,7 +30,12 @@ import (
 
 	"github.com/amtp-protocol/agentry/internal/config"
 	"github.com/amtp-protocol/agentry/internal/server"
+	"github.com/amtp-protocol/agentry/internal/version"
 )
+
+func printVersion(w io.Writer) {
+	fmt.Fprintf(w, "agentry %s\n", version.Version)
+}
 
 func runHealthCheck(addr string) error {
 	// If addr starts with :, prepend localhost
@@ -53,7 +59,13 @@ func runHealthCheck(addr string) error {
 
 func main() {
 	healthCheck := flag.Bool("health-check", false, "Run health check")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		printVersion(os.Stdout)
+		os.Exit(0)
+	}
 
 	// Load configuration
 	cfg, err := config.Load()

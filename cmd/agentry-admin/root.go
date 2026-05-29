@@ -20,6 +20,8 @@ import (
 	"errors"
 
 	"github.com/spf13/cobra"
+
+	"github.com/amtp-protocol/agentry/internal/version"
 )
 
 // errExit signals that a command already reported its failure to stderr and the
@@ -33,9 +35,10 @@ var errExit = errors.New("")
 // populated when the flags are parsed and shared with every subcommand.
 func buildRootCmd(c *Client) *cobra.Command {
 	root := &cobra.Command{
-		Use:   "agentry-admin",
-		Short: "Agentry Admin Tool",
-		Long:  "Agentry Admin Tool - manage schemas, local agents, and inboxes on an Agentry gateway.",
+		Use:     "agentry-admin",
+		Version: version.Version,
+		Short:   "Agentry Admin Tool",
+		Long:    "Agentry Admin Tool - manage schemas, local agents, and inboxes on an Agentry gateway.",
 		// Mirror the original behavior: bare invocation prints usage and exits
 		// non-zero. (`--help` is intercepted by cobra before RunE and exits 0.)
 		RunE: func(cmd *cobra.Command, args []string) error {

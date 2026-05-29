@@ -11,7 +11,8 @@ GO_VERSION=1.21
 BUILD_DIR=build
 MAIN_PATH=./main.go
 ADMIN_MAIN_PATH=./cmd/agentry-admin
-LDFLAGS=-ldflags "-X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo 'dev') -X main.buildTime=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)"
+VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo 'dev')
+LDFLAGS=-ldflags "-X github.com/amtp-protocol/agentry/internal/version.Version=$(VERSION)"
 
 # Test variables
 COVERAGE_DIR=coverage
@@ -211,6 +212,7 @@ setup: ## Setup development environment
 
 # Version info
 version: ## Show version information
+	@echo "Build version: $(VERSION)"
 	@echo "Go version: $(shell go version)"
 	@echo "Git commit: $(shell git rev-parse HEAD)"
 	@echo "Git tag: $(shell git describe --tags --always)"
