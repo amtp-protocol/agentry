@@ -154,22 +154,11 @@ func (de *DeliveryEngine) DeliverMessage(ctx context.Context, message *types.Mes
 		return result, fmt.Errorf("invalid gateway URL for %s: %w", domain, err)
 	}
 
-	// Check schema compatibility if specified
-	if message.Schema != "" {
-		supported, err := de.discovery.SupportsSchema(ctx, domain, message.Schema)
-		if err != nil {
-			result.Status = types.StatusFailed
-			result.ErrorCode = "SCHEMA_CHECK_FAILED"
-			result.ErrorMessage = fmt.Sprintf("failed to check schema support: %v", err)
-			return result, fmt.Errorf("schema check failed for %s: %w", domain, err)
-		}
-		if !supported {
-			result.Status = types.StatusFailed
-			result.ErrorCode = "SCHEMA_NOT_SUPPORTED"
-			result.ErrorMessage = fmt.Sprintf("schema %s not supported by %s", message.Schema, domain)
-			return result, fmt.Errorf("schema %s not supported by %s", message.Schema, domain)
-		}
-	}
+	// Schema support is enforced authoritatively by the receiving gateway,
+	// which validates each message against its local agents' supported schemas
+	// on receipt. There is intentionally no sender-side preflight: schemas are
+	// not advertised via DNS discovery, so the sender cannot (and need not)
+	// determine a remote domain's supported schemas before delivery.
 
 	// Check message size limits
 	if capabilities.MaxSize > 0 && message.Size() > capabilities.MaxSize {

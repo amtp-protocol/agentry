@@ -36,7 +36,6 @@ var _ MessageProcessorService = (*MessageProcessor)(nil)
 // DiscoveryService defines the interface for AMTP discovery
 type DiscoveryService interface {
 	DiscoverCapabilities(ctx context.Context, domain string) (*discovery.AMTPCapabilities, error)
-	SupportsSchema(ctx context.Context, domain, schema string) (bool, error)
 }
 
 // DeliveryService defines the interface for message delivery

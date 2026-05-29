@@ -49,7 +49,7 @@ dns:
   mock_mode: true              # Enable mock DNS
   allow_http: true             # Allow HTTP gateways (dev only)
   mock_records:
-    localhost: "v=amtp1;gateway=http://localhost:8080;schemas=agntcy:test.*"
+    localhost: "v=amtp1;gateway=http://localhost:8080"
     custom.local: "v=amtp1;gateway=http://localhost:9000;auth=apikey"
 ```
 
@@ -88,19 +88,23 @@ curl -X POST http://localhost:8080/v1/messages \
 
 When `AMTP_DNS_MOCK_MODE=true`, these DNS TXT records are simulated:
 
+Schemas are intentionally **not** advertised in DNS records — a gateway's
+supported schemas come from its agent registry and are served over HTTP
+discovery, and schema support is enforced by the receiving gateway.
+
 | Domain | Mock TXT Record |
 |--------|----------------|
-| `localhost` | `v=amtp1;gateway=http://localhost:8080;schemas=agntcy:test.*,agntcy:dev.*` |
-| `test.local` | `v=amtp1;gateway=http://localhost:8080;schemas=agntcy:test.*` |
-| `dev.local` | `v=amtp1;gateway=http://localhost:8080;schemas=agntcy:dev.*` |
-| `example.com` | `v=amtp1;gateway=http://localhost:8080;schemas=agntcy:example.*` |
+| `localhost` | `v=amtp1;gateway=http://localhost:8080` |
+| `test.local` | `v=amtp1;gateway=http://localhost:8080` |
+| `dev.local` | `v=amtp1;gateway=http://localhost:8080` |
+| `example.com` | `v=amtp1;gateway=http://localhost:8080` |
 
 ### Custom Mock Records
 
 ```bash
 export AMTP_DNS_MOCK_RECORDS='{
-  "localhost": "v=amtp1;gateway=http://localhost:8080;schemas=agntcy:test.*",
-  "mytest.com": "v=amtp1;gateway=http://localhost:9000;schemas=agntcy:custom.*",
+  "localhost": "v=amtp1;gateway=http://localhost:8080",
+  "mytest.com": "v=amtp1;gateway=http://localhost:9000",
   "secure.local": "v=amtp1;gateway=https://localhost:8443;auth=cert;max-size=5242880"
 }'
 ```
@@ -151,8 +155,8 @@ Test both HTTP and HTTPS gateways in the same environment:
 
 ```bash
 export AMTP_DNS_MOCK_RECORDS='{
-  "http.local": "v=amtp1;gateway=http://localhost:8080;schemas=agntcy:test.*",
-  "https.local": "v=amtp1;gateway=https://localhost:8443;schemas=agntcy:test.*"
+  "http.local": "v=amtp1;gateway=http://localhost:8080",
+  "https.local": "v=amtp1;gateway=https://localhost:8443"
 }'
 export AMTP_DNS_ALLOW_HTTP=true
 
@@ -165,7 +169,11 @@ curl -X POST http://localhost:8080/v1/messages \
   -d '{"sender":"test@localhost","recipients":["user@https.local"],"subject":"HTTPS Test"}'
 ```
 
-### Scenario 4: Schema Validation with Mock DNS
+### Scenario 4: Schema Validation
+
+Schema support is enforced by the receiving gateway against its registered
+agents' supported schemas (not via DNS). Delivery to a local recipient whose
+agent does not support the message schema is rejected.
 
 ```bash
 # Test schema support patterns
@@ -201,12 +209,14 @@ curl http://localhost:8080/v1/capabilities/nonexistent.com | jq .
 curl -s http://localhost:8080/v1/capabilities/localhost | jq .
 # Expected output:
 # {
-#   "version": "1.0", 
+#   "version": "1.0",
 #   "gateway": "http://localhost:8080",
-#   "schemas": ["agntcy:test.*", "agntcy:dev.*"],
 #   "discovered_at": "...",
 #   "ttl": "5m0s"
 # }
+# Note: when querying the gateway's own domain, a "schemas" field is included
+# listing the schemas supported by its registered agents (sourced from the
+# agent registry, not DNS). It is absent/empty until agents are registered.
 ```
 
 ## Debugging
