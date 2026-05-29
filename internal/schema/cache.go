@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -98,13 +99,14 @@ func (c *MemoryCache) Get(ctx context.Context, id SchemaIdentifier) (*Schema, er
 	}
 
 	if entry.IsExpired() {
-		// Remove expired entry
-		delete(c.schemas, id.String())
+		// Don't mutate the map under the read lock; the cleanup loop reaps
+		// expired entries under the write lock.
 		return nil, fmt.Errorf("schema expired in cache: %s", id.String())
 	}
 
-	// Update access count
-	entry.AccessCount++
+	// Update access count atomically since this runs under a read lock and
+	// may execute concurrently with other Get/GetStats callers.
+	atomic.AddInt64(&entry.AccessCount, 1)
 
 	// Return a copy to prevent modification
 	schemaCopy := *entry.Schema
@@ -161,11 +163,12 @@ func (c *MemoryCache) evictLRU() {
 	var lowestAccess int64 = -1
 
 	for key, entry := range c.schemas {
-		if lowestAccess == -1 || entry.AccessCount < lowestAccess ||
-			(entry.AccessCount == lowestAccess && entry.CreatedAt.Before(oldestTime)) {
+		accessCount := atomic.LoadInt64(&entry.AccessCount)
+		if lowestAccess == -1 || accessCount < lowestAccess ||
+			(accessCount == lowestAccess && entry.CreatedAt.Before(oldestTime)) {
 			oldestKey = key
 			oldestTime = entry.CreatedAt
-			lowestAccess = entry.AccessCount
+			lowestAccess = accessCount
 		}
 	}
 
@@ -217,7 +220,7 @@ func (c *MemoryCache) GetStats() CacheStats {
 	now := time.Now()
 
 	for _, entry := range c.schemas {
-		totalAccess += entry.AccessCount
+		totalAccess += atomic.LoadInt64(&entry.AccessCount)
 		if now.After(entry.ExpiresAt) {
 			expired++
 		}

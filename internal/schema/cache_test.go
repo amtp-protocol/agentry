@@ -19,6 +19,7 @@ package schema
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 )
@@ -717,4 +718,53 @@ func TestCachedRegistryClient_ClearCache(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected cache to be empty after clearing")
 	}
+}
+
+// TestMemoryCache_ConcurrentGet exercises concurrent reads (which mutate
+// AccessCount and reap expired entries) to ensure Get is data-race free.
+// Run with -race to detect unsynchronized access to shared cache state.
+func TestMemoryCache_ConcurrentGet(t *testing.T) {
+	cache := NewMemoryCache(CacheConfig{MaxSize: 100})
+	defer cache.Stop()
+
+	ctx := context.Background()
+
+	// A live entry that many goroutines will Get concurrently (mutates AccessCount).
+	liveID := SchemaIdentifier{
+		Domain:  "commerce",
+		Entity:  "order",
+		Version: "v1",
+		Raw:     "agntcy:commerce.order.v1",
+	}
+	if err := cache.Set(ctx, &Schema{ID: liveID, Definition: json.RawMessage(`{"type":"object"}`), PublishedAt: time.Now()}, time.Hour); err != nil {
+		t.Fatalf("unexpected error seeding live schema: %v", err)
+	}
+
+	// An already-expired entry that concurrent Gets will try to reap.
+	expiredID := SchemaIdentifier{
+		Domain:  "commerce",
+		Entity:  "invoice",
+		Version: "v1",
+		Raw:     "agntcy:commerce.invoice.v1",
+	}
+	if err := cache.Set(ctx, &Schema{ID: expiredID, Definition: json.RawMessage(`{"type":"object"}`), PublishedAt: time.Now()}, time.Nanosecond); err != nil {
+		t.Fatalf("unexpected error seeding expired schema: %v", err)
+	}
+	time.Sleep(time.Millisecond) // ensure the expired entry is past its TTL
+
+	const goroutines = 50
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				_, _ = cache.Get(ctx, liveID)
+				_, _ = cache.Get(ctx, expiredID)
+				_ = cache.GetStats()
+			}
+		}()
+	}
+	wg.Wait()
 }
