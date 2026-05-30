@@ -117,6 +117,9 @@ type Cache interface {
 	Clear(ctx context.Context) error
 }
 
+// schemaRegex matches the AGNTCY schema format: agntcy:domain.entity.version
+var schemaRegex = regexp.MustCompile(`^agntcy:([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)\.(v[0-9]+)$`)
+
 // ParseSchemaIdentifier parses an AGNTCY schema identifier string
 func ParseSchemaIdentifier(schemaStr string) (*SchemaIdentifier, error) {
 	if schemaStr == "" {
@@ -124,7 +127,6 @@ func ParseSchemaIdentifier(schemaStr string) (*SchemaIdentifier, error) {
 	}
 
 	// AGNTCY schema format: agntcy:domain.entity.version
-	schemaRegex := regexp.MustCompile(`^agntcy:([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)\.(v[0-9]+)$`)
 	matches := schemaRegex.FindStringSubmatch(schemaStr)
 
 	if len(matches) != 4 {

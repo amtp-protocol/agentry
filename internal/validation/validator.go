@@ -435,25 +435,29 @@ func (v *Validator) isValidEmail(email string) bool {
 	return err == nil
 }
 
+// Validation patterns compiled once at package load.
+var (
+	urlRegex       = regexp.MustCompile(`^https?://[^\s/$.?#].[^\s]*$`)
+	hashRegex      = regexp.MustCompile(`^(sha256|sha512|md5):[a-fA-F0-9]+$`)
+	schemaFmtRegex = regexp.MustCompile(`^agntcy:[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.v[0-9]+$`)
+)
+
 // isValidURL validates URL format (basic validation)
 func (v *Validator) isValidURL(url string) bool {
 	// Basic URL validation - starts with http:// or https://
-	urlRegex := regexp.MustCompile(`^https?://[^\s/$.?#].[^\s]*$`)
 	return urlRegex.MatchString(url)
 }
 
 // isValidHashFormat validates hash format (algorithm:value)
 func (v *Validator) isValidHashFormat(hash string) bool {
 	// Should be in format "algorithm:hexvalue"
-	hashRegex := regexp.MustCompile(`^(sha256|sha512|md5):[a-fA-F0-9]+$`)
 	return hashRegex.MatchString(hash)
 }
 
 // validateSchemaFormat validates AGNTCY schema identifier format
 func (v *Validator) validateSchemaFormat(schema string) error {
 	// AGNTCY schema format: agntcy:domain.entity.version
-	schemaRegex := regexp.MustCompile(`^agntcy:[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.v[0-9]+$`)
-	if !schemaRegex.MatchString(schema) {
+	if !schemaFmtRegex.MatchString(schema) {
 		return fmt.Errorf("schema must be in format 'agntcy:domain.entity.version': %s", schema)
 	}
 

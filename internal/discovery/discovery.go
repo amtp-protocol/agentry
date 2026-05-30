@@ -489,6 +489,12 @@ func ExtractDomain(email string) string {
 	return parts[1]
 }
 
+// gatewayURLRegex matches an HTTP or HTTPS gateway URL.
+var gatewayURLRegex = regexp.MustCompile(`^https?://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/.*)?$`)
+
+// gatewayHTTPSURLRegex matches an HTTPS-only gateway URL.
+var gatewayHTTPSURLRegex = regexp.MustCompile(`^https://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/.*)?$`)
+
 // ValidateGatewayURL validates that a gateway URL is properly formatted
 func ValidateGatewayURL(url string, allowHTTP bool) error {
 	if allowHTTP {
@@ -498,8 +504,7 @@ func ValidateGatewayURL(url string, allowHTTP bool) error {
 		}
 
 		// Validate HTTP or HTTPS URL format
-		urlRegex := regexp.MustCompile(`^https?://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/.*)?$`)
-		if !urlRegex.MatchString(url) {
+		if !gatewayURLRegex.MatchString(url) {
 			return fmt.Errorf("invalid gateway URL format")
 		}
 	} else {
@@ -509,8 +514,7 @@ func ValidateGatewayURL(url string, allowHTTP bool) error {
 		}
 
 		// Basic HTTPS URL validation
-		urlRegex := regexp.MustCompile(`^https://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/.*)?$`)
-		if !urlRegex.MatchString(url) {
+		if !gatewayHTTPSURLRegex.MatchString(url) {
 			return fmt.Errorf("invalid gateway URL format")
 		}
 	}

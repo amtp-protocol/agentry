@@ -350,6 +350,10 @@ func (r *Registry) validateSupportedSchemas(ctx context.Context, schemas []strin
 	return nil
 }
 
+// schemaExactRegex matches an exact (non-wildcard) AGNTCY schema identifier:
+// agntcy:domain.entity.version
+var schemaExactRegex = regexp.MustCompile(`^agntcy:[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.v[0-9]+$`)
+
 // validateSchemaFormat validates the basic format of a schema identifier
 func (r *Registry) validateSchemaFormat(schemaStr string) error {
 	// Must start with agntcy:
@@ -376,8 +380,7 @@ func (r *Registry) validateSchemaFormat(schemaStr string) error {
 	// For exact schemas (not wildcards), validate full format
 	if !strings.HasSuffix(schemaStr, "*") {
 		// Should match: agntcy:domain.entity.version
-		schemaRegex := regexp.MustCompile(`^agntcy:[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.v[0-9]+$`)
-		if !schemaRegex.MatchString(schemaStr) {
+		if !schemaExactRegex.MatchString(schemaStr) {
 			return fmt.Errorf("schema must match format agntcy:domain.entity.version")
 		}
 	}
