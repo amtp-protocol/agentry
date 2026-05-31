@@ -10,10 +10,19 @@ import (
 
 // Dispatch implements the workflow.Dispatcher interface
 func (mp *MessageProcessor) Dispatch(ctx context.Context, msg *types.Message) error {
+	recipients := make([]types.RecipientStatus, len(msg.Recipients))
+	for i, addr := range msg.Recipients {
+		recipients[i] = types.RecipientStatus{
+			Address:   addr,
+			Status:    types.StatusQueued,
+			Timestamp: time.Now().UTC(),
+		}
+	}
+
 	_, err := mp.processImmediatePath(ctx, msg, &ProcessingResult{
 		MessageID:  msg.MessageID,
 		Status:     types.StatusQueued,
-		Recipients: make([]types.RecipientStatus, len(msg.Recipients)),
+		Recipients: recipients,
 	}, ProcessingOptions{ImmediatePath: true})
 	return err
 }

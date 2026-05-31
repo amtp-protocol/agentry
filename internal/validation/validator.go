@@ -217,6 +217,10 @@ func (v *Validator) agentSupportsSchema(agent *LocalAgent, messageSchema string)
 
 // ValidateSendRequest validates a send message request
 func (v *Validator) ValidateSendRequest(req *types.SendMessageRequest) error {
+	if req.MessageID != "" && !uuid.IsValidV7(req.MessageID) {
+		return fmt.Errorf("invalid message_id format, must be UUIDv7: %s", req.MessageID)
+	}
+
 	if req.Sender == "" {
 		return fmt.Errorf("sender is required")
 	}

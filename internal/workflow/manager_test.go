@@ -43,7 +43,13 @@ func (m *mockStorage) GetWorkflow(ctx context.Context, id string) (*types.Workfl
 	if !ok {
 		return nil, errors.New("not found")
 	}
-	return w, nil
+
+	// Create a copy to prevent in-place mutation side-effects
+	wCopy := *w
+	wCopy.Participants = make([]types.WorkflowParticipant, len(w.Participants))
+	copy(wCopy.Participants, w.Participants)
+
+	return &wCopy, nil
 }
 
 func (m *mockStorage) UpdateWorkflowStatus(ctx context.Context, id string, status types.WorkflowStatus) error {
@@ -100,7 +106,7 @@ func (m *mockStorage) SaveMessage(ctx context.Context, msg *types.Message) error
 func TestManager_Initialize(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	ctx := context.Background()
 
@@ -142,7 +148,7 @@ func TestManager_Initialize(t *testing.T) {
 func TestManager_Initialize_Sequential(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	msg := &types.Message{
 		MessageID:  "msg-seq",
@@ -171,7 +177,7 @@ func TestManager_Initialize_Sequential(t *testing.T) {
 func TestManager_Initialize_Conditional(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	msg := &types.Message{
 		MessageID:  "msg-cond",
@@ -200,7 +206,7 @@ func TestManager_Initialize_Conditional(t *testing.T) {
 func TestManager_ProcessResponse_Parallel(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	msg := &types.Message{
 		MessageID: "msg-p",
@@ -246,7 +252,7 @@ func TestManager_ProcessResponse_Parallel(t *testing.T) {
 func TestManager_ProcessResponse_Sequential(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	msg := &types.Message{
 		MessageID: "msg-s",
@@ -289,7 +295,7 @@ func TestManager_ProcessResponse_Sequential(t *testing.T) {
 func TestManager_ProcessResponse_Conditional(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	msg := &types.Message{
 		MessageID:  "msg-c",
@@ -343,7 +349,7 @@ func TestManager_ProcessResponse_Conditional(t *testing.T) {
 func TestManager_TimeoutSweeper(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	msg := &types.Message{
 		MessageID: "msg-t",
@@ -357,8 +363,7 @@ func TestManager_TimeoutSweeper(t *testing.T) {
 	mgr.Initialize(context.Background(), msg)
 
 	// artificially backdate the workflow
-	w, _ := st.GetWorkflow(context.Background(), "msg-t")
-	w.CreatedAt = time.Now().Add(-2 * time.Second)
+	st.workflows["msg-t"].CreatedAt = time.Now().Add(-2 * time.Second)
 
 	// Start sweeper in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -367,7 +372,7 @@ func TestManager_TimeoutSweeper(t *testing.T) {
 	// manually invoke to avoid timing issues in tests
 	mgr.(*managerImpl).sweepTimeouts(ctx)
 
-	w, _ = st.GetWorkflow(context.Background(), "msg-t")
+	w, _ := st.GetWorkflow(context.Background(), "msg-t")
 	if w.Status != types.WorkflowStatusTimeout {
 		t.Errorf("Expected status to be timeout, got %v", w.Status)
 	}
@@ -378,7 +383,7 @@ func TestManager_TimeoutSweeper(t *testing.T) {
 func TestManager_ProcessResponse_WorkflowNotFound(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	err := mgr.ProcessResponse(context.Background(), "unknown", &types.Message{})
 	if err == nil {
@@ -389,7 +394,7 @@ func TestManager_ProcessResponse_WorkflowNotFound(t *testing.T) {
 func TestManager_ProcessResponse_StopOnFailure(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp)
+	mgr := NewManager(st, dp, nil)
 
 	msg := &types.Message{
 		MessageID: "msg-fail",

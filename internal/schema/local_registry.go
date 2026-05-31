@@ -604,5 +604,3 @@ func (lr *LocalRegistry) checkSchemaCompatibility(current, new *Schema) bool {
 	// In a real implementation, you would perform semantic compatibility checking
 	return true
 }
-
-

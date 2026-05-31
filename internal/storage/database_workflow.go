@@ -81,7 +81,7 @@ func (db *DatabaseStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.
 	err := db.db.WithContext(ctx).
 		Preload("Participants").
 		Where("status IN (?)", []types.WorkflowStatus{types.WorkflowStatusPending, types.WorkflowStatusInProgress}).
-		Where("created_at + timeout_seconds * interval '1 second' < NOW()").
+		Where("EXTRACT(EPOCH FROM (NOW() - created_at)) > timeout_seconds").
 		Find(&states).Error
 
 	if err != nil {

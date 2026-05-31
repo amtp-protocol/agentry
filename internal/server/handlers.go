@@ -185,7 +185,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	if len(parts) == 2 {
 		senderDomain = parts[1]
 	}
-	isSenderLocal := senderDomain == s.config.Server.Domain
+	isSenderLocal := strings.EqualFold(senderDomain, s.config.Server.Domain)
 
 	// Process message using the message processor
 	processingOptions := processing.ProcessingOptions{
@@ -607,7 +607,11 @@ func (s *Server) handleDeleteSchema(c *gin.Context) {
 		return
 	}
 
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Schema deleted successfully",
+		"schema_id": schemaIDStr,
+		"timestamp": time.Now().UTC(),
+	})
 }
 
 // handleValidateSchema handles POST /v1/admin/schemas/:id/validate

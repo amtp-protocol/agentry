@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/amtp-protocol/agentry/internal/logging"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
@@ -15,13 +16,16 @@ import (
 type managerImpl struct {
 	storage    storage.Storage
 	dispatcher Dispatcher
+	logger     *logging.Logger
 	doneChan   chan struct{}
+	stopOnce   sync.Once
 }
 
-func NewManager(s storage.Storage, d Dispatcher) Manager {
+func NewManager(s storage.Storage, d Dispatcher, logger *logging.Logger) Manager {
 	return &managerImpl{
 		storage:    s,
 		dispatcher: d,
+		logger:     logger,
 		doneChan:   make(chan struct{}),
 	}
 }
@@ -86,7 +90,10 @@ func (m *managerImpl) Initialize(ctx context.Context, msg *types.Message) (*type
 	// Begin execution based on type
 	err = m.startExecution(ctx, workflow, msg)
 	if err != nil {
-		m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, types.WorkflowStatusFailed)
+		updateErr := m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, types.WorkflowStatusFailed)
+		if updateErr != nil && m.logger != nil {
+			m.logger.Error("Failed to gracefully update workflow status tracking failure", updateErr)
+		}
 		return workflow, err
 	}
 
@@ -113,11 +120,11 @@ func (m *managerImpl) startExecution(ctx context.Context, workflow *types.Workfl
 
 // executeParallel sends message to all participants at once
 func (m *managerImpl) executeParallel(ctx context.Context, _ *types.Workflow, msg *types.Message) error {
-	msgCopy := *msg
+	msgCopy := msg.Clone()
 	msgCopy.Recipients = append(msg.Coordination.RequiredResponses, msg.Coordination.OptionalResponses...)
 
 	// We pass down to the dispatcher. The dispatcher should route the message properly.
-	return m.dispatcher.Dispatch(ctx, &msgCopy)
+	return m.dispatcher.Dispatch(ctx, msgCopy)
 }
 
 // executeSequentialNext dispatches to the N-th participant in the sequence
@@ -127,10 +134,10 @@ func (m *managerImpl) executeSequentialNext(ctx context.Context, workflow *types
 	}
 
 	nextAgent := msg.Coordination.Sequence[index]
-	msgCopy := *msg
+	msgCopy := msg.Clone()
 	msgCopy.Recipients = []string{nextAgent}
 
-	return m.dispatcher.Dispatch(ctx, &msgCopy)
+	return m.dispatcher.Dispatch(ctx, msgCopy)
 }
 
 func (m *managerImpl) executeConditional(ctx context.Context, _ *types.Workflow, msg *types.Message) error {
@@ -144,7 +151,7 @@ func (m *managerImpl) ProcessResponse(ctx context.Context, workflowID string, re
 	}
 
 	if workflow.Status == types.WorkflowStatusCompleted || workflow.Status == types.WorkflowStatusFailed || workflow.Status == types.WorkflowStatusTimeout {
-		log.Printf("Workflow %s already finished, ignoring response", workflowID)
+		m.logger.Infof("Workflow %s already finished, ignoring response", workflowID)
 		return nil
 	}
 
@@ -164,9 +171,24 @@ func (m *managerImpl) ProcessResponse(ctx context.Context, workflowID string, re
 	return m.evaluateWorkflow(ctx, workflow, replyMsg)
 }
 
-func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflow *types.Workflow, replyMsg *types.Message) error {
+func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.Workflow, replyMsg *types.Message) error {
+	// If this is a response, ensure the sender was previously pending.
+	// If they were already in a final state, this is a duplicate response and we shouldn't re-dispatch.
+	if replyMsg != nil {
+		wasPending := false
+		for _, p := range oldWorkflow.Participants {
+			if p.Address == replyMsg.Sender && p.Status == types.ParticipantStatusPending {
+				wasPending = true
+				break
+			}
+		}
+		if !wasPending {
+			return nil
+		}
+	}
+
 	// Re-fetch to get up-to-date participants
-	workflow, err := m.storage.GetWorkflow(ctx, workflow.WorkflowID)
+	workflow, err := m.storage.GetWorkflow(ctx, oldWorkflow.WorkflowID)
 	if err != nil {
 		return err
 	}
@@ -185,7 +207,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflow *types.Work
 	origMsg, err := m.storage.GetMessage(ctx, workflow.WorkflowID)
 	if err != nil {
 		// Log but do not fail hard, it might be purged
-		log.Printf("Warning: failed to get original message for workflow %s: %v", workflow.WorkflowID, err)
+		m.logger.Infof("Warning: failed to get original message for workflow %s: %v", workflow.WorkflowID, err)
 	}
 
 	// Basic failure handling
@@ -262,7 +284,11 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflow *types.Work
 
 			if isInitial && len(replyMsg.Payload) > 0 {
 				var payload map[string]interface{}
-				_ = json.Unmarshal(replyMsg.Payload, &payload)
+				if err := json.Unmarshal(replyMsg.Payload, &payload); err != nil {
+					if m.logger != nil {
+						m.logger.Error("Failed to unmarshal payload for conditional evaluation", err)
+					}
+				}
 
 				for _, condition := range origMsg.Coordination.Conditions {
 					matched := false
@@ -293,14 +319,18 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflow *types.Work
 
 					// Mark skipped branch as completed
 					for _, s := range skipped {
-						_ = m.storage.UpdateWorkflowParticipant(ctx, workflow.WorkflowID, s, types.ParticipantStatusCompleted, []byte(`{"status":"skipped"}`))
+						if err := m.storage.UpdateWorkflowParticipant(ctx, workflow.WorkflowID, s, types.ParticipantStatusCompleted, []byte(`{"status":"skipped"}`)); err != nil && m.logger != nil {
+							m.logger.Errorf(err, "Failed to update status for skipped participant %s", s)
+						}
 					}
 
 					// Dispatch to target branch
 					if len(targets) > 0 {
-						msgCopy := *origMsg
+						msgCopy := origMsg.Clone()
 						msgCopy.Recipients = targets
-						_ = m.dispatcher.Dispatch(ctx, &msgCopy)
+						if err := m.dispatcher.Dispatch(ctx, msgCopy); err != nil && m.logger != nil {
+							m.logger.Error("Failed to dispatch conditional branch messages", err)
+						}
 					}
 				}
 			}
@@ -354,23 +384,33 @@ func (m *managerImpl) Start(ctx context.Context) {
 }
 
 func (m *managerImpl) Stop() error {
-	close(m.doneChan)
+	m.stopOnce.Do(func() {
+		close(m.doneChan)
+	})
 	return nil
 }
 
 func (m *managerImpl) sweepTimeouts(ctx context.Context) {
 	timeouts, err := m.storage.ListTimedOutWorkflows(ctx)
 	if err != nil {
-		log.Printf("Error checking timed out workflows: %v", err)
+		if m.logger != nil {
+			m.logger.Error("Error checking timed out workflows", err)
+		}
 		return
 	}
 
 	for _, w := range timeouts {
-		log.Printf("Workflow %s timed out", w.WorkflowID)
-		m.storage.UpdateWorkflowStatus(ctx, w.WorkflowID, types.WorkflowStatusTimeout)
+		if m.logger != nil {
+			m.logger.WithField("workflow_id", w.WorkflowID).Info("Workflow timed out")
+		}
+		if updateErr := m.storage.UpdateWorkflowStatus(ctx, w.WorkflowID, types.WorkflowStatusTimeout); updateErr != nil && m.logger != nil {
+			m.logger.Error("Failed to update timed out workflow status", updateErr)
+		}
 		for _, p := range w.Participants {
 			if p.Status == types.ParticipantStatusPending {
-				m.storage.UpdateWorkflowParticipant(ctx, w.WorkflowID, p.Address, types.ParticipantStatusTimeout, nil)
+				if updateErr := m.storage.UpdateWorkflowParticipant(ctx, w.WorkflowID, p.Address, types.ParticipantStatusTimeout, nil); updateErr != nil && m.logger != nil {
+					m.logger.Errorf(updateErr, "Failed to update participant %s to timeout status", p.Address)
+				}
 			}
 		}
 	}

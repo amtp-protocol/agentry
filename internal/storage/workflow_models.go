@@ -27,8 +27,8 @@ func (Workflow) TableName() string {
 // WorkflowParticipant represents the database model for workflow participants
 type WorkflowParticipant struct {
 	ID              uint                    `gorm:"primarykey"`
-	WorkflowID      string                  `gorm:"type:uuid;not null;index:idx_workflow_participants_workflow_address,unique"`
-	Address         string                  `gorm:"size:255;not null;index:idx_workflow_participants_workflow_address,unique"`
+	WorkflowID      string                  `gorm:"type:uuid;not null;uniqueIndex:idx_workflow_participants_workflow_address"`
+	Address         string                  `gorm:"size:255;not null;uniqueIndex:idx_workflow_participants_workflow_address"`
 	Status          types.ParticipantStatus `gorm:"size:50;not null;default:'pending'" json:"status"`
 	ResponsePayload datatypes.JSON          `gorm:"type:jsonb" json:"response_payload,omitempty"`
 	Deadline        *time.Time              `gorm:"type:timestamptz" json:"deadline,omitempty"`

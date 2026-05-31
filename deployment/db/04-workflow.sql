@@ -32,10 +32,9 @@ CREATE TABLE IF NOT EXISTS workflow_participants (
     response_payload JSONB,
     deadline TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    UNIQUE(workflow_id, address)
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
-CREATE INDEX IF NOT EXISTS idx_workflow_participants_workflow_address ON workflow_participants(workflow_id, address);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_participants_workflow_address ON workflow_participants(workflow_id, address);

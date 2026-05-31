@@ -171,8 +171,10 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
 
-		if w.Code != http.StatusNoContent {
-			t.Errorf("Expected status %d, got %d", http.StatusNoContent, w.Code)
+		if w.Code != http.StatusOK {
+			t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
 		}
+
+		// Optionally verify the JSON response body here if needed by existing test expectations
 	})
 }

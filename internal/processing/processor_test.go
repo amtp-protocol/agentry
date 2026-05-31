@@ -109,8 +109,7 @@ func TestProcessMessage_ParallelCoordination(t *testing.T) {
 	message := createTestMessage()
 	message.Recipients = []string{"recipient1@test.com", "recipient2@test.com"}
 	message.Coordination = &types.CoordinationConfig{
-		Type: "parallel",
-
+		Type:    "parallel",
 		Timeout: 30,
 	}
 
