@@ -352,6 +352,9 @@ func (c *Config) validate() error {
 }
 
 // validateDomain validates the server domain configuration
+// domainRegex validates DNS domain name format.
+var domainRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
+
 func (c *Config) validateDomain() error {
 	domain := strings.TrimSpace(c.Server.Domain)
 	if domain == "" {
@@ -388,7 +391,6 @@ func (c *Config) validateDomain() error {
 	}
 
 	// Validate domain format using regex (after specific checks)
-	domainRegex := regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
 	if !domainRegex.MatchString(domain) {
 		return fmt.Errorf("invalid domain format: %s", domain)
 	}
