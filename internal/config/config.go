@@ -351,10 +351,10 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateDomain validates the server domain configuration
 // domainRegex validates DNS domain name format.
 var domainRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
 
+// validateDomain validates the server domain configuration
 func (c *Config) validateDomain() error {
 	domain := strings.TrimSpace(c.Server.Domain)
 	if domain == "" {
