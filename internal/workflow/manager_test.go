@@ -23,13 +23,11 @@ func (m *mockDispatcher) Dispatch(ctx context.Context, msg *types.Message) error
 type mockStorage struct {
 	storage.Storage
 	workflows map[string]*types.Workflow
-	messages  map[string]*types.Message
 }
 
 func newMockStorage() *mockStorage {
 	return &mockStorage{
 		workflows: make(map[string]*types.Workflow),
-		messages:  make(map[string]*types.Message),
 	}
 }
 
@@ -46,8 +44,20 @@ func (m *mockStorage) GetWorkflow(ctx context.Context, id string) (*types.Workfl
 
 	// Create a copy to prevent in-place mutation side-effects
 	wCopy := *w
+	if w.CoordinationConfig != nil {
+		coordCopy := *w.CoordinationConfig
+		wCopy.CoordinationConfig = &coordCopy
+	}
 	wCopy.Participants = make([]types.WorkflowParticipant, len(w.Participants))
 	copy(wCopy.Participants, w.Participants)
+	if w.OriginalRecipients != nil {
+		wCopy.OriginalRecipients = make([]string, len(w.OriginalRecipients))
+		copy(wCopy.OriginalRecipients, w.OriginalRecipients)
+	}
+	if w.Payload != nil {
+		wCopy.Payload = make(json.RawMessage, len(w.Payload))
+		copy(wCopy.Payload, w.Payload)
+	}
 
 	return &wCopy, nil
 }
@@ -58,6 +68,7 @@ func (m *mockStorage) UpdateWorkflowStatus(ctx context.Context, id string, statu
 		return errors.New("not found")
 	}
 	w.Status = status
+	w.Version++
 	return nil
 }
 
@@ -70,6 +81,7 @@ func (m *mockStorage) UpdateWorkflowParticipant(ctx context.Context, id string, 
 		if p.Address == address {
 			w.Participants[i].Status = status
 			w.Participants[i].ResponsePayload = responsePayload
+			w.Version++
 			return nil
 		}
 	}
@@ -98,19 +110,6 @@ func (m *mockStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID
 	return m.UpdateWorkflowStatus(ctx, workflowID, status)
 }
 
-func (m *mockStorage) GetMessage(ctx context.Context, id string) (*types.Message, error) {
-	msg, ok := m.messages[id]
-	if !ok {
-		return nil, errors.New("not found")
-	}
-	return msg, nil
-}
-
-func (m *mockStorage) SaveMessage(ctx context.Context, msg *types.Message) error {
-	m.messages[msg.MessageID] = msg
-	return nil
-}
-
 func TestManager_Initialize(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
@@ -131,11 +130,11 @@ func TestManager_Initialize(t *testing.T) {
 		t.Fatalf("Failed to initialize: %v", err)
 	}
 
-	if workflow.WorkflowID != "msg-1" {
-		t.Errorf("Expected workflow ID to be msg-1")
+	if workflow.WorkflowID == "" || workflow.WorkflowID == "msg-1" {
+		t.Errorf("Expected a generated workflow ID, not the message ID")
 	}
 
-	w, err := st.GetWorkflow(ctx, "msg-1")
+	w, err := st.GetWorkflow(ctx, workflow.WorkflowID)
 	if err != nil {
 		t.Fatalf("Workflow not saved")
 	}
@@ -150,6 +149,14 @@ func TestManager_Initialize(t *testing.T) {
 
 	if len(dp.dispatched) != 1 {
 		t.Fatalf("Expected 1 dispatch call for parallel")
+	}
+
+	// Verify template fields are persisted
+	if w.CoordinationConfig == nil {
+		t.Errorf("CoordinationConfig should be persisted")
+	}
+	if w.Sender != msg.Sender {
+		t.Errorf("Sender should be persisted")
 	}
 }
 
@@ -224,34 +231,34 @@ func TestManager_ProcessResponse_Parallel(t *testing.T) {
 		},
 	}
 
-	st.SaveMessage(context.Background(), msg)
-	mgr.Initialize(context.Background(), msg)
+	wf, _ := mgr.Initialize(context.Background(), msg)
+	wfID := wf.WorkflowID
 	dp.dispatched = nil // reset
 
 	reply1 := &types.Message{
 		Sender:    "a1",
-		InReplyTo: "msg-p",
+		InReplyTo: wfID,
 		Payload:   json.RawMessage(`{}`),
 	}
 
-	err := mgr.ProcessResponse(context.Background(), "msg-p", reply1)
+	err := mgr.ProcessResponse(context.Background(), wfID, reply1)
 	if err != nil {
 		t.Fatalf("ProcessResponse failed: %v", err)
 	}
 
-	w, _ := st.GetWorkflow(context.Background(), "msg-p")
+	w, _ := st.GetWorkflow(context.Background(), wfID)
 	if w.Status == types.WorkflowStatusCompleted {
 		t.Errorf("Workflow should not be completed yet")
 	}
 
 	reply2 := &types.Message{
 		Sender:    "a2",
-		InReplyTo: "msg-p",
+		InReplyTo: wfID,
 		Payload:   json.RawMessage(`{}`),
 	}
-	mgr.ProcessResponse(context.Background(), "msg-p", reply2)
+	mgr.ProcessResponse(context.Background(), wfID, reply2)
 
-	w, _ = st.GetWorkflow(context.Background(), "msg-p")
+	w, _ = st.GetWorkflow(context.Background(), wfID)
 	if w.Status != types.WorkflowStatusCompleted {
 		t.Errorf("Workflow should be completed now")
 	}
@@ -264,22 +271,23 @@ func TestManager_ProcessResponse_Sequential(t *testing.T) {
 
 	msg := &types.Message{
 		MessageID: "msg-s",
+		Sender:    "test@localhost",
 		Coordination: &types.CoordinationConfig{
 			Type:     "sequential",
 			Sequence: []string{"a1", "a2"},
 		},
 	}
 
-	st.SaveMessage(context.Background(), msg)
-	mgr.Initialize(context.Background(), msg)
+	wf, _ := mgr.Initialize(context.Background(), msg)
+	wfID := wf.WorkflowID
 	dp.dispatched = nil
 
 	reply1 := &types.Message{
 		Sender:    "a1",
-		InReplyTo: "msg-s",
+		InReplyTo: wfID,
 	}
 
-	err := mgr.ProcessResponse(context.Background(), "msg-s", reply1)
+	err := mgr.ProcessResponse(context.Background(), wfID, reply1)
 	if err != nil {
 		t.Fatalf("ProcessResponse failed: %v", err)
 	}
@@ -290,11 +298,11 @@ func TestManager_ProcessResponse_Sequential(t *testing.T) {
 
 	reply2 := &types.Message{
 		Sender:    "a2",
-		InReplyTo: "msg-s",
+		InReplyTo: wfID,
 	}
-	mgr.ProcessResponse(context.Background(), "msg-s", reply2)
+	mgr.ProcessResponse(context.Background(), wfID, reply2)
 
-	w, _ := st.GetWorkflow(context.Background(), "msg-s")
+	w, _ := st.GetWorkflow(context.Background(), wfID)
 	if w.Status != types.WorkflowStatusCompleted {
 		t.Errorf("Should be completed")
 	}
@@ -320,17 +328,17 @@ func TestManager_ProcessResponse_Conditional(t *testing.T) {
 		},
 	}
 
-	st.SaveMessage(context.Background(), msg)
-	mgr.Initialize(context.Background(), msg)
+	wf, _ := mgr.Initialize(context.Background(), msg)
+	wfID := wf.WorkflowID
 	dp.dispatched = nil
 
 	reply1 := &types.Message{
 		Sender:    "eval",
-		InReplyTo: "msg-c",
+		InReplyTo: wfID,
 		Payload:   json.RawMessage(`{"status":"ok"}`),
 	}
 
-	err := mgr.ProcessResponse(context.Background(), "msg-c", reply1)
+	err := mgr.ProcessResponse(context.Background(), wfID, reply1)
 	if err != nil {
 		t.Fatalf("ProcessResponse failed: %v", err)
 	}
@@ -344,11 +352,11 @@ func TestManager_ProcessResponse_Conditional(t *testing.T) {
 
 	reply2 := &types.Message{
 		Sender:    "a1",
-		InReplyTo: "msg-c",
+		InReplyTo: wfID,
 	}
-	mgr.ProcessResponse(context.Background(), "msg-c", reply2)
+	mgr.ProcessResponse(context.Background(), wfID, reply2)
 
-	w, _ := st.GetWorkflow(context.Background(), "msg-c")
+	w, _ := st.GetWorkflow(context.Background(), wfID)
 	if w.Status != types.WorkflowStatusCompleted {
 		t.Errorf("Should be completed")
 	}
@@ -368,10 +376,14 @@ func TestManager_TimeoutSweeper(t *testing.T) {
 		},
 	}
 
-	mgr.Initialize(context.Background(), msg)
+	wf, err := mgr.Initialize(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Initialize failed: %v", err)
+	}
+	wfID := wf.WorkflowID
 
 	// artificially backdate the workflow
-	st.workflows["msg-t"].CreatedAt = time.Now().Add(-2 * time.Second)
+	st.workflows[wfID].CreatedAt = time.Now().Add(-2 * time.Second)
 
 	// Start sweeper in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -380,7 +392,7 @@ func TestManager_TimeoutSweeper(t *testing.T) {
 	// manually invoke to avoid timing issues in tests
 	mgr.(*managerImpl).sweepTimeouts(ctx)
 
-	w, _ := st.GetWorkflow(context.Background(), "msg-t")
+	w, _ := st.GetWorkflow(context.Background(), wfID)
 	if w.Status != types.WorkflowStatusTimeout {
 		t.Errorf("Expected status to be timeout, got %v", w.Status)
 	}
@@ -413,18 +425,18 @@ func TestManager_ProcessResponse_StopOnFailure(t *testing.T) {
 		},
 	}
 
-	st.SaveMessage(context.Background(), msg)
-	mgr.Initialize(context.Background(), msg)
+	wf, _ := mgr.Initialize(context.Background(), msg)
+	wfID := wf.WorkflowID
 
 	reply1 := &types.Message{
 		Sender:       "a1",
-		InReplyTo:    "msg-fail",
+		InReplyTo:    wfID,
 		ResponseType: "error", // Triggers failure
 	}
 
-	mgr.ProcessResponse(context.Background(), "msg-fail", reply1)
+	mgr.ProcessResponse(context.Background(), wfID, reply1)
 
-	w, _ := st.GetWorkflow(context.Background(), "msg-fail")
+	w, _ := st.GetWorkflow(context.Background(), wfID)
 	if w.Status != types.WorkflowStatusFailed {
 		t.Errorf("Expected failure state due to StopOnFailure")
 	}

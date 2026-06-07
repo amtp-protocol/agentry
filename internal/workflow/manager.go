@@ -12,6 +12,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/logging"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
+	"github.com/amtp-protocol/agentry/pkg/uuid"
 )
 
 type managerImpl struct {
@@ -38,14 +39,26 @@ func (m *managerImpl) Initialize(ctx context.Context, msg *types.Message) (*type
 	if msg.Coordination == nil {
 		return nil, fmt.Errorf("message does not contain coordination config")
 	}
+	workflowID, err := uuid.GenerateV7()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate workflow ID: %w", err)
+	}
 
+	now := time.Now()
 	workflow := &types.Workflow{
-		WorkflowID:       msg.MessageID,
+		WorkflowID:       workflowID,
 		Status:           types.WorkflowStatusPending,
 		CoordinationType: msg.Coordination.Type,
 		TimeoutSeconds:   msg.Coordination.Timeout,
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		// Persist coordination + template so evaluateWorkflow never needs GetMessage
+		CoordinationConfig: msg.Coordination,
+		OriginalRecipients: msg.Recipients,
+		Sender:             msg.Sender,
+		Subject:            msg.Subject,
+		Schema:             msg.Schema,
+		Payload:            msg.Payload,
 	}
 
 	if workflow.TimeoutSeconds <= 0 {
@@ -89,7 +102,7 @@ func (m *managerImpl) Initialize(ctx context.Context, msg *types.Message) (*type
 		}
 	}
 
-	err := m.storage.StoreWorkflow(ctx, workflow)
+	err = m.storage.StoreWorkflow(ctx, workflow)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store workflow state: %w", err)
 	}
@@ -118,7 +131,7 @@ func (m *managerImpl) startExecution(ctx context.Context, workflow *types.Workfl
 	case "parallel":
 		return m.executeParallel(ctx, workflow, msg)
 	case "sequential":
-		return m.executeSequentialNext(ctx, workflow, msg, 0)
+		return m.executeSequentialNext(ctx, workflow, workflow.CoordinationConfig, 0)
 	case "conditional":
 		return m.executeConditional(ctx, workflow, msg)
 	}
@@ -135,13 +148,13 @@ func (m *managerImpl) executeParallel(ctx context.Context, _ *types.Workflow, ms
 }
 
 // executeSequentialNext dispatches to the N-th participant in the sequence
-func (m *managerImpl) executeSequentialNext(ctx context.Context, workflow *types.Workflow, msg *types.Message, index int) error {
-	if index >= len(msg.Coordination.Sequence) {
+func (m *managerImpl) executeSequentialNext(ctx context.Context, workflow *types.Workflow, coord *types.CoordinationConfig, index int) error {
+	if index >= len(coord.Sequence) {
 		return m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted)
 	}
 
-	nextAgent := msg.Coordination.Sequence[index]
-	msgCopy := msg.Clone()
+	nextAgent := coord.Sequence[index]
+	msgCopy := m.buildTemplateMessage(workflow)
 	msgCopy.Recipients = []string{nextAgent}
 
 	return m.dispatcher.Dispatch(ctx, msgCopy)
@@ -203,11 +216,24 @@ func (m *managerImpl) isParticipantPending(wf *types.Workflow, address string) b
 	return false
 }
 
+// buildTemplateMessage constructs a minimal Message from the workflow's stored
+// sender/subject/schema/payload, suitable as a dispatch template for sequential/conditional
+// branching. Recipients and coordination are set by the caller.
+func (m *managerImpl) buildTemplateMessage(wf *types.Workflow) *types.Message {
+	return &types.Message{
+		Sender:  wf.Sender,
+		Subject: wf.Subject,
+		Schema:  wf.Schema,
+		Payload: wf.Payload,
+	}
+}
+
 func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, replyMsg *types.Message) error {
 	workflow, err := m.storage.GetWorkflow(ctx, workflowID)
 	if err != nil {
 		return err
 	}
+	coord := workflow.CoordinationConfig
 
 	allDone := true
 	anyFailed := false
@@ -220,17 +246,8 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 		}
 	}
 
-	origMsg, err := m.storage.GetMessage(ctx, workflow.WorkflowID)
-	if err != nil {
-		m.logger.Infof("Warning: failed to get original message for workflow %s: %v", workflow.WorkflowID, err)
-	}
-
 	// Basic failure handling
-	stopOnFailure := false
-	if origMsg != nil && origMsg.Coordination != nil {
-		stopOnFailure = origMsg.Coordination.StopOnFailure
-	}
-
+	stopOnFailure := coord != nil && coord.StopOnFailure
 	if anyFailed && stopOnFailure {
 		return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusFailed, workflow.Version)
 	}
@@ -244,11 +261,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
 		}
 	} else if workflow.CoordinationType == "sequential" {
-		if origMsg == nil {
-			return fmt.Errorf("missing original message for sequential workflow")
-		}
-
-		if origMsg.Coordination == nil || len(origMsg.Coordination.Sequence) == 0 {
+		if coord == nil || len(coord.Sequence) == 0 {
 			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
 		}
 
@@ -259,7 +272,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 		}
 
 		nextIndex := -1
-		for i, seqAddr := range origMsg.Coordination.Sequence {
+		for i, seqAddr := range coord.Sequence {
 			if statusMap[seqAddr] == types.ParticipantStatusPending {
 				nextIndex = i
 				break
@@ -267,7 +280,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 		}
 
 		if nextIndex != -1 {
-			return m.executeSequentialNext(ctx, workflow, origMsg, nextIndex)
+			return m.executeSequentialNext(ctx, workflow, coord, nextIndex)
 		}
 
 		// all finished
@@ -277,18 +290,14 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 		}
 		return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
 	} else if workflow.CoordinationType == "conditional" {
-		if origMsg == nil {
-			return fmt.Errorf("missing original message for conditional workflow")
-		}
-
-		if origMsg.Coordination == nil {
+		if coord == nil {
 			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
 		}
 
 		// Only evaluate condition if the reply is from an initial recipient
 		if replyMsg != nil {
 			isInitial := false
-			for _, rec := range origMsg.Recipients {
+			for _, rec := range workflow.OriginalRecipients {
 				if rec == replyMsg.Sender {
 					isInitial = true
 					break
@@ -301,9 +310,8 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 					m.logger.Error("Failed to unmarshal payload for conditional evaluation", err)
 				}
 
-				for _, condition := range origMsg.Coordination.Conditions {
+				for _, condition := range coord.Conditions {
 					matched := false
-					// Simple expression evaluation like "status == 'approved'"
 					if strings.Contains(condition.If, " == ") {
 						parts := strings.Split(condition.If, " == ")
 						if len(parts) == 2 {
@@ -314,7 +322,6 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 							}
 						}
 					} else {
-						// Fallback: substring matching
 						matched = strings.Contains(string(replyMsg.Payload), condition.If)
 					}
 
@@ -328,16 +335,14 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 						skipped = condition.Then
 					}
 
-					// Mark skipped branch as completed
 					for _, s := range skipped {
 						if err := m.storage.UpdateWorkflowParticipant(ctx, workflow.WorkflowID, s, types.ParticipantStatusCompleted, []byte(`{"status":"skipped"}`)); err != nil {
 							m.logger.Errorf(err, "Failed to update status for skipped participant %s", s)
 						}
 					}
 
-					// Dispatch to target branch
 					if len(targets) > 0 {
-						msgCopy := origMsg.Clone()
+						msgCopy := m.buildTemplateMessage(workflow)
 						msgCopy.Recipients = targets
 						if err := m.dispatcher.Dispatch(ctx, msgCopy); err != nil {
 							m.logger.Error("Failed to dispatch conditional branch messages", err)

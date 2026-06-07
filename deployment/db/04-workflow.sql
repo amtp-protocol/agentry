@@ -21,6 +21,12 @@ CREATE TABLE IF NOT EXISTS workflows (
     timeout_seconds INTEGER NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
     deadline TIMESTAMP WITH TIME ZONE,
+    coordination_config JSONB,
+    original_recipients JSONB,
+    sender VARCHAR(512),
+    subject VARCHAR(1024),
+    schema VARCHAR(255),
+    payload JSONB,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );

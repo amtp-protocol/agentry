@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -24,16 +25,36 @@ func (db *DatabaseStorage) StoreWorkflow(ctx context.Context, state *types.Workf
 		}
 	}
 
+	// Serialize coordination config and original recipients to JSON
+	var coordJSON datatypes.JSON
+	if state.CoordinationConfig != nil {
+		if b, err := json.Marshal(state.CoordinationConfig); err == nil {
+			coordJSON = datatypes.JSON(b)
+		}
+	}
+	var origRecipsJSON datatypes.JSON
+	if len(state.OriginalRecipients) > 0 {
+		if b, err := json.Marshal(state.OriginalRecipients); err == nil {
+			origRecipsJSON = datatypes.JSON(b)
+		}
+	}
+
 	workState := &Workflow{
-		WorkflowID:       state.WorkflowID,
-		Status:           state.Status,
-		CoordinationType: state.CoordinationType,
-		TimeoutSeconds:   state.TimeoutSeconds,
-		Version:          state.Version,
-		Deadline:         state.Deadline,
-		CreatedAt:        state.CreatedAt,
-		UpdatedAt:        state.UpdatedAt,
-		Participants:     participants,
+		WorkflowID:            state.WorkflowID,
+		Status:                state.Status,
+		CoordinationType:      state.CoordinationType,
+		TimeoutSeconds:        state.TimeoutSeconds,
+		Version:               state.Version,
+		Deadline:              state.Deadline,
+		CoordinationConfigJSON: coordJSON,
+		OriginalRecipients:     origRecipsJSON,
+		Sender:                 state.Sender,
+		Subject:                state.Subject,
+		Schema:                 state.Schema,
+		Payload:                datatypes.JSON(state.Payload),
+		CreatedAt:              state.CreatedAt,
+		UpdatedAt:              state.UpdatedAt,
+		Participants:           participants,
 	}
 
 	return db.db.WithContext(ctx).Create(workState).Error

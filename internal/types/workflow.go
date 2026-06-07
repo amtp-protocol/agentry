@@ -42,17 +42,29 @@ const (
 	ParticipantStatusTimeout   ParticipantStatus = "timeout"
 )
 
-// Workflow represents the overarching state of a multi-agent coordination workflow
 type Workflow struct {
-	WorkflowID       string                `json:"workflow_id"`
-	Status           WorkflowStatus        `json:"status"`
-	CoordinationType string                `json:"coordination_type"`
-	TimeoutSeconds   int                   `json:"timeout_seconds"`
-	Version          int                   `json:"version"`
-	Deadline         *time.Time            `json:"deadline,omitempty"`
-	Participants     []WorkflowParticipant `json:"participants"`
-	CreatedAt        time.Time             `json:"created_at"`
-	UpdatedAt        time.Time             `json:"updated_at"`
+	WorkflowID       string         `json:"workflow_id"`
+	Status           WorkflowStatus `json:"status"`
+	CoordinationType string         `json:"coordination_type"`
+	TimeoutSeconds   int            `json:"timeout_seconds"`
+	Version          int            `json:"version"`
+	Deadline         *time.Time     `json:"deadline,omitempty"`
+
+	// CoordinationConfig is the full coordination config captured at initialize time.
+	// It replaces the need to re-fetch the original message for sequential/conditional logic.
+	CoordinationConfig *CoordinationConfig `json:"coordination_config,omitempty"`
+
+	// MessageTemplate fields used when dispatching sequential/conditional branches
+	// (the original message acts as a template; these are the fields that matter).
+	OriginalRecipients []string        `json:"original_recipients,omitempty"`
+	Sender             string          `json:"sender,omitempty"`
+	Subject            string          `json:"subject,omitempty"`
+	Schema             string          `json:"schema,omitempty"`
+	Payload            json.RawMessage `json:"payload,omitempty"`
+
+	Participants []WorkflowParticipant `json:"participants"`
+	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
 }
 
 // WorkflowParticipant tracks the state and response of a participant in a workflow
