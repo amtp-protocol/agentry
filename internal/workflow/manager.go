@@ -22,6 +22,9 @@ type managerImpl struct {
 }
 
 func NewManager(s storage.Storage, d Dispatcher, logger *logging.Logger) Manager {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	return &managerImpl{
 		storage:    s,
 		dispatcher: d,
@@ -91,7 +94,7 @@ func (m *managerImpl) Initialize(ctx context.Context, msg *types.Message) (*type
 	err = m.startExecution(ctx, workflow, msg)
 	if err != nil {
 		updateErr := m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, types.WorkflowStatusFailed)
-		if updateErr != nil && m.logger != nil {
+		if updateErr != nil {
 			m.logger.Error("Failed to gracefully update workflow status tracking failure", updateErr)
 		}
 		return workflow, err
@@ -285,9 +288,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 			if isInitial && len(replyMsg.Payload) > 0 {
 				var payload map[string]interface{}
 				if err := json.Unmarshal(replyMsg.Payload, &payload); err != nil {
-					if m.logger != nil {
-						m.logger.Error("Failed to unmarshal payload for conditional evaluation", err)
-					}
+					m.logger.Error("Failed to unmarshal payload for conditional evaluation", err)
 				}
 
 				for _, condition := range origMsg.Coordination.Conditions {
@@ -319,7 +320,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 
 					// Mark skipped branch as completed
 					for _, s := range skipped {
-						if err := m.storage.UpdateWorkflowParticipant(ctx, workflow.WorkflowID, s, types.ParticipantStatusCompleted, []byte(`{"status":"skipped"}`)); err != nil && m.logger != nil {
+						if err := m.storage.UpdateWorkflowParticipant(ctx, workflow.WorkflowID, s, types.ParticipantStatusCompleted, []byte(`{"status":"skipped"}`)); err != nil {
 							m.logger.Errorf(err, "Failed to update status for skipped participant %s", s)
 						}
 					}
@@ -328,7 +329,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 					if len(targets) > 0 {
 						msgCopy := origMsg.Clone()
 						msgCopy.Recipients = targets
-						if err := m.dispatcher.Dispatch(ctx, msgCopy); err != nil && m.logger != nil {
+						if err := m.dispatcher.Dispatch(ctx, msgCopy); err != nil {
 							m.logger.Error("Failed to dispatch conditional branch messages", err)
 						}
 					}
@@ -393,22 +394,18 @@ func (m *managerImpl) Stop() error {
 func (m *managerImpl) sweepTimeouts(ctx context.Context) {
 	timeouts, err := m.storage.ListTimedOutWorkflows(ctx)
 	if err != nil {
-		if m.logger != nil {
-			m.logger.Error("Error checking timed out workflows", err)
-		}
+		m.logger.Error("Error checking timed out workflows", err)
 		return
 	}
 
 	for _, w := range timeouts {
-		if m.logger != nil {
-			m.logger.WithField("workflow_id", w.WorkflowID).Info("Workflow timed out")
-		}
-		if updateErr := m.storage.UpdateWorkflowStatus(ctx, w.WorkflowID, types.WorkflowStatusTimeout); updateErr != nil && m.logger != nil {
+		m.logger.WithField("workflow_id", w.WorkflowID).Info("Workflow timed out")
+		if updateErr := m.storage.UpdateWorkflowStatus(ctx, w.WorkflowID, types.WorkflowStatusTimeout); updateErr != nil {
 			m.logger.Error("Failed to update timed out workflow status", updateErr)
 		}
 		for _, p := range w.Participants {
 			if p.Status == types.ParticipantStatusPending {
-				if updateErr := m.storage.UpdateWorkflowParticipant(ctx, w.WorkflowID, p.Address, types.ParticipantStatusTimeout, nil); updateErr != nil && m.logger != nil {
+				if updateErr := m.storage.UpdateWorkflowParticipant(ctx, w.WorkflowID, p.Address, types.ParticipantStatusTimeout, nil); updateErr != nil {
 					m.logger.Errorf(updateErr, "Failed to update participant %s to timeout status", p.Address)
 				}
 			}

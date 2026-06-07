@@ -23,9 +23,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"os"
+
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/types"
-	"os"
 )
 
 // Test schema management handlers when schema manager is not configured
@@ -174,7 +175,5 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Errorf("Expected status %d, got %d", http.StatusOK, w.Code)
 		}
-
-		// Optionally verify the JSON response body here if needed by existing test expectations
 	})
 }
