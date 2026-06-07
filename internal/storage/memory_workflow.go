@@ -34,7 +34,7 @@ func (ms *MemoryStorage) GetWorkflow(ctx context.Context, workflowID string) (*t
 
 	state, exists := ms.workflows[workflowID]
 	if !exists {
-		return nil, fmt.Errorf("workflow not found")
+		return nil, fmt.Errorf("%w: %s", ErrWorkflowNotFound, workflowID)
 	}
 
 	// Deep copy to return

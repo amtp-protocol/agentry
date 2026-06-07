@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -31,6 +32,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/pkg/uuid"
 )
@@ -159,14 +161,35 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		return
 	}
 
-	// Intercept workflow responses
+	// Intercept workflow responses.
+	//
+	// If this gateway created the workflow (shared-DB deployment) or is the sole
+	// process (MemoryStorage), ProcessResponse updates the state machine in-place.
+	//
+	// If the workflow is not found:
+	//   - Shared-DB multi-replica: each replica shares the same storage, so
+	//     ErrWorkflowNotFound does NOT fire — every replica can see and process
+	//     the workflow concurrently (the optimistic-lock protocol in the workflow
+	//     manager serialises conflicting writes).
+	//   - MemoryStorage single-process: this is the only process, so
+	//     ErrWorkflowNotFound means the workflow genuinely does not exist.
+	//
+	// CAUTION: In a multi-replica deployment with per-replica MemoryStorage (or
+	// non-shared DB), a workflow created on replica A is invisible to replica B.
+	// There is currently NO cross-replica forwarding of workflow responses; the
+	// owning replica must directly receive the response, e.g. via a frontend
+	// load-balancer that routes requests by InReplyTo (workflow ID) affinity.
+	// See docs/DEPLOYMENT.md for deployment topology guidance.
 	if message.ResponseType == "workflow_response" && message.InReplyTo != "" {
 		if s.workflow != nil {
 			err := s.workflow.ProcessResponse(c.Request.Context(), message.InReplyTo, message)
 			if err != nil {
-				// If it's a "not found" error, it means this gateway doesn't own the workflow,
-				// which is perfectly normal for distributed routing. Just ignore and continue routing.
-				if !strings.Contains(err.Error(), "not found") {
+				if errors.Is(err, storage.ErrWorkflowNotFound) {
+					// Workflow not found in this storage. Fall through to normal
+					// delivery so the sender can at least receive the response.
+					// In shared-DB deployments this branch is typically unreachable
+					// (all replicas share the same `workflows` table).
+				} else {
 					s.respondWithError(c, http.StatusInternalServerError, "WORKFLOW_UPDATE_FAILED",
 						"Failed to process workflow response", map[string]interface{}{
 							"error": err.Error(),
@@ -174,8 +197,6 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 					return
 				}
 			}
-			// If successful or not found, we fall through to let the normal message
-			// routing/delivery mechanism deliver this response to the recipient.
 		}
 	}
 

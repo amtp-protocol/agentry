@@ -168,7 +168,10 @@ func (m *managerImpl) ProcessResponse(ctx context.Context, workflowID string, re
 	for {
 		workflow, err := m.storage.GetWorkflow(ctx, workflowID)
 		if err != nil {
-			return fmt.Errorf("workflow not found: %w", err)
+			if errors.Is(err, storage.ErrWorkflowNotFound) {
+				return err
+			}
+			return fmt.Errorf("failed to get workflow: %w", err)
 		}
 
 		// Terminal state — nothing to do

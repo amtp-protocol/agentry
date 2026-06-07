@@ -29,6 +29,11 @@ import (
 // modification. The caller should re-read the workflow and retry.
 var ErrVersionConflict = errors.New("version conflict: workflow was modified concurrently")
 
+// ErrWorkflowNotFound is returned when a workflow does not exist in storage.
+// In a multi-gateway deployment, callers use this sentinel to distinguish
+// "this replica does not own the workflow" (benign) from other failures.
+var ErrWorkflowNotFound = errors.New("workflow not found")
+
 // Storage defines the interface for message storage operations
 type Storage interface {
 	agents.AgentStore

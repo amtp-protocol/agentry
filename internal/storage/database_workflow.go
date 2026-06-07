@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -68,6 +69,9 @@ func (db *DatabaseStorage) GetWorkflow(ctx context.Context, workflowID string) (
 		First(&state).Error
 
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrWorkflowNotFound, workflowID)
+		}
 		return nil, fmt.Errorf("failed to get workflow: %w", err)
 	}
 
