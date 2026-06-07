@@ -441,3 +441,103 @@ func TestManager_ProcessResponse_StopOnFailure(t *testing.T) {
 		t.Errorf("Expected failure state due to StopOnFailure")
 	}
 }
+
+func TestManager_NotifySenderOnCompletion(t *testing.T) {
+	st := newMockStorage()
+	dp := &mockDispatcher{}
+	mgr := NewManager(st, dp, nil)
+
+	msg := &types.Message{
+		MessageID: "msg-notify",
+		Sender:    "initiator@localhost",
+		Coordination: &types.CoordinationConfig{
+			Type:              "parallel",
+			RequiredResponses: []string{"a1"},
+		},
+	}
+
+	wf, _ := mgr.Initialize(context.Background(), msg)
+	wfID := wf.WorkflowID
+
+	// Reset dispatch counter after Initialize
+	dp.dispatched = nil
+
+	// Send the sole participant response → terminal transition
+	mgr.ProcessResponse(context.Background(), wfID, &types.Message{
+		Sender:    "a1",
+		InReplyTo: wfID,
+		Payload:   json.RawMessage(`{"status":"ok"}`),
+	})
+
+	// Should have exactly one dispatch: the notification to the initiator
+	if len(dp.dispatched) != 1 {
+		t.Fatalf("Expected 1 notification dispatch, got %d", len(dp.dispatched))
+	}
+	notif := dp.dispatched[0]
+	if notif.Sender != "" {
+		t.Errorf("Notification sender should be empty (system), got %q", notif.Sender)
+	}
+	if len(notif.Recipients) != 1 || notif.Recipients[0] != "initiator@localhost" {
+		t.Errorf("Notification should go to initiator@localhost, got %v", notif.Recipients)
+	}
+	if notif.InReplyTo != wfID {
+		t.Errorf("Notification InReplyTo should match workflow ID, got %q", notif.InReplyTo)
+	}
+	// Verify aggregated payload contains results
+	var payload map[string]interface{}
+	if err := json.Unmarshal(notif.Payload, &payload); err != nil {
+		t.Fatalf("Notification payload should be valid JSON: %v", err)
+	}
+	if payload["workflow_id"] != wfID {
+		t.Errorf("Payload workflow_id mismatch")
+	}
+	results, ok := payload["results"].([]interface{})
+	if !ok || len(results) != 1 {
+		t.Errorf("Payload results should have 1 entry, got %v", results)
+	}
+}
+
+func TestManager_NotifySenderOnTimeout(t *testing.T) {
+	st := newMockStorage()
+	dp := &mockDispatcher{}
+	mgr := NewManager(st, dp, nil)
+
+	msg := &types.Message{
+		MessageID: "msg-timeout-notify",
+		Sender:    "initiator@localhost",
+		Coordination: &types.CoordinationConfig{
+			Type:              "parallel",
+			RequiredResponses: []string{"a1"},
+			Timeout:           1,
+		},
+	}
+
+	wf, _ := mgr.Initialize(context.Background(), msg)
+	wfID := wf.WorkflowID
+	dp.dispatched = nil
+
+	// Backdate so it's past deadline
+	st.workflows[wfID].CreatedAt = time.Now().Add(-2 * time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.(*managerImpl).sweepTimeouts(ctx)
+
+	// Should have one notification dispatch
+	if len(dp.dispatched) != 1 {
+		t.Fatalf("Expected 1 timeout notification dispatch, got %d", len(dp.dispatched))
+	}
+	notif := dp.dispatched[0]
+	if notif.InReplyTo != wfID {
+		t.Errorf("Notification InReplyTo should match workflow ID, got %q", notif.InReplyTo)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(notif.Payload, &payload); err != nil {
+		t.Fatalf("Notification payload should be valid JSON: %v", err)
+	}
+	if payload["status"] != "timeout" {
+		t.Errorf("Expected timeout status in notification, got %v", payload["status"])
+	}
+
+	mgr.Stop()
+}

@@ -231,6 +231,47 @@ func (m *managerImpl) buildTemplateMessage(wf *types.Workflow) *types.Message {
 	}
 }
 
+// notifySender dispatches an aggregated completion/failure notification back to
+// the workflow's original sender so they can observe the outcome without polling
+// the storage database.
+func (m *managerImpl) notifySender(ctx context.Context, wf *types.Workflow, finalStatus types.WorkflowStatus) {
+	if wf.Sender == "" {
+		return
+	}
+
+	results := make([]map[string]interface{}, 0, len(wf.Participants))
+	for _, p := range wf.Participants {
+		e := map[string]interface{}{
+			"address": p.Address,
+			"status":  string(p.Status),
+		}
+		if len(p.ResponsePayload) > 0 {
+			var v interface{}
+			if err := json.Unmarshal(p.ResponsePayload, &v); err == nil {
+				e["payload"] = v
+			}
+		}
+		results = append(results, e)
+	}
+	aggPayload, _ := json.Marshal(map[string]interface{}{
+		"workflow_id":       wf.WorkflowID,
+		"coordination_type": wf.CoordinationType,
+		"status":            string(finalStatus),
+		"results":           results,
+	})
+
+	notif := &types.Message{
+		Sender:     "", // system-generated
+		Recipients: []string{wf.Sender},
+		Subject:    fmt.Sprintf("Workflow %s: %s", wf.WorkflowID, finalStatus),
+		InReplyTo:  wf.WorkflowID,
+		Payload:    json.RawMessage(aggPayload),
+	}
+	if err := m.dispatcher.Dispatch(ctx, notif); err != nil {
+		m.logger.Errorf(err, "Failed to notify workflow sender %s of %s", wf.Sender, finalStatus)
+	}
+}
+
 func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, replyMsg *types.Message) error {
 	workflow, err := m.storage.GetWorkflow(ctx, workflowID)
 	if err != nil {
@@ -252,7 +293,14 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 	// Basic failure handling
 	stopOnFailure := coord != nil && coord.StopOnFailure
 	if anyFailed && stopOnFailure {
-		return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusFailed, workflow.Version)
+		err := m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusFailed, workflow.Version)
+		if errors.Is(err, storage.ErrVersionConflict) {
+			return err
+		}
+		if err == nil {
+			m.notifySender(ctx, workflow, types.WorkflowStatusFailed)
+		}
+		return err
 	}
 
 	if workflow.CoordinationType == "parallel" {
@@ -261,11 +309,25 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 			if anyFailed {
 				finalStatus = types.WorkflowStatusFailed
 			}
-			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
+			err := m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
+			if errors.Is(err, storage.ErrVersionConflict) {
+				return err
+			}
+			if err == nil {
+				m.notifySender(ctx, workflow, finalStatus)
+			}
+			return err
 		}
 	} else if workflow.CoordinationType == "sequential" {
 		if coord == nil || len(coord.Sequence) == 0 {
-			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
+			err := m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
+			if errors.Is(err, storage.ErrVersionConflict) {
+				return err
+			}
+			if err == nil {
+				m.notifySender(ctx, workflow, types.WorkflowStatusCompleted)
+			}
+			return err
 		}
 
 		// Find the first participant in the sequence that is still pending
@@ -291,10 +353,24 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 		if anyFailed {
 			finalStatus = types.WorkflowStatusFailed
 		}
-		return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
+		err := m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
+		if errors.Is(err, storage.ErrVersionConflict) {
+			return err
+		}
+		if err == nil {
+			m.notifySender(ctx, workflow, finalStatus)
+		}
+		return err
 	} else if workflow.CoordinationType == "conditional" {
 		if coord == nil {
-			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
+			err := m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
+			if errors.Is(err, storage.ErrVersionConflict) {
+				return err
+			}
+			if err == nil {
+				m.notifySender(ctx, workflow, types.WorkflowStatusCompleted)
+			}
+			return err
 		}
 
 		// Only evaluate condition if the reply is from an initial recipient
@@ -377,7 +453,14 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 			if anyCondFailed {
 				finalStatus = types.WorkflowStatusFailed
 			}
-			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
+			err := m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
+			if errors.Is(err, storage.ErrVersionConflict) {
+				return err
+			}
+			if err == nil {
+				m.notifySender(ctx, workflow, finalStatus)
+			}
+			return err
 		}
 	}
 
@@ -420,7 +503,9 @@ func (m *managerImpl) sweepTimeouts(ctx context.Context) {
 		m.logger.WithField("workflow_id", w.WorkflowID).Info("Workflow timed out")
 		if updateErr := m.storage.UpdateWorkflowStatus(ctx, w.WorkflowID, types.WorkflowStatusTimeout); updateErr != nil {
 			m.logger.Error("Failed to update timed out workflow status", updateErr)
+			continue
 		}
+		m.notifySender(ctx, w, types.WorkflowStatusTimeout)
 		for _, p := range w.Participants {
 			if p.Status == types.ParticipantStatusPending {
 				if updateErr := m.storage.UpdateWorkflowParticipant(ctx, w.WorkflowID, p.Address, types.ParticipantStatusTimeout, nil); updateErr != nil {
