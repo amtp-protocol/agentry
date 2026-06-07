@@ -15,13 +15,14 @@ type Workflow struct {
 	Status           types.WorkflowStatus  `gorm:"type:workflow_status;not null;default:'pending'" json:"status"`
 	CoordinationType string                `gorm:"size:50;not null" json:"coordination_type"`
 	TimeoutSeconds   int                   `gorm:"not null" json:"timeout_seconds"`
+	Deadline         *time.Time            `gorm:"type:timestamptz" json:"deadline,omitempty"`
 	CreatedAt        time.Time             `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
 	UpdatedAt        time.Time             `gorm:"type:timestamptz;not null;default:now()" json:"updated_at"`
 	Participants     []WorkflowParticipant `gorm:"foreignKey:WorkflowID;references:WorkflowID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
 }
 
 func (Workflow) TableName() string {
-	return "workflows"
+	return "workflow"
 }
 
 // WorkflowParticipant represents the database model for workflow participants
@@ -41,22 +42,23 @@ func (WorkflowParticipant) TableName() string {
 }
 
 // toDomainModel converts Workflow to types.Workflow
-func (ws *Workflow) toDomainModel() *types.Workflow {
-	if ws == nil {
+func (w *Workflow) toDomainModel() *types.Workflow {
+	if w == nil {
 		return nil
 	}
 
 	state := &types.Workflow{
-		WorkflowID:       ws.WorkflowID,
-		Status:           ws.Status,
-		CoordinationType: ws.CoordinationType,
-		TimeoutSeconds:   ws.TimeoutSeconds,
-		Participants:     make([]types.WorkflowParticipant, 0, len(ws.Participants)),
-		CreatedAt:        ws.CreatedAt,
-		UpdatedAt:        ws.UpdatedAt,
+		WorkflowID:       w.WorkflowID,
+		Status:           w.Status,
+		CoordinationType: w.CoordinationType,
+		TimeoutSeconds:   w.TimeoutSeconds,
+		Deadline:         w.Deadline,
+		Participants:     make([]types.WorkflowParticipant, 0, len(w.Participants)),
+		CreatedAt:        w.CreatedAt,
+		UpdatedAt:        w.UpdatedAt,
 	}
 
-	for _, p := range ws.Participants {
+	for _, p := range w.Participants {
 		participant := types.WorkflowParticipant{
 			WorkflowID: p.WorkflowID,
 			Address:    p.Address,

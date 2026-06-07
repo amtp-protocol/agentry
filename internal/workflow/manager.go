@@ -51,6 +51,9 @@ func (m *managerImpl) Initialize(ctx context.Context, msg *types.Message) (*type
 		workflow.TimeoutSeconds = 3600 // Default 1 hour if not specified
 	}
 
+	deadline := workflow.CreatedAt.Add(time.Duration(workflow.TimeoutSeconds) * time.Second)
+	workflow.Deadline = &deadline
+
 	// Calculate participants based on coordination type
 	var participants []string
 	switch msg.Coordination.Type {

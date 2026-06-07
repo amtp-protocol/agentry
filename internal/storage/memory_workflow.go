@@ -95,8 +95,15 @@ func (ms *MemoryStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Wo
 
 	for _, state := range ms.workflows {
 		if state.Status == types.WorkflowStatusPending || state.Status == types.WorkflowStatusInProgress {
-			timeoutAt := state.CreatedAt.Add(time.Duration(state.TimeoutSeconds) * time.Second)
-			if now.After(timeoutAt) {
+			timedOut := false
+			if state.Deadline != nil {
+				timedOut = now.After(*state.Deadline)
+			} else {
+				// Fallback for workflows stored without a deadline (backward compat)
+				timeoutAt := state.CreatedAt.Add(time.Duration(state.TimeoutSeconds) * time.Second)
+				timedOut = now.After(timeoutAt)
+			}
+			if timedOut {
 				// Deep copy
 				stateCopy := *state
 				stateCopy.Participants = make([]types.WorkflowParticipant, len(state.Participants))

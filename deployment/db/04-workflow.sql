@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS workflows (
     status workflow_status NOT NULL DEFAULT 'pending',
     coordination_type VARCHAR(50) NOT NULL,
     timeout_seconds INTEGER NOT NULL,
+    deadline TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
@@ -37,4 +38,5 @@ CREATE TABLE IF NOT EXISTS workflow_participants (
 
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
+CREATE INDEX IF NOT EXISTS idx_workflows_deadline ON workflows(deadline);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_participants_workflow_address ON workflow_participants(workflow_id, address);

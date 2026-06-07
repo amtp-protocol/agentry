@@ -28,6 +28,7 @@ func (db *DatabaseStorage) StoreWorkflow(ctx context.Context, state *types.Workf
 		Status:           state.Status,
 		CoordinationType: state.CoordinationType,
 		TimeoutSeconds:   state.TimeoutSeconds,
+		Deadline:         state.Deadline,
 		CreatedAt:        state.CreatedAt,
 		UpdatedAt:        state.UpdatedAt,
 		Participants:     participants,
@@ -77,11 +78,10 @@ func (db *DatabaseStorage) UpdateWorkflowParticipant(ctx context.Context, workfl
 
 func (db *DatabaseStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Workflow, error) {
 	var states []Workflow
-	// Find pending/in_progress workflows where created_at + timeout_seconds < now
 	err := db.db.WithContext(ctx).
 		Preload("Participants").
 		Where("status IN (?)", []types.WorkflowStatus{types.WorkflowStatusPending, types.WorkflowStatusInProgress}).
-		Where("EXTRACT(EPOCH FROM (NOW() - created_at)) > timeout_seconds").
+		Where("deadline < NOW()").
 		Find(&states).Error
 
 	if err != nil {
