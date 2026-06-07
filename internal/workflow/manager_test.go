@@ -90,6 +90,14 @@ func (m *mockStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Workf
 	return timeouts, nil
 }
 
+func (m *mockStorage) UpdateWorkflowParticipantAtomic(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte, expectedVersion int) error {
+	return m.UpdateWorkflowParticipant(ctx, workflowID, address, status, responsePayload)
+}
+
+func (m *mockStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID string, status types.WorkflowStatus, expectedVersion int) error {
+	return m.UpdateWorkflowStatus(ctx, workflowID, status)
+}
+
 func (m *mockStorage) GetMessage(ctx context.Context, id string) (*types.Message, error) {
 	msg, ok := m.messages[id]
 	if !ok {

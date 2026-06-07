@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -151,50 +152,59 @@ func (m *managerImpl) executeConditional(ctx context.Context, _ *types.Workflow,
 }
 
 func (m *managerImpl) ProcessResponse(ctx context.Context, workflowID string, replyMsg *types.Message) error {
-	workflow, err := m.storage.GetWorkflow(ctx, workflowID)
-	if err != nil {
-		return fmt.Errorf("workflow not found: %w", err)
-	}
-
-	if workflow.Status == types.WorkflowStatusCompleted || workflow.Status == types.WorkflowStatusFailed || workflow.Status == types.WorkflowStatusTimeout {
-		m.logger.Infof("Workflow %s already finished, ignoring response", workflowID)
-		return nil
-	}
-
-	// Determine success or failure from message type
-	participantStatus := types.ParticipantStatusCompleted
-	if replyMsg.ResponseType == "workflow_error" || replyMsg.ResponseType == "error" {
-		participantStatus = types.ParticipantStatusFailed
-	}
-
-	// Update participant status
-	err = m.storage.UpdateWorkflowParticipant(ctx, workflowID, replyMsg.Sender, participantStatus, replyMsg.Payload)
-	if err != nil {
-		return fmt.Errorf("failed to update participant status: %w", err)
-	}
-
-	// Re-evaluate state
-	return m.evaluateWorkflow(ctx, workflow, replyMsg)
-}
-
-func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.Workflow, replyMsg *types.Message) error {
-	// If this is a response, ensure the sender was previously pending.
-	// If they were already in a final state, this is a duplicate response and we shouldn't re-dispatch.
-	if replyMsg != nil {
-		wasPending := false
-		for _, p := range oldWorkflow.Participants {
-			if p.Address == replyMsg.Sender && p.Status == types.ParticipantStatusPending {
-				wasPending = true
-				break
-			}
+	for {
+		workflow, err := m.storage.GetWorkflow(ctx, workflowID)
+		if err != nil {
+			return fmt.Errorf("workflow not found: %w", err)
 		}
-		if !wasPending {
+
+		// Terminal state — nothing to do
+		if workflow.Status == types.WorkflowStatusCompleted ||
+			workflow.Status == types.WorkflowStatusFailed ||
+			workflow.Status == types.WorkflowStatusTimeout {
 			return nil
 		}
-	}
 
-	// Re-fetch to get up-to-date participants
-	workflow, err := m.storage.GetWorkflow(ctx, oldWorkflow.WorkflowID)
+		// Duplicate response — sender already in a final state
+		if !m.isParticipantPending(workflow, replyMsg.Sender) {
+			return nil
+		}
+
+		participantStatus := types.ParticipantStatusCompleted
+		if replyMsg.ResponseType == "workflow_error" || replyMsg.ResponseType == "error" {
+			participantStatus = types.ParticipantStatusFailed
+		}
+
+		// Atomic update: only succeeds if no concurrent write bumped the version
+		err = m.storage.UpdateWorkflowParticipantAtomic(ctx, workflowID, replyMsg.Sender, participantStatus, replyMsg.Payload, workflow.Version)
+		if errors.Is(err, storage.ErrVersionConflict) {
+			continue // concurrent write — retry
+		}
+		if err != nil {
+			return fmt.Errorf("failed to update participant status: %w", err)
+		}
+
+		err = m.evaluateWorkflow(ctx, workflowID, replyMsg)
+		if errors.Is(err, storage.ErrVersionConflict) {
+			continue
+		}
+		return err
+	}
+}
+
+// isParticipantPending returns true if the participant is in the workflow and
+// still pending.
+func (m *managerImpl) isParticipantPending(wf *types.Workflow, address string) bool {
+	for _, p := range wf.Participants {
+		if p.Address == address {
+			return p.Status == types.ParticipantStatusPending
+		}
+	}
+	return false
+}
+
+func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, replyMsg *types.Message) error {
+	workflow, err := m.storage.GetWorkflow(ctx, workflowID)
 	if err != nil {
 		return err
 	}
@@ -212,7 +222,6 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 
 	origMsg, err := m.storage.GetMessage(ctx, workflow.WorkflowID)
 	if err != nil {
-		// Log but do not fail hard, it might be purged
 		m.logger.Infof("Warning: failed to get original message for workflow %s: %v", workflow.WorkflowID, err)
 	}
 
@@ -223,8 +232,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 	}
 
 	if anyFailed && stopOnFailure {
-		// Stop the workflow immediately
-		return m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, types.WorkflowStatusFailed)
+		return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusFailed, workflow.Version)
 	}
 
 	if workflow.CoordinationType == "parallel" {
@@ -233,7 +241,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 			if anyFailed {
 				finalStatus = types.WorkflowStatusFailed
 			}
-			return m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, finalStatus)
+			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
 		}
 	} else if workflow.CoordinationType == "sequential" {
 		if origMsg == nil {
@@ -241,7 +249,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 		}
 
 		if origMsg.Coordination == nil || len(origMsg.Coordination.Sequence) == 0 {
-			return m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted)
+			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
 		}
 
 		// Find the first participant in the sequence that is still pending
@@ -259,23 +267,22 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 		}
 
 		if nextIndex != -1 {
-			// dispatch to the next agent
 			return m.executeSequentialNext(ctx, workflow, origMsg, nextIndex)
 		}
 
 		// all finished
 		finalStatus := types.WorkflowStatusCompleted
 		if anyFailed {
-			finalStatus = types.WorkflowStatusFailed // Or a partial success state
+			finalStatus = types.WorkflowStatusFailed
 		}
-		return m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, finalStatus)
+		return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
 	} else if workflow.CoordinationType == "conditional" {
 		if origMsg == nil {
 			return fmt.Errorf("missing original message for conditional workflow")
 		}
 
 		if origMsg.Coordination == nil {
-			return m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted)
+			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, types.WorkflowStatusCompleted, workflow.Version)
 		}
 
 		// Only evaluate condition if the reply is from an initial recipient
@@ -362,7 +369,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, oldWorkflow *types.W
 			if anyCondFailed {
 				finalStatus = types.WorkflowStatusFailed
 			}
-			return m.storage.UpdateWorkflowStatus(ctx, workflow.WorkflowID, finalStatus)
+			return m.storage.UpdateWorkflowStatusAtomic(ctx, workflow.WorkflowID, finalStatus, workflow.Version)
 		}
 	}
 

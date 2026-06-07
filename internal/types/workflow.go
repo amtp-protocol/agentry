@@ -48,6 +48,7 @@ type Workflow struct {
 	Status           WorkflowStatus        `json:"status"`
 	CoordinationType string                `json:"coordination_type"`
 	TimeoutSeconds   int                   `json:"timeout_seconds"`
+	Version          int                   `json:"version"`
 	Deadline         *time.Time            `json:"deadline,omitempty"`
 	Participants     []WorkflowParticipant `json:"participants"`
 	CreatedAt        time.Time             `json:"created_at"`

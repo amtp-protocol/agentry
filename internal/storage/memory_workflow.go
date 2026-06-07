@@ -18,6 +18,9 @@ func (ms *MemoryStorage) StoreWorkflow(ctx context.Context, state *types.Workflo
 
 	// Make a deep copy to store
 	stateCopy := *state
+	if stateCopy.Version == 0 {
+		stateCopy.Version = 1
+	}
 	stateCopy.Participants = make([]types.WorkflowParticipant, len(state.Participants))
 	copy(stateCopy.Participants, state.Participants)
 
@@ -114,4 +117,59 @@ func (ms *MemoryStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Wo
 	}
 
 	return results, nil
+}
+
+// UpdateWorkflowParticipantAtomic updates a participant only if the workflow
+// version matches expectedVersion. On success the version is bumped.
+func (ms *MemoryStorage) UpdateWorkflowParticipantAtomic(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte, expectedVersion int) error {
+	ms.workflowsMux.Lock()
+	defer ms.workflowsMux.Unlock()
+
+	state, exists := ms.workflows[workflowID]
+	if !exists {
+		return fmt.Errorf("workflow not found")
+	}
+	if state.Version != expectedVersion {
+		return ErrVersionConflict
+	}
+
+	updated := false
+	for i := range state.Participants {
+		if state.Participants[i].Address == address {
+			state.Participants[i].Status = status
+			if len(responsePayload) > 0 {
+				state.Participants[i].ResponsePayload = responsePayload
+			}
+			state.Participants[i].UpdatedAt = time.Now()
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		return fmt.Errorf("participant %s not found in workflow %s", address, workflowID)
+	}
+
+	state.Version++
+	state.UpdatedAt = time.Now()
+	return nil
+}
+
+// UpdateWorkflowStatusAtomic updates the workflow status only if the workflow
+// version matches expectedVersion. On success the version is bumped.
+func (ms *MemoryStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID string, status types.WorkflowStatus, expectedVersion int) error {
+	ms.workflowsMux.Lock()
+	defer ms.workflowsMux.Unlock()
+
+	state, exists := ms.workflows[workflowID]
+	if !exists {
+		return fmt.Errorf("workflow not found")
+	}
+	if state.Version != expectedVersion {
+		return ErrVersionConflict
+	}
+
+	state.Status = status
+	state.Version++
+	state.UpdatedAt = time.Now()
+	return nil
 }

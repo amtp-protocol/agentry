@@ -15,6 +15,7 @@ type Workflow struct {
 	Status           types.WorkflowStatus  `gorm:"type:workflow_status;not null;default:'pending'" json:"status"`
 	CoordinationType string                `gorm:"size:50;not null" json:"coordination_type"`
 	TimeoutSeconds   int                   `gorm:"not null" json:"timeout_seconds"`
+	Version          int                   `gorm:"not null;default:1" json:"version"`
 	Deadline         *time.Time            `gorm:"type:timestamptz" json:"deadline,omitempty"`
 	CreatedAt        time.Time             `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
 	UpdatedAt        time.Time             `gorm:"type:timestamptz;not null;default:now()" json:"updated_at"`
@@ -22,7 +23,7 @@ type Workflow struct {
 }
 
 func (Workflow) TableName() string {
-	return "workflow"
+	return "workflows"
 }
 
 // WorkflowParticipant represents the database model for workflow participants
@@ -52,6 +53,7 @@ func (w *Workflow) toDomainModel() *types.Workflow {
 		Status:           w.Status,
 		CoordinationType: w.CoordinationType,
 		TimeoutSeconds:   w.TimeoutSeconds,
+		Version:          w.Version,
 		Deadline:         w.Deadline,
 		Participants:     make([]types.WorkflowParticipant, 0, len(w.Participants)),
 		CreatedAt:        w.CreatedAt,

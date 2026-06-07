@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS workflows (
     status workflow_status NOT NULL DEFAULT 'pending',
     coordination_type VARCHAR(50) NOT NULL,
     timeout_seconds INTEGER NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
     deadline TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()

@@ -1793,6 +1793,12 @@ func (m *MockStorage) UpdateWorkflowStatus(ctx context.Context, workflowID strin
 func (m *MockStorage) UpdateWorkflowParticipant(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte) error {
 	return nil
 }
+func (m *MockStorage) UpdateWorkflowParticipantAtomic(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte, expectedVersion int) error {
+	return nil
+}
+func (m *MockStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID string, status types.WorkflowStatus, expectedVersion int) error {
+	return nil
+}
 func (m *MockStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Workflow, error) {
 	return nil, nil
 }
