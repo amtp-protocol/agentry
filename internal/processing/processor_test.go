@@ -31,6 +31,8 @@ func TestNewMessageProcessor(t *testing.T) {
 
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	if processor == nil {
 		t.Fatal("NewMessageProcessor returned nil")
@@ -58,6 +60,8 @@ func TestProcessMessage_ImmediatePath(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -99,6 +103,8 @@ func TestProcessMessage_ParallelCoordination(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	message := createTestMessage()
 	message.Recipients = []string{"recipient1@test.com", "recipient2@test.com"}
@@ -115,23 +121,12 @@ func TestProcessMessage_ParallelCoordination(t *testing.T) {
 
 	ctx := context.Background()
 	result, err := processor.ProcessMessage(ctx, message, options)
-
 	if err != nil {
-		t.Fatalf("ProcessMessage failed: %v", err)
+		t.Fatalf("Failed to process message: %v", err)
 	}
 
-	if result.Status != types.StatusDelivered {
-		t.Errorf("Expected status %s, got %s", types.StatusDelivered, result.Status)
-	}
-
-	if len(result.Recipients) != 2 {
-		t.Errorf("Expected 2 recipients, got %d", len(result.Recipients))
-	}
-
-	for _, recipient := range result.Recipients {
-		if recipient.Status != types.StatusDelivered {
-			t.Errorf("Expected recipient status %s, got %s", types.StatusDelivered, recipient.Status)
-		}
+	if result.Status != types.StatusQueued {
+		t.Errorf("Expected status queued, got %s", result.Status)
 	}
 }
 
@@ -140,6 +135,8 @@ func TestProcessMessage_SequentialCoordination(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	message := createTestMessage()
 	message.Recipients = []string{"recipient1@test.com", "recipient2@test.com"}
@@ -157,17 +154,12 @@ func TestProcessMessage_SequentialCoordination(t *testing.T) {
 
 	ctx := context.Background()
 	result, err := processor.ProcessMessage(ctx, message, options)
-
 	if err != nil {
-		t.Fatalf("ProcessMessage failed: %v", err)
+		t.Fatalf("Failed to process message: %v", err)
 	}
 
-	if result.Status != types.StatusDelivered {
-		t.Errorf("Expected status %s, got %s", types.StatusDelivered, result.Status)
-	}
-
-	if len(result.Recipients) != 2 {
-		t.Errorf("Expected 2 recipients, got %d", len(result.Recipients))
+	if result.Status != types.StatusQueued {
+		t.Errorf("Expected status queued, got %s", result.Status)
 	}
 }
 
@@ -176,8 +168,10 @@ func TestProcessMessage_SequentialCoordination_StopOnFailure(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
-	// Set first recipient to fail by setting a delivery error
+	// The delivery engine will fail when dispatched to, but the workflow manager handles this async.
 	deliveryEngine.SetDeliveryError(fmt.Errorf("test delivery failure"))
 
 	message := createTestMessage()
@@ -198,12 +192,12 @@ func TestProcessMessage_SequentialCoordination_StopOnFailure(t *testing.T) {
 	ctx := context.Background()
 	result, err := processor.ProcessMessage(ctx, message, options)
 
-	if err == nil {
-		t.Fatal("Expected error for sequential coordination with stop on failure")
+	if err != nil {
+		t.Fatalf("Expected no error when queued, got %v", err)
 	}
 
-	if result.Status != types.StatusFailed {
-		t.Errorf("Expected status %s, got %s", types.StatusFailed, result.Status)
+	if result.Status != types.StatusQueued {
+		t.Errorf("Expected status queued, got %s", result.Status)
 	}
 }
 
@@ -212,6 +206,8 @@ func TestProcessMessage_Idempotency(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -249,6 +245,8 @@ func TestGetMessage(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -298,6 +296,8 @@ func TestGetMessageStatus(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -351,6 +351,8 @@ func TestCleanupExpiredEntries(t *testing.T) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	// Add an expired entry
 	expiredResult := &ProcessingResult{
@@ -390,36 +392,13 @@ func TestCleanupExpiredEntries(t *testing.T) {
 	}
 }
 
-func TestEvaluateCondition(t *testing.T) {
-	discovery := NewMockDiscovery()
-	deliveryEngine := NewMockDeliveryEngine()
-	storage := NewMockStorage()
-	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
-
-	message := createTestMessage()
-
-	tests := []struct {
-		condition string
-		expected  bool
-	}{
-		{"always", true},
-		{"never", false},
-		{"unknown", true}, // Default to true for unknown conditions
-	}
-
-	for _, test := range tests {
-		result := processor.evaluateCondition(test.condition, message)
-		if result != test.expected {
-			t.Errorf("evaluateCondition(%s) = %v, expected %v", test.condition, result, test.expected)
-		}
-	}
-}
-
 func BenchmarkProcessMessage(b *testing.B) {
 	discovery := NewMockDiscovery()
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	message := createTestMessage()
 	options := ProcessingOptions{
@@ -446,6 +425,8 @@ func BenchmarkIdempotencyCheck(b *testing.B) {
 	deliveryEngine := NewMockDeliveryEngine()
 	storage := NewMockStorage()
 	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{}
+	processor.SetWorkflowManager(mockWorkflow)
 
 	// Pre-populate with some entries
 	for i := 0; i < 1000; i++ {

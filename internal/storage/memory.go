@@ -29,14 +29,16 @@ import (
 
 // MemoryStorage implements Storage using in-memory maps
 type MemoryStorage struct {
-	config      MemoryStorageConfig
-	messages    map[string]*types.Message
-	statuses    map[string]*types.MessageStatus
-	agents      map[string]*agents.LocalAgent
-	messagesMux sync.RWMutex
-	statusesMux sync.RWMutex
-	agentsMux   sync.RWMutex
-	createdAt   time.Time
+	config       MemoryStorageConfig
+	messages     map[string]*types.Message
+	statuses     map[string]*types.MessageStatus
+	agents       map[string]*agents.LocalAgent
+	messagesMux  sync.RWMutex
+	statusesMux  sync.RWMutex
+	workflows    map[string]*types.Workflow
+	workflowsMux sync.RWMutex
+	agentsMux    sync.RWMutex
+	createdAt    time.Time
 }
 
 // NewMemoryStorage creates a new in-memory storage instance
@@ -45,6 +47,7 @@ func NewMemoryStorage(config MemoryStorageConfig) *MemoryStorage {
 		config:    config,
 		messages:  make(map[string]*types.Message),
 		statuses:  make(map[string]*types.MessageStatus),
+		workflows: make(map[string]*types.Workflow),
 		agents:    make(map[string]*agents.LocalAgent),
 		createdAt: time.Now().UTC(),
 	}

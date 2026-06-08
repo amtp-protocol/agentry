@@ -586,7 +586,199 @@ test_invalid_scenarios() {
     echo ""
 }
 
+# Function to test workflow coordination across multiple gateways
+test_workflow_coordination() {
+    log_step "Testing multi-gateway workflow coordination..."
 
+    local sender="sales@company-a.local"
+    local recip1="payment-processor@company-b.local"
+    local recip2="integration@partner.local"
+    
+    local COMPOSE_FILE="$PROJECT_ROOT/docker/docker-compose.domain-simulation.yml"
+    local TEST_CLIENT="test-client"
+
+    log_info "Creating sequential workflow across domains from $sender to $recip1 and $recip2"
+    
+    # Send a sequential workflow message
+    local response=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s -X POST "http://company-a.local:8080/v1/messages" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "sender": "'"$sender"'",
+            "recipients": ["'"$recip1"'", "'"$recip2"'"],
+            "subject": "Process Order and Ship",
+            "schema": "agntcy:finance.payment.v1",
+            "coordination": {
+                "type": "sequential",
+                "sequence": ["'"$recip1"'", "'"$recip2"'"],
+                "stop_on_failure": true,
+                "timeout": 60
+            },
+            "payload": {"order_id": "ORD-12345", "amount": 100.0, "currency": "USD", "destination": "Beijing"}
+        }')
+        
+    local message_id=$(echo "$response" | jq -r '.message_id // empty')
+    
+    if [ -z "$message_id" ]; then
+        log_error "Failed to create cross-domain sequential workflow. Response: $response"
+        exit 1
+    fi
+    log_info "Sequential Workflow created. ID: $message_id"
+
+    # Wait for processing queues to flush
+    sleep 2
+    
+    local payment_key=$(cat /tmp/amtp-keys/payment-processor.key 2>/dev/null)
+    local integration_key=$(cat /tmp/amtp-keys/integration.key 2>/dev/null)
+
+    log_info "Verifying sequence logic before first agent responds..."
+    local inbox1=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://company-b.local:8080/v1/inbox/$recip1" -H "Authorization: Bearer $payment_key")
+    echo "Inbox 1 contains:"; echo "$inbox1"; local has_msg1=$(echo "$inbox1" | jq "[.messages[]? | select(.message_id == \"$message_id\")] | length")
+    if [ "$has_msg1" != "1" ]; then
+        log_error "First agent $recip1 did not receive the sequential message."
+        exit 1
+    fi
+    local inbox2=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://partner.local:8080/v1/inbox/$recip2" -H "Authorization: Bearer $integration_key")
+    local has_msg2=$(echo "$inbox2" | jq "[.messages[]? | select(.message_id == \"$message_id\")] | length")
+    if [ "$has_msg2" != "0" ]; then
+        log_error "Second agent $recip2 prematurely received the sequential message! (count: $has_msg2)"
+        exit 1
+    fi
+    log_info "Verified: $recip1 received msg, $recip2 did not."
+
+    # 1. First agent responses via its local domain
+    log_info "payment-processor responding to workflow..."
+    local reply1_response=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s -X POST "http://company-b.local:8080/v1/messages" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "sender": "'"$recip1"'",
+            "recipients": ["'"$sender"'"],
+            "subject": "Payment Processed",
+            "schema": "agntcy:finance.payment.v1",
+            "in_reply_to": "'"$message_id"'",
+            "response_type": "workflow_response",
+            "payload": {"payment": "PAY-123", "status": "completed"}
+        }')
+        
+    local reply1_status=$(echo "$reply1_response" | jq -r '.status // empty')
+    if [ "$reply1_status" != "queued" ] && [ "$reply1_status" != "delivered" ]; then
+        log_error "First workflow response failed (expected queued). Response: $reply1_response"
+        exit 1
+    fi
+    log_info "payment-processor response accepted."
+
+    sleep 2 
+
+    log_info "Verifying sequence logic after first agent responded..."
+    local inbox2_after=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://partner.local:8080/v1/inbox/$recip2" -H "Authorization: Bearer $integration_key")
+    local has_msg2_after=$(echo "$inbox2_after" | jq "[.messages[]? | select(.message_id == \"$message_id\")] | length")
+    if [ "$has_msg2_after" != "1" ]; then
+        log_error "Second agent $recip2 did not receive the sequential message after first agent finished. (Response: $inbox2_after)"
+        exit 1
+    fi
+    log_info "Verified: $recip2 received msg."
+
+    # 2. Second agent responds via its own remote domain
+    log_info "integration responding..."
+    local reply2_response=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s -X POST "http://partner.local:8080/v1/messages" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "sender": "'"$recip2"'",
+            "recipients": ["'"$sender"'"],
+            "subject": "Order Shipped",
+            "schema": "agntcy:commerce.order.v1",
+            "in_reply_to": "'"$message_id"'",
+            "response_type": "workflow_response",
+            "payload": {"tracking_number": "TRK-987654", "status": "shipped"}
+        }')
+        
+    local reply2_status=$(echo "$reply2_response" | jq -r '.status // empty')
+    if [ "$reply2_status" != "queued" ] && [ "$reply2_status" != "delivered" ]; then
+        log_error "Second workflow response failed (expected queued). Response: $reply2_response"
+        exit 1
+    fi
+    log_info "integration response accepted."
+
+    log_info "Creating conditional workflow: approve triggers $recip2, else triggers accounting@company-b.local"
+    # Send a conditional workflow message
+    local cond_response=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s -X POST "http://company-a.local:8080/v1/messages" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "sender": "'"$sender"'",
+            "recipients": ["'"$recip1"'"],
+            "subject": "Approve Contract",
+            "schema": "agntcy:finance.payment.v1",
+            "coordination": {
+                "type": "conditional",
+                "conditions": [
+                    {
+                        "if": "status == '\''approved'\''",
+                        "then": ["'"$recip2"'"],
+                        "else": ["accounting@company-b.local"]
+                    }
+                ],
+                "stop_on_failure": true,
+                "timeout": 60
+            },
+            "payload": {"payment": "PAY-COND-1", "amount": 5000.0, "currency": "USD"}
+        }')
+        
+    local cond_message_id=$(echo "$cond_response" | jq -r '.message_id // empty')
+    
+    if [ -z "$cond_message_id" ]; then
+        log_error "Failed to create conditional workflow. Response: $cond_response"
+        exit 1
+    fi
+    log_info "Conditional Workflow created. ID: $cond_message_id"
+
+    sleep 2
+
+    # Agent 1 (payment-processor) responds with "approved"
+    log_info "payment-processor responding with status=approved..."
+    local cond_reply1_response=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s -X POST "http://company-b.local:8080/v1/messages" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "sender": "'"$recip1"'",
+            "recipients": ["'"$sender"'"],
+            "subject": "Contract Approved",
+            "schema": "agntcy:finance.payment.v1",
+            "in_reply_to": "'"$cond_message_id"'",
+            "response_type": "workflow_response",
+            "payload": {"payment": "PAY-COND-1", "status": "approved"}
+        }')
+    
+    local cond_reply1_status=$(echo "$cond_reply1_response" | jq -r '.status // empty')
+    if [ "$cond_reply1_status" != "queued" ] && [ "$cond_reply1_status" != "delivered" ]; then
+        log_error "First conditional workflow response failed. Response: $cond_reply1_response"
+        exit 1
+    fi
+    log_info "payment-processor conditionally approved."
+
+    sleep 2
+
+    # Check inbox to ensure 'integration' (recip2) got the message because it matched 'Then' branch
+    log_info "Verifying conditional dispatch..."
+    local cond_inbox_then=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://partner.local:8080/v1/inbox/$recip2" -H "Authorization: Bearer $integration_key")
+    local cond_has_msg_then=$(echo "$cond_inbox_then" | jq "[.messages[]? | select(.message_id == \"$cond_message_id\")] | length")
+    
+    if [ "$cond_has_msg_then" != "1" ]; then
+        log_error "Conditional targets ('Then' branch - $recip2) did NOT receive the message! Inbox: $cond_inbox_then"
+        exit 1
+    fi
+
+    # Check accounting inbox, should NOT have the message ('Else' branch)
+    local accounting_key=$(cat /tmp/amtp-keys/accounting.key 2>/dev/null)
+    local cond_inbox_else=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://company-b.local:8080/v1/inbox/accounting@company-b.local" -H "Authorization: Bearer $accounting_key")
+    local cond_has_msg_else=$(echo "$cond_inbox_else" | jq "[.messages[]? | select(.message_id == \"$cond_message_id\")] | length")
+    
+    if [ "$cond_has_msg_else" != "0" ]; then
+        log_error "Conditional skipped targets ('Else' branch - accounting) prematurely received the message!"
+        exit 1
+    fi
+
+    log_info "Verified conditional logic: 'Then' triggered, 'Else' skipped."
+
+    log_info "Workflow Coordination tests completed."
+}
 # Main execution
 main() {
     echo "🚀 AMTP Gateway Comprehensive Simulation Test"
@@ -616,6 +808,7 @@ main() {
             test_inbox_retrieval
             test_message_acknowledgment
             test_invalid_scenarios
+            test_workflow_coordination
             log_success "🎉 Comprehensive simulation test completed!"
             log_info "💡 Services are still running. Use '$0 stop' to clean up."
             log_info "💡 Use '$0 logs' to view service logs."
@@ -638,6 +831,7 @@ main() {
         "test-schemas")
             test_schema_validation
             test_invalid_scenarios
+            test_workflow_coordination
             ;;
         "test-discovery")
             test_gateway_capabilities

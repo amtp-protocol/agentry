@@ -92,6 +92,16 @@ func NewLogger(config config.LoggingConfig) *Logger {
 	}
 }
 
+// NewNoopLogger creates a logger that discards all output.
+// Useful for tests or when no logger is configured.
+func NewNoopLogger() *Logger {
+	return &Logger{
+		writer: io.Discard,
+		level:  LevelDebug,
+		fields: make(map[string]interface{}),
+	}
+}
+
 // WithComponent creates a new logger with a component name
 func (l *Logger) WithComponent(component string) *Logger {
 	return &Logger{

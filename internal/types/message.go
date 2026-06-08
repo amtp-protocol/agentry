@@ -116,14 +116,19 @@ const (
 
 // SendMessageRequest represents the API request to send a message
 type SendMessageRequest struct {
-	Sender       string                 `json:"sender" validate:"required,email"`
-	Recipients   []string               `json:"recipients" validate:"required,min=1,dive,email"`
-	Subject      string                 `json:"subject,omitempty"`
-	Schema       string                 `json:"schema,omitempty"`
-	Coordination *CoordinationConfig    `json:"coordination,omitempty"`
-	Headers      map[string]interface{} `json:"headers,omitempty"`
-	Payload      json.RawMessage        `json:"payload,omitempty"`
-	Attachments  []Attachment           `json:"attachments,omitempty"`
+	MessageID      string                 `json:"message_id,omitempty" validate:"omitempty,uuidv7"`
+	IdempotencyKey string                 `json:"idempotency_key,omitempty" validate:"omitempty,max=255"`
+	Timestamp      string                 `json:"timestamp,omitempty" validate:"omitempty,datetime"`
+	Sender         string                 `json:"sender" validate:"required,email"`
+	Recipients     []string               `json:"recipients" validate:"required,min=1,dive,email"`
+	Subject        string                 `json:"subject,omitempty"`
+	Schema         string                 `json:"schema,omitempty"`
+	Coordination   *CoordinationConfig    `json:"coordination,omitempty"`
+	Headers        map[string]interface{} `json:"headers,omitempty"`
+	ResponseType   string                 `json:"response_type,omitempty"`
+	InReplyTo      string                 `json:"in_reply_to,omitempty"`
+	Payload        json.RawMessage        `json:"payload,omitempty"`
+	Attachments    []Attachment           `json:"attachments,omitempty"`
 }
 
 // SendMessageResponse represents the API response for sending a message
@@ -208,4 +213,72 @@ func (m *Message) Size() int64 {
 		return 0
 	}
 	return int64(len(data))
+}
+func (m *Message) Clone() *Message {
+	if m == nil {
+		return nil
+	}
+	clone := *m
+
+	if m.Recipients != nil {
+		clone.Recipients = make([]string, len(m.Recipients))
+		copy(clone.Recipients, m.Recipients)
+	}
+
+	if m.Coordination != nil {
+		coord := *m.Coordination
+
+		if m.Coordination.RequiredResponses != nil {
+			coord.RequiredResponses = make([]string, len(m.Coordination.RequiredResponses))
+			copy(coord.RequiredResponses, m.Coordination.RequiredResponses)
+		}
+		if m.Coordination.OptionalResponses != nil {
+			coord.OptionalResponses = make([]string, len(m.Coordination.OptionalResponses))
+			copy(coord.OptionalResponses, m.Coordination.OptionalResponses)
+		}
+		if m.Coordination.Sequence != nil {
+			coord.Sequence = make([]string, len(m.Coordination.Sequence))
+			copy(coord.Sequence, m.Coordination.Sequence)
+		}
+		if m.Coordination.Conditions != nil {
+			coord.Conditions = make([]ConditionalRule, len(m.Coordination.Conditions))
+			for i, cond := range m.Coordination.Conditions {
+				c := cond
+				if cond.Then != nil {
+					c.Then = make([]string, len(cond.Then))
+					copy(c.Then, cond.Then)
+				}
+				if cond.Else != nil {
+					c.Else = make([]string, len(cond.Else))
+					copy(c.Else, cond.Else)
+				}
+				coord.Conditions[i] = c
+			}
+		}
+		clone.Coordination = &coord
+	}
+
+	if m.Headers != nil {
+		clone.Headers = make(map[string]interface{}, len(m.Headers))
+		for k, v := range m.Headers {
+			clone.Headers[k] = v
+		}
+	}
+
+	if m.Payload != nil {
+		clone.Payload = make([]byte, len(m.Payload))
+		copy(clone.Payload, m.Payload)
+	}
+
+	if m.Attachments != nil {
+		clone.Attachments = make([]Attachment, len(m.Attachments))
+		copy(clone.Attachments, m.Attachments)
+	}
+
+	if m.Signature != nil {
+		sig := *m.Signature
+		clone.Signature = &sig
+	}
+
+	return &clone
 }

@@ -176,6 +176,78 @@ test_schema_lifecycle() {
     log_success "✓ Deletion verified"
 }
 
+# Function to test workflow coordination lifecycle
+test_workflow_lifecycle() {
+    log_step "Testing workflow lifecycle with database storage enabled..."
+
+    domain="agentry:8080"
+
+    # Send a message that initiates a workflow
+    log_info "Creating workflow (parallel coordination)..."
+    local response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -X POST "http://$domain/v1/messages" \
+            -H "Content-Type: application/json" \
+            -d '{
+                "sender": "workflow-test@localhost",
+                "recipients": ["agent1@localhost", "agent2@localhost"],
+                "subject": "Parallel Test",
+                "coordination": {
+                    "type": "parallel",
+                    "timeout": 30
+                },
+                "payload": {"task": "do_something"}
+            }')
+
+    local message_id=$(echo "$response" | jq -r '.message_id // empty')
+
+    if [ -z "$message_id" ]; then
+        log_error "Failed to create workflow message. Response: $response"
+        exit 1
+    fi
+    log_info "Message accepted. ID: $message_id"
+
+    # Simulate agent 1 responding
+    log_info "Simulating agent 1 response..."
+    local reply1_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -X POST "http://$domain/v1/messages" \
+            -H "Content-Type: application/json" \
+            -d '{
+                "sender": "agent1@localhost",
+                "recipients": ["workflow-test@localhost"],
+                "subject": "Re: Parallel Test",
+                "response_type": "workflow_response",
+                "in_reply_to": "'"$message_id"'",
+                "payload": {"status": "done_agent1"}
+            }')
+
+    local reply1_status=$(echo "$reply1_response" | jq -r '.status // empty')
+    if [ "$reply1_status" != "queued" ] && [ "$reply1_status" != "delivered" ]; then
+        log_error "Failed to process workflow response 1. Response: $reply1_response"
+        exit 1
+    fi
+    log_info "Workflow response 1 accepted."
+
+    # Simulate agent 2 responding
+    log_info "Simulating agent 2 response..."
+    local reply2_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -X POST "http://$domain/v1/messages" \
+            -H "Content-Type: application/json" \
+            -d '{
+                "sender": "agent2@localhost",
+                "recipients": ["workflow-test@localhost"],
+                "subject": "Re: Parallel Test",
+                "response_type": "workflow_response",
+                "in_reply_to": "'"$message_id"'",
+                "payload": {"status": "done_agent2"}
+            }')
+
+    local reply2_status=$(echo "$reply2_response" | jq -r '.status // empty')
+    if [ "$reply2_status" != "queued" ] && [ "$reply2_status" != "delivered" ]; then
+        log_error "Failed to process workflow response 2. Response: $reply2_response"
+        exit 1
+    fi
+    log_info "Workflow response 2 accepted."
+
+    log_step "Workflow lifecycle tests passed."
+}
+
 # Main execution
 main() {
     echo "🚀 AMTP Gateway Database Storage Test"
@@ -194,6 +266,7 @@ main() {
             test_connectivity "$compose_file" "agentry:8080"
             test_message_lifecycle
             test_schema_lifecycle
+            test_workflow_lifecycle
             log_success "🎉 Database storage test completed!"
             log_info "💡 Services are still running. Use '$0 stop' to clean up."
             log_info "💡 Use '$0 logs' to view service logs."
@@ -216,6 +289,9 @@ main() {
             ;;
         "test-schema-lifecycle")
             test_schema_lifecycle
+            ;;
+        "test-workflow-lifecycle")
+            test_workflow_lifecycle
             ;;
         *)
             echo "Usage: $0 {start|stop|logs|status|test-connectivity|test-message-lifecycle|test-schema-lifecycle}"

@@ -35,6 +35,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/validation"
+	"github.com/amtp-protocol/agentry/internal/workflow"
 )
 
 // AgentManagerAdapter adapts agents.Registry to validation.AgentManager
@@ -70,6 +71,7 @@ type Server struct {
 	schemaManager *schema.Manager
 	logger        *logging.Logger
 	metrics       metrics.MetricsProvider
+	workflow      workflow.Manager
 }
 
 // New creates a new AMTP server
@@ -163,6 +165,9 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Create message processor
 	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, storage)
+	// Create workflow manager
+	workflowManager := workflow.NewManager(storage, processor, logger)
+	processor.SetWorkflowManager(workflowManager)
 
 	// Set Gin mode based on environment
 	if cfg.Logging.Level == "debug" {
@@ -186,6 +191,7 @@ func New(cfg *config.Config) (*Server, error) {
 		schemaManager: schemaManager,
 		logger:        logger,
 		metrics:       metricsInstance,
+		workflow:      workflowManager,
 	}
 
 	// Setup middleware
@@ -217,6 +223,11 @@ func New(cfg *config.Config) (*Server, error) {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
+	// Start workflow manager sweeper
+	if s.workflow != nil {
+		s.workflow.Start(context.Background())
+	}
+
 	if s.config.TLS.Enabled {
 		return s.httpServer.ListenAndServeTLS(s.config.TLS.CertFile, s.config.TLS.KeyFile)
 	}
@@ -225,6 +236,11 @@ func (s *Server) Start() error {
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Stop workflow manager sweeper
+	if s.workflow != nil {
+		s.workflow.Stop()
+	}
+
 	return s.httpServer.Shutdown(ctx)
 }
 

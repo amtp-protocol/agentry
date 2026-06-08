@@ -24,6 +24,7 @@ import (
 
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
+	"github.com/amtp-protocol/agentry/internal/workflow"
 )
 
 // MessageProcessor handles message processing and routing
@@ -31,6 +32,7 @@ type MessageProcessor struct {
 	discovery      DiscoveryService
 	deliveryEngine DeliveryService
 	storage        storage.Storage
+	workflow       workflow.Manager
 	idempotencyMap map[string]*ProcessingResult
 	idempotencyMux sync.RWMutex
 }
@@ -225,238 +227,6 @@ func (mp *MessageProcessor) processImmediatePath(ctx context.Context, message *t
 	return result, nil
 }
 
-// processWithCoordination handles coordination-based message processing
-func (mp *MessageProcessor) processWithCoordination(ctx context.Context, message *types.Message, result *ProcessingResult, options ProcessingOptions) (*ProcessingResult, error) {
-	coordination := message.Coordination
-
-	switch coordination.Type {
-	case "parallel":
-		return mp.processParallelCoordination(ctx, message, result, options)
-	case "sequential":
-		return mp.processSequentialCoordination(ctx, message, result, options)
-	case "conditional":
-		return mp.processConditionalCoordination(ctx, message, result, options)
-	default:
-		result.Status = types.StatusFailed
-		result.ErrorCode = "UNSUPPORTED_COORDINATION"
-		result.ErrorMessage = fmt.Sprintf("unsupported coordination type: %s", coordination.Type)
-
-		// Update status in storage
-		// #nosec G104 -- ignore error
-		mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
-			status.Status = result.Status
-			status.Recipients = result.Recipients
-			status.UpdatedAt = time.Now().UTC()
-			return nil
-		})
-
-		return result, fmt.Errorf("unsupported coordination type: %s", coordination.Type)
-	}
-}
-
-// processParallelCoordination handles parallel coordination
-func (mp *MessageProcessor) processParallelCoordination(ctx context.Context, message *types.Message, result *ProcessingResult, options ProcessingOptions) (*ProcessingResult, error) {
-	coordination := message.Coordination
-
-	// Set coordination timeout
-	timeout := time.Duration(coordination.Timeout) * time.Second
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
-	// Process all recipients in parallel
-	return mp.processImmediatePath(ctx, message, result, options)
-}
-
-// processSequentialCoordination handles sequential coordination
-func (mp *MessageProcessor) processSequentialCoordination(ctx context.Context, message *types.Message, result *ProcessingResult, options ProcessingOptions) (*ProcessingResult, error) {
-	coordination := message.Coordination
-
-	// Process recipients in sequence order
-	for _, recipient := range coordination.Sequence {
-		recipientStatus := types.RecipientStatus{
-			Address:   recipient,
-			Status:    types.StatusDelivering,
-			Timestamp: time.Now().UTC(),
-			Attempts:  1,
-		}
-
-		// Attempt delivery
-		deliveryResult, err := mp.deliveryEngine.DeliverMessage(ctx, message, recipient)
-		if err != nil {
-			recipientStatus.Status = types.StatusFailed
-			recipientStatus.ErrorCode = "DELIVERY_FAILED"
-			recipientStatus.ErrorMessage = err.Error()
-
-			// Stop on failure if configured
-			if coordination.StopOnFailure {
-				// Update result and return
-				for i, rs := range result.Recipients {
-					if rs.Address == recipient {
-						result.Recipients[i] = recipientStatus
-						break
-					}
-				}
-				result.Status = types.StatusFailed
-
-				// Update status in storage
-				// #nosec G104 -- ignore error
-				mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
-					status.Status = result.Status
-					status.Recipients = result.Recipients
-					status.UpdatedAt = time.Now().UTC()
-					return nil
-				})
-
-				return result, fmt.Errorf("sequential delivery failed for %s: %w", recipient, err)
-			}
-		} else {
-			recipientStatus.Status = deliveryResult.Status
-			if deliveryResult.ErrorCode != "" {
-				recipientStatus.ErrorCode = deliveryResult.ErrorCode
-				recipientStatus.ErrorMessage = deliveryResult.ErrorMessage
-			}
-		}
-
-		recipientStatus.Timestamp = time.Now().UTC()
-
-		// Update recipient status in result
-		for i, rs := range result.Recipients {
-			if rs.Address == recipient {
-				result.Recipients[i] = recipientStatus
-				break
-			}
-		}
-	}
-
-	// Determine overall status
-	allDelivered := true
-	anyFailed := false
-	for _, rs := range result.Recipients {
-		if rs.Status != types.StatusDelivered {
-			allDelivered = false
-		}
-		if rs.Status == types.StatusFailed {
-			anyFailed = true
-		}
-	}
-
-	if allDelivered {
-		result.Status = types.StatusDelivered
-	} else if anyFailed {
-		result.Status = types.StatusFailed
-	} else {
-		result.Status = types.StatusDelivering
-	}
-
-	// Update status in storage
-	err := mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
-		status.Status = result.Status
-		status.Recipients = result.Recipients
-		status.UpdatedAt = time.Now().UTC()
-		if result.Status == types.StatusDelivered {
-			now := time.Now().UTC()
-			status.DeliveredAt = &now
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to update status: %w", err)
-	}
-
-	return result, nil
-}
-
-// processConditionalCoordination handles conditional coordination
-func (mp *MessageProcessor) processConditionalCoordination(ctx context.Context, message *types.Message, result *ProcessingResult, options ProcessingOptions) (*ProcessingResult, error) {
-	// For now, implement basic conditional logic
-	// This would be expanded based on specific conditional requirements
-	coordination := message.Coordination
-
-	for _, condition := range coordination.Conditions {
-		// Evaluate condition (simplified for now)
-		// In a real implementation, this would parse and evaluate the condition expression
-		shouldExecute := mp.evaluateCondition(condition.If, message)
-
-		var recipients []string
-		if shouldExecute {
-			recipients = condition.Then
-		} else {
-			recipients = condition.Else
-		}
-
-		// Process selected recipients
-		for _, recipient := range recipients {
-			recipientStatus := types.RecipientStatus{
-				Address:   recipient,
-				Status:    types.StatusDelivering,
-				Timestamp: time.Now().UTC(),
-				Attempts:  1,
-			}
-
-			deliveryResult, err := mp.deliveryEngine.DeliverMessage(ctx, message, recipient)
-			if err != nil {
-				recipientStatus.Status = types.StatusFailed
-				recipientStatus.ErrorCode = "DELIVERY_FAILED"
-				recipientStatus.ErrorMessage = err.Error()
-			} else {
-				recipientStatus.Status = deliveryResult.Status
-				if deliveryResult.ErrorCode != "" {
-					recipientStatus.ErrorCode = deliveryResult.ErrorCode
-					recipientStatus.ErrorMessage = deliveryResult.ErrorMessage
-				}
-			}
-
-			recipientStatus.Timestamp = time.Now().UTC()
-
-			// Update recipient status in result
-			for i, rs := range result.Recipients {
-				if rs.Address == recipient {
-					result.Recipients[i] = recipientStatus
-					break
-				}
-			}
-		}
-	}
-
-	// Determine overall status
-	result.Status = types.StatusDelivered
-
-	// Update status in storage
-	err := mp.storage.UpdateStatus(ctx, message.MessageID, func(status *types.MessageStatus) error {
-		status.Status = result.Status
-		status.Recipients = result.Recipients
-		status.UpdatedAt = time.Now().UTC()
-		if result.Status == types.StatusDelivered {
-			now := time.Now().UTC()
-			status.DeliveredAt = &now
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to update status: %w", err)
-	}
-
-	return result, nil
-}
-
-// evaluateCondition evaluates a conditional expression (simplified)
-func (mp *MessageProcessor) evaluateCondition(condition string, message *types.Message) bool {
-	// Simplified condition evaluation
-	// In a real implementation, this would parse complex expressions
-	switch condition {
-	case "always":
-		return true
-	case "never":
-		return false
-	default:
-		// Default to true for unknown conditions
-		return true
-	}
-}
-
 // checkIdempotency checks if a message has already been processed
 func (mp *MessageProcessor) checkIdempotency(idempotencyKey string) *ProcessingResult {
 	mp.idempotencyMux.RLock()
@@ -500,4 +270,9 @@ func (mp *MessageProcessor) CleanupExpiredEntries() {
 			delete(mp.idempotencyMap, key)
 		}
 	}
+}
+
+// SetWorkflowManager injects the workflow manager
+func (mp *MessageProcessor) SetWorkflowManager(wm workflow.Manager) {
+	mp.workflow = wm
 }

@@ -18,10 +18,21 @@ package storage
 
 import (
 	"context"
+	"errors"
 
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
+
+// ErrVersionConflict is returned by atomic workflow update methods when the
+// expected version does not match the stored version, indicating a concurrent
+// modification. The caller should re-read the workflow and retry.
+var ErrVersionConflict = errors.New("version conflict: workflow was modified concurrently")
+
+// ErrWorkflowNotFound is returned when a workflow does not exist in storage.
+// In a multi-gateway deployment, callers use this sentinel to distinguish
+// "this replica does not own the workflow" (benign) from other failures.
+var ErrWorkflowNotFound = errors.New("workflow not found")
 
 // Storage defines the interface for message storage operations
 type Storage interface {
@@ -38,6 +49,18 @@ type Storage interface {
 	GetStatus(ctx context.Context, messageID string) (*types.MessageStatus, error)
 	UpdateStatus(ctx context.Context, messageID string, updater StatusUpdater) error
 	DeleteStatus(ctx context.Context, messageID string) error
+
+	// Workflow operations
+	StoreWorkflow(ctx context.Context, state *types.Workflow) error
+	GetWorkflow(ctx context.Context, workflowID string) (*types.Workflow, error)
+	UpdateWorkflowStatus(ctx context.Context, workflowID string, status types.WorkflowStatus) error
+	UpdateWorkflowParticipant(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte) error
+	ListTimedOutWorkflows(ctx context.Context) ([]*types.Workflow, error)
+
+	// Optimistic-concurrency workflow operations.
+	// These fail with ErrVersionConflict when the expected version does not match.
+	UpdateWorkflowParticipantAtomic(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte, expectedVersion int) error
+	UpdateWorkflowStatusAtomic(ctx context.Context, workflowID string, status types.WorkflowStatus, expectedVersion int) error
 
 	// Inbox operations (view-based queries)
 	GetInboxMessages(ctx context.Context, recipient string) ([]*types.Message, error)

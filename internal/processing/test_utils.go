@@ -27,6 +27,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/discovery"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
+	"github.com/amtp-protocol/agentry/internal/workflow"
 )
 
 // MockDeliveryEngine for testing
@@ -366,4 +367,69 @@ func createTestMessage() *types.Message {
 		Subject:        "Test Message",
 		Payload:        json.RawMessage(`{"message": "Hello, World!"}`),
 	}
+}
+
+// MockWorkflowManager is a mock implementation of workflow.Manager
+type MockWorkflowManager struct {
+	InitializeFunc      func(ctx context.Context, msg *types.Message) (*types.Workflow, error)
+	ProcessResponseFunc func(ctx context.Context, workflowID string, replyMsg *types.Message) error
+	StartFunc           func(ctx context.Context)
+	StopFunc            func() error
+}
+
+func (m *MockWorkflowManager) Initialize(ctx context.Context, msg *types.Message) (*types.Workflow, error) {
+	if m.InitializeFunc != nil {
+		return m.InitializeFunc(ctx, msg)
+	}
+	return &types.Workflow{}, nil
+}
+
+func (m *MockWorkflowManager) ProcessResponse(ctx context.Context, workflowID string, replyMsg *types.Message) error {
+	if m.ProcessResponseFunc != nil {
+		return m.ProcessResponseFunc(ctx, workflowID, replyMsg)
+	}
+	return nil
+}
+
+func (m *MockWorkflowManager) Start(ctx context.Context) {
+	if m.StartFunc != nil {
+		m.StartFunc(ctx)
+	}
+}
+
+func (m *MockWorkflowManager) Stop() error {
+	if m.StopFunc != nil {
+		return m.StopFunc()
+	}
+	return nil
+}
+
+var _ workflow.Manager = (*MockWorkflowManager)(nil)
+
+func (m *MockStorage) StoreWorkflow(ctx context.Context, state *types.Workflow) error {
+	return nil
+}
+
+func (m *MockStorage) GetWorkflow(ctx context.Context, workflowID string) (*types.Workflow, error) {
+	return &types.Workflow{WorkflowID: workflowID}, nil
+}
+
+func (m *MockStorage) UpdateWorkflowStatus(ctx context.Context, workflowID string, status types.WorkflowStatus) error {
+	return nil
+}
+
+func (m *MockStorage) UpdateWorkflowParticipant(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte) error {
+	return nil
+}
+
+func (m *MockStorage) UpdateWorkflowParticipantAtomic(ctx context.Context, workflowID string, address string, status types.ParticipantStatus, responsePayload []byte, expectedVersion int) error {
+	return nil
+}
+
+func (m *MockStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID string, status types.WorkflowStatus, expectedVersion int) error {
+	return nil
+}
+
+func (m *MockStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Workflow, error) {
+	return nil, nil
 }
