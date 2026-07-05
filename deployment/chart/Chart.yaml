@@ -1,0 +1,20 @@
+apiVersion: v2
+name: agentry
+description: Agentry - AMTP Gateway for multi-agent workflow orchestration and organizational memory
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - amtp
+  - agent
+  - gateway
+  - multi-agent
+  - workflow
+  - orchestration
+home: https://github.com/amtp-protocol/agentry
+sources:
+  - https://github.com/amtp-protocol/agentry
+maintainers:
+  - name: Cong Wang
+    email: xiyou.wangcong@gmail.com
+icon: https://amtp-protocol.org/amtp.png

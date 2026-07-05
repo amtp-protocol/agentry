@@ -1,0 +1,148 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agentry.fullname" . }}
+  labels:
+    {{- include "agentry.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "agentry.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.tls.enabled (not .Values.tls.existingSecret) }}
+        checksum/tls-secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "agentry.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "agentry.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/agentry/config/config.yaml"
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          {{- with .Values.healthCheck }}
+          {{- if .livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .livenessProbe.failureThreshold }}
+          {{- end }}
+          {{- if .readinessProbe.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .readinessProbe.failureThreshold }}
+          {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- $dbEnv := and (eq .Values.storage.type "database") (or .Values.storage.database.connectionStringExistingSecret .Values.storage.database.connectionString) }}
+          {{- $saltEnv := or .Values.auth.apiKeySaltExistingSecret .Values.auth.apiKeySalt }}
+          {{- if or $dbEnv $saltEnv .Values.extraEnv }}
+          env:
+            {{- if $dbEnv }}
+            - name: AMTP_STORAGE_DATABASE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentry.dbSecretName" . }}
+                  key: {{ .Values.storage.database.connectionStringSecretKey }}
+            {{- end }}
+            {{- if $saltEnv }}
+            - name: AMTP_AUTH_API_KEY_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentry.saltSecretName" . }}
+                  key: {{ .Values.auth.apiKeySaltSecretKey }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/agentry/config
+              readOnly: true
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/agentry/tls
+              readOnly: true
+            {{- end }}
+            {{- if include "agentry.adminKeyEnabled" . }}
+            - name: admin-key
+              mountPath: /etc/agentry/admin
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "agentry.fullname" . }}-config
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "agentry.tlsSecretName" . }}
+        {{- end }}
+        {{- if include "agentry.adminKeyEnabled" . }}
+        - name: admin-key
+          secret:
+            secretName: {{ include "agentry.adminKeySecretName" . }}
+            items:
+              - key: {{ .Values.auth.adminKeySecretKey }}
+                path: admin.key
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
