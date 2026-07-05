@@ -1,6 +1,17 @@
 # Build stage
 FROM golang:1.23-alpine AS builder
 
+# Build arguments for mirror sites (passed via --build-arg)
+# e.g. --build-arg APK_MIRROR=mirrors.aliyun.com
+#      --build-arg GOPROXY=https://goproxy.cn,direct
+ARG APK_MIRROR=""
+ARG GOPROXY=""
+
+# Use APK mirror if specified (affects only this build)
+RUN if [ -n "$APK_MIRROR" ]; then \
+        sed -i "s@dl-cdn.alpinelinux.org@${APK_MIRROR}@g" /etc/apk/repositories; \
+    fi
+
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
 
@@ -9,6 +20,11 @@ WORKDIR /app
 
 # Copy go mod files
 COPY go.mod go.sum ./
+
+# Set Go proxy if specified
+RUN if [ -n "$GOPROXY" ]; then \
+        go env -w GOPROXY="$GOPROXY"; \
+    fi
 
 # Download dependencies
 RUN go mod download
