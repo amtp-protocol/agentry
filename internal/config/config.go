@@ -18,7 +18,6 @@ package config
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -116,17 +115,12 @@ type MetricsConfig struct {
 // Load loads configuration from YAML file and environment variables
 // Command line flags take precedence over environment variables
 // Environment variables take precedence over YAML file values
-func Load() (*Config, error) {
-	// Parse command line flags
-	configFile := flag.String("config", "", "Path to configuration file (YAML)")
-	adminKeyFile := flag.String("admin-key-file", "", "Path to admin API key file")
-	flag.Parse()
-
+func Load(configFile, adminKeyFile string) (*Config, error) {
 	// Start with default configuration
 	cfg := getDefaultConfig()
 
-	// Load from YAML file if specified or if default files exist
-	if err := loadFromYAML(cfg, *configFile); err != nil {
+	// Load from YAML file if specified
+	if err := loadFromYAML(cfg, configFile); err != nil {
 		return nil, fmt.Errorf("failed to load YAML config: %w", err)
 	}
 
@@ -134,8 +128,8 @@ func Load() (*Config, error) {
 	loadFromEnv(cfg)
 
 	// Override with command line flags
-	if *adminKeyFile != "" {
-		cfg.Auth.AdminKeyFile = *adminKeyFile
+	if adminKeyFile != "" {
+		cfg.Auth.AdminKeyFile = adminKeyFile
 	}
 
 	// Validate configuration
@@ -286,6 +280,9 @@ func loadFromEnv(cfg *Config) {
 	}
 	if val := getEnv("AMTP_AUTH_API_KEY_HEADER", ""); val != "" {
 		cfg.Auth.APIKeyHeader = val
+	}
+	if val := getEnv("AMTP_AUTH_API_KEY_SALT", ""); val != "" {
+		cfg.Auth.APIKeySalt = val
 	}
 	if val := getEnv("AMTP_ADMIN_KEY_FILE", ""); val != "" {
 		cfg.Auth.AdminKeyFile = val

@@ -60,6 +60,8 @@ func runHealthCheck(addr string) error {
 func main() {
 	healthCheck := flag.Bool("health-check", false, "Run health check")
 	showVersion := flag.Bool("version", false, "Print version and exit")
+	configFile := flag.String("config", "", "Path to configuration file (YAML)")
+	adminKeyFile := flag.String("admin-key-file", "", "Path to admin API key file")
 	flag.Parse()
 
 	if *showVersion {
@@ -68,7 +70,7 @@ func main() {
 	}
 
 	// Load configuration
-	cfg, err := config.Load()
+	cfg, err := config.Load(*configFile, *adminKeyFile)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
