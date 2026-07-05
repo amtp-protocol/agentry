@@ -1,0 +1,50 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your AMTP Gateway has been deployed to namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+You can access the gateway at:
+{{- range .Values.ingress.hosts }}
+  https://{{ .host }}
+{{- end }}
+{{- else if eq .Values.service.type "LoadBalancer" }}
+To get the external IP:
+  kubectl get svc {{ include "agentry.fullname" . }} -n {{ .Release.Namespace }}
+
+{{- else if eq .Values.service.type "NodePort" }}
+To access the gateway:
+  NODE_PORT=$(kubectl get svc {{ include "agentry.fullname" . }} -n {{ .Release.Namespace }} -o jsonpath='{.spec.ports[0].nodePort}')
+  NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+  echo "http://$NODE_IP:$NODE_PORT"
+
+{{- else }}
+To access the gateway from within the cluster:
+  {{ include "agentry.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+To port-forward:
+  kubectl port-forward svc/{{ include "agentry.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.targetPort }} -n {{ .Release.Namespace }}
+{{- end }}
+
+{{- if .Values.tls.enabled }}
+⚠️  TLS is enabled. Make sure your TLS certificate is properly configured.
+{{- if not .Values.tls.existingSecret }}
+A self-signed TLS secret has been created. For production, replace it with a proper certificate:
+  kubectl create secret tls {{ include "agentry.tlsSecretName" . }} \
+    --cert=path/to/tls.crt \
+    --key=path/to/tls.key \
+    -n {{ .Release.Namespace }} \
+    --dry-run=client -o yaml | kubectl apply -f -
+{{- end }}
+{{- end }}
+
+Check deployment status:
+  kubectl rollout status deployment/{{ include "agentry.fullname" . }} -n {{ .Release.Namespace }}
+
+View logs:
+  kubectl logs -f deployment/{{ include "agentry.fullname" . }} -n {{ .Release.Namespace }}
+
+{{- if eq .Values.storage.type "database" }}
+⚠️  Database storage is configured. Ensure your database is reachable from the cluster.
+{{- end }}
+
+For more information, visit: https://github.com/amtp-protocol/agentry

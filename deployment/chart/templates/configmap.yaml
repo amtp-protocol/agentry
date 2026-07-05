@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agentry.fullname" . }}-config
+  labels:
+    {{- include "agentry.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    version: "0.1.0"
+    server:
+      address: {{ .Values.server.address | quote }}
+      domain: {{ .Values.server.domain | quote }}
+      read_timeout: {{ .Values.server.readTimeout | quote }}
+      write_timeout: {{ .Values.server.writeTimeout | quote }}
+      idle_timeout: {{ .Values.server.idleTimeout | quote }}
+    tls:
+      enabled: {{ .Values.tls.enabled }}
+      cert_file: {{ .Values.tls.certFile | quote }}
+      key_file: {{ .Values.tls.keyFile | quote }}
+      min_version: {{ .Values.tls.minVersion | quote }}
+    dns:
+      cache_ttl: {{ .Values.dns.cacheTTL | quote }}
+      timeout: {{ .Values.dns.timeout | quote }}
+      resolvers:
+        {{- range .Values.dns.resolvers }}
+        - {{ . | quote }}
+        {{- end }}
+      mock_mode: {{ .Values.dns.mockMode }}
+      {{- if .Values.dns.mockMode }}
+      {{- if .Values.dns.mockRecords }}
+      mock_records: {{ .Values.dns.mockRecords }}
+      {{- end }}
+      {{- end }}
+      allow_http: {{ .Values.dns.allowHTTP }}
+    message:
+      max_size: {{ .Values.message.maxSize | int64 }}
+      idempotency_ttl: {{ .Values.message.idempotencyTTL | quote }}
+      validation_enabled: {{ .Values.message.validationEnabled }}
+    auth:
+      require_auth: {{ .Values.auth.requireAuth }}
+      methods:
+        {{- range .Values.auth.methods }}
+        - {{ . | quote }}
+        {{- end }}
+      api_key_header: {{ .Values.auth.apiKeyHeader | quote }}
+      admin_api_key_header: {{ .Values.auth.adminApiKeyHeader | quote }}
+      {{- if and .Values.auth.requireAuth (or .Values.auth.adminKeyExistingSecret .Values.auth.adminKey) }}
+      admin_key_file: "/etc/agentry/admin/admin.key"
+      {{- end }}
+    logging:
+      level: {{ .Values.logging.level | quote }}
+      format: {{ .Values.logging.format | quote }}
+    storage:
+      type: {{ .Values.storage.type | quote }}
+      {{- if eq .Values.storage.type "database" }}
+      database:
+        driver: {{ .Values.storage.database.driver | quote }}
+        max_connections: {{ .Values.storage.database.maxConnections }}
+        max_idle_time: {{ .Values.storage.database.maxIdleTime }}
+      {{- end }}
+    {{- if .Values.metrics.enabled }}
+    metrics:
+      enabled: true
+    {{- end }}
+    {{- if .Values.schema.registryType }}
+    schema:
+      registry_type: {{ .Values.schema.registryType | quote }}
+      {{- if eq .Values.schema.registryType "local" }}
+      local_registry:
+        base_path: {{ .Values.schema.localRegistryPath | quote }}
+      {{- else if eq .Values.schema.registryType "http" }}
+      registry:
+        base_url: {{ .Values.schema.registryURL | quote }}
+        {{- if .Values.schema.registryAuthToken }}
+        auth_token: {{ .Values.schema.registryAuthToken | quote }}
+        {{- end }}
+        {{- if .Values.schema.registryTimeout }}
+        timeout: {{ .Values.schema.registryTimeout | quote }}
+        {{- end }}
+      {{- end }}
+    {{- end }}

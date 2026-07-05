@@ -1,0 +1,305 @@
+# Default values for Agentry Helm Chart
+# This is a YAML-formatted file.
+
+# -- Number of replicas
+replicaCount: 1
+
+# -- Image configuration
+image:
+  repository: agentry/agentry
+  pullPolicy: IfNotPresent
+  # Overrides the image tag (defaults to Chart appVersion)
+  tag: ""
+
+# -- Image pull secrets
+imagePullSecrets: []
+# - name: my-registry-secret
+
+# -- Override the full name of the chart
+nameOverride: ""
+fullnameOverride: ""
+
+# -- ServiceAccount configuration
+serviceAccount:
+  # -- Create a ServiceAccount
+  create: true
+  # -- Annotations for the ServiceAccount
+  annotations: {}
+  # -- ServiceAccount name (defaults to fullname)
+  name: ""
+
+# -- Pod annotations
+podAnnotations: {}
+# -- Pod labels
+podLabels: {}
+
+# -- Pod security context
+podSecurityContext: {}
+  # fsGroup: 2000
+
+# -- Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65534
+
+# -----------------------------------------------------------------------------
+# Agentry Server Configuration
+# -----------------------------------------------------------------------------
+
+server:
+  # -- Server listen address (inside container)
+  address: ":8443"
+  # -- Domain name this gateway serves
+  domain: "example.com"
+  # -- Read timeout (Go duration string, e.g., "30s")
+  readTimeout: "30s"
+  # -- Write timeout (Go duration string, e.g., "30s")
+  writeTimeout: "30s"
+  # -- Idle timeout (Go duration string, e.g., "120s")
+  idleTimeout: "120s"
+
+# -----------------------------------------------------------------------------
+# TLS Configuration
+# -----------------------------------------------------------------------------
+
+tls:
+  # -- Enable TLS
+  enabled: true
+  # -- TLS minimum version (e.g., "1.2", "1.3")
+  minVersion: "1.3"
+  # -- Existing Kubernetes TLS secret name (if set, certFile/keyFile are ignored)
+  existingSecret: ""
+  # -- Path to TLS cert file inside container (ignored if existingSecret is set)
+  certFile: "/etc/agentry/tls/tls.crt"
+  # -- Path to TLS key file inside container (ignored if existingSecret is set)
+  keyFile: "/etc/agentry/tls/tls.key"
+
+# -----------------------------------------------------------------------------
+# DNS Discovery Configuration
+# -----------------------------------------------------------------------------
+
+dns:
+  # -- DNS cache TTL (Go duration string)
+  cacheTTL: "5m"
+  # -- DNS query timeout (Go duration string)
+  timeout: "5s"
+  # -- DNS resolvers
+  resolvers:
+    - "8.8.8.8:53"
+    - "1.1.1.1:53"
+  # -- Enable DNS mock mode (for testing)
+  mockMode: false
+  # -- Allow HTTP endpoints in DNS discovery
+  allowHTTP: false
+  # -- Mock DNS records (JSON string, only used when mockMode is true)
+  mockRecords: ""
+
+# -----------------------------------------------------------------------------
+# Message Processing Configuration
+# -----------------------------------------------------------------------------
+
+message:
+  # -- Maximum message size in bytes (default 10MB)
+  maxSize: 10485760
+  # -- Idempotency TTL (Go duration string, default 7 days)
+  idempotencyTTL: "168h"
+  # -- Enable message validation
+  validationEnabled: true
+
+# -----------------------------------------------------------------------------
+# Authentication Configuration
+# -----------------------------------------------------------------------------
+
+auth:
+  # -- Require authentication
+  requireAuth: false
+  # -- Authentication methods
+  methods:
+    - "domain"
+    - "apikey"
+  # -- API key header name
+  apiKeyHeader: "X-API-Key"
+  # -- Admin API key header name
+  adminApiKeyHeader: "X-Admin-Key"
+  # -- Admin API key value (stored in a generated Secret; leave empty to use existingSecret)
+  adminKey: ""
+  # -- Admin API key value (provided via an existing Secret; takes precedence over adminKey)
+  adminKeyExistingSecret: ""
+  # -- Key within the admin secret for the key value
+  adminKeySecretKey: "admin-key"
+  # -- API key salt for hashing (stored in a generated Secret, injected via env)
+  apiKeySalt: ""
+  # -- API key salt provided via an existing Secret (takes precedence over apiKeySalt)
+  apiKeySaltExistingSecret: ""
+  # -- Key within the salt secret for the salt value
+  apiKeySaltSecretKey: "api-key-salt"
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+
+logging:
+  # -- Log level (debug, info, warn, error)
+  level: "info"
+  # -- Log format (json, text)
+  format: "json"
+
+# -----------------------------------------------------------------------------
+# Storage Configuration
+# -----------------------------------------------------------------------------
+
+storage:
+  # -- Storage type (memory, database)
+  type: "memory"
+  # Database config (only used when type is "database")
+  database:
+    # -- Database driver (pgx)
+    driver: "pgx"
+    # -- Database connection string (can reference an existing secret)
+    connectionString: ""
+    # -- Existing secret containing the connection string
+    connectionStringExistingSecret: ""
+    # -- Key within the secret for the connection string
+    connectionStringSecretKey: "connection-string"
+    # -- Max database connections
+    maxConnections: 100
+    # -- Max idle time in seconds
+    maxIdleTime: 300
+
+# -----------------------------------------------------------------------------
+# Schema Management Configuration
+# -----------------------------------------------------------------------------
+
+schema:
+  # -- Schema registry type (database, local, http)
+  registryType: ""
+  # -- Local registry base path (when registryType is local)
+  localRegistryPath: ""
+  # -- HTTP registry URL (when registryType is http)
+  registryURL: ""
+  # -- Registry auth token
+  registryAuthToken: ""
+  # -- Registry timeout (Go duration string)
+  registryTimeout: ""
+
+# -----------------------------------------------------------------------------
+# Metrics Configuration
+# -----------------------------------------------------------------------------
+
+metrics:
+  # -- Enable metrics endpoint
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Kubernetes Resources
+# -----------------------------------------------------------------------------
+
+# -- Service configuration
+service:
+  type: ClusterIP
+  port: 8443
+  targetPort: 8443
+  # -- Additional Service annotations
+  annotations: {}
+
+# -- Ingress configuration
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+
+# -----------------------------------------------------------------------------
+# Gateway API Configuration (requires Envoy Gateway installed)
+# -----------------------------------------------------------------------------
+
+gateway:
+  # -- Enable Gateway API resources (GatewayClass, Gateway, HTTPRoute)
+  enabled: false
+  # -- Custom hostnames for the Gateway HTTPRoute
+  hostnames:
+    - "agentry.example.com"
+
+# -- Resource requests and limits
+resources: {}
+  # limits:
+  #   cpu: 500m
+  #   memory: 512Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# -- Horizontal Pod Autoscaler configuration
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# -- Node selector for pod assignment
+nodeSelector: {}
+
+# -- Tolerations for pod assignment
+tolerations: []
+
+# -- Affinity for pod assignment
+affinity: {}
+
+# -- Topology spread constraints
+topologySpreadConstraints: []
+
+# -- Pod disruption budget
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# -- Extra volumes to mount
+extraVolumes: []
+# - name: custom-config
+#   configMap:
+#     name: agentry-custom
+
+# -- Extra volume mounts
+extraVolumeMounts: []
+# - name: custom-config
+#   mountPath: /etc/agentry/custom
+#   readOnly: true
+
+# -- Extra environment variables
+extraEnv: []
+# - name: FOO
+#   value: bar
+
+# -- Health check configuration
+healthCheck:
+  # -- Enable liveness probe
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 30
+    timeoutSeconds: 3
+    failureThreshold: 3
+  # -- Enable readiness probe
+  readinessProbe:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
