@@ -143,7 +143,7 @@ docker: docker-build ## Build Docker image
 
 docker-build: ## Build Docker image
 	@echo "Building Docker image $(DOCKER_IMAGE):$(DOCKER_TAG)..."
-	@docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
+	@docker build -f docker/Dockerfile -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 
 docker-run: ## Run Docker container
 	@echo "Running Docker container..."
