@@ -82,6 +82,18 @@ func generateIdempotencyKey(req *types.SendMessageRequest) string {
 		hashHex[20:32]) // 12 chars
 }
 
+// isWorkflowResponseType reports whether a reply with this response_type
+// participates in the workflow state machine. Error responses must be routed
+// too, otherwise participants can never be marked failed and stop_on_failure
+// never fires.
+func isWorkflowResponseType(responseType string) bool {
+	switch responseType {
+	case "workflow_response", "workflow_error", "error":
+		return true
+	}
+	return false
+}
+
 // handleSendMessage handles POST /v1/messages
 func (s *Server) handleSendMessage(c *gin.Context) {
 	timer := time.Now()
@@ -187,7 +199,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	if workflowRef == "" {
 		workflowRef = message.InReplyTo
 	}
-	if message.ResponseType == "workflow_response" && workflowRef != "" {
+	if isWorkflowResponseType(message.ResponseType) && workflowRef != "" {
 		if s.workflow != nil {
 			err := s.workflow.ProcessResponse(c.Request.Context(), workflowRef, message)
 			if err != nil {

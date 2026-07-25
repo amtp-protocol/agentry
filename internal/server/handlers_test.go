@@ -1913,3 +1913,78 @@ func TestHandleSendMessage_ResponseIncludesWorkflowID(t *testing.T) {
 		t.Errorf("Response workflow_id = %q, want %q", response.WorkflowID, workflowID)
 	}
 }
+
+func TestHandleSendMessage_WorkflowErrorResponsesReachEngine(t *testing.T) {
+	workflowID, err := uuid.GenerateV7()
+	if err != nil {
+		t.Fatalf("Failed to generate workflow ID: %v", err)
+	}
+
+	cases := []struct {
+		name          string
+		responseType  string
+		workflowID    string
+		wantIntercept bool
+	}{
+		{"workflow_error with workflow_id", "workflow_error", workflowID, true},
+		{"plain error with workflow_id", "error", workflowID, true},
+		{"plain error without workflow reference", "error", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := createTestServer()
+
+			var gotWorkflowID string
+			var gotResponseType string
+			called := false
+			server.workflow = &processing.MockWorkflowManager{
+				ProcessResponseFunc: func(ctx context.Context, wfID string, replyMsg *types.Message) error {
+					called = true
+					gotWorkflowID = wfID
+					gotResponseType = replyMsg.ResponseType
+					return nil
+				},
+			}
+
+			requestBody := types.SendMessageRequest{
+				Sender:       "agent1@example.com",
+				Recipients:   []string{"initiator@test.com"},
+				Subject:      "Workflow step failed",
+				ResponseType: tc.responseType,
+				WorkflowID:   tc.workflowID,
+				Payload:      json.RawMessage(`{"error": "downstream unavailable"}`),
+			}
+
+			body, err := json.Marshal(requestBody)
+			if err != nil {
+				t.Fatalf("Failed to marshal request body: %v", err)
+			}
+
+			req, err := http.NewRequest("POST", "/v1/messages", bytes.NewBuffer(body))
+			if err != nil {
+				t.Fatalf("Failed to create request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Errorf("Expected status code %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+			}
+
+			if called != tc.wantIntercept {
+				t.Fatalf("ProcessResponse called = %v, want %v", called, tc.wantIntercept)
+			}
+			if tc.wantIntercept {
+				if gotWorkflowID != tc.workflowID {
+					t.Errorf("ProcessResponse workflow ID = %q, want %q", gotWorkflowID, tc.workflowID)
+				}
+				if gotResponseType != tc.responseType {
+					t.Errorf("ProcessResponse reply response_type = %q, want %q", gotResponseType, tc.responseType)
+				}
+			}
+		})
+	}
+}
