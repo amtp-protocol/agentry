@@ -166,7 +166,7 @@ func New(cfg *config.Config) (*Server, error) {
 	// Create message processor
 	processor := processing.NewMessageProcessor(discoveryService, deliveryEngine, storage)
 	// Create workflow manager
-	workflowManager := workflow.NewManager(storage, processor, logger)
+	workflowManager := workflow.NewManager(storage, processor, logger, "workflow@"+cfg.Server.Domain)
 	processor.SetWorkflowManager(workflowManager)
 
 	// Set Gin mode based on environment

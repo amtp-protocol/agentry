@@ -9,6 +9,7 @@ import (
 
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
+	"github.com/amtp-protocol/agentry/pkg/uuid"
 )
 
 type mockDispatcher struct {
@@ -113,7 +114,7 @@ func (m *mockStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID
 func TestManager_Initialize(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	ctx := context.Background()
 
@@ -163,7 +164,7 @@ func TestManager_Initialize(t *testing.T) {
 func TestManager_Initialize_Sequential(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID:  "msg-seq",
@@ -192,7 +193,7 @@ func TestManager_Initialize_Sequential(t *testing.T) {
 func TestManager_Initialize_Conditional(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID:  "msg-cond",
@@ -221,7 +222,7 @@ func TestManager_Initialize_Conditional(t *testing.T) {
 func TestManager_ProcessResponse_Parallel(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID: "msg-p",
@@ -267,7 +268,7 @@ func TestManager_ProcessResponse_Parallel(t *testing.T) {
 func TestManager_ProcessResponse_Sequential(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID: "msg-s",
@@ -311,7 +312,7 @@ func TestManager_ProcessResponse_Sequential(t *testing.T) {
 func TestManager_ProcessResponse_Conditional(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID:  "msg-c",
@@ -365,7 +366,7 @@ func TestManager_ProcessResponse_Conditional(t *testing.T) {
 func TestManager_TimeoutSweeper(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID: "msg-t",
@@ -403,7 +404,7 @@ func TestManager_TimeoutSweeper(t *testing.T) {
 func TestManager_ProcessResponse_WorkflowNotFound(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	err := mgr.ProcessResponse(context.Background(), "unknown", &types.Message{})
 	if err == nil {
@@ -414,7 +415,7 @@ func TestManager_ProcessResponse_WorkflowNotFound(t *testing.T) {
 func TestManager_ProcessResponse_StopOnFailure(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID: "msg-fail",
@@ -445,7 +446,7 @@ func TestManager_ProcessResponse_StopOnFailure(t *testing.T) {
 func TestManager_NotifySenderOnCompletion(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID: "msg-notify",
@@ -474,8 +475,8 @@ func TestManager_NotifySenderOnCompletion(t *testing.T) {
 		t.Fatalf("Expected 1 notification dispatch, got %d", len(dp.dispatched))
 	}
 	notif := dp.dispatched[0]
-	if notif.Sender != "" {
-		t.Errorf("Notification sender should be empty (system), got %q", notif.Sender)
+	if notif.Sender != "workflow@localhost" {
+		t.Errorf("Notification sender should be the configured system sender, got %q", notif.Sender)
 	}
 	if len(notif.Recipients) != 1 || notif.Recipients[0] != "initiator@localhost" {
 		t.Errorf("Notification should go to initiator@localhost, got %v", notif.Recipients)
@@ -500,7 +501,7 @@ func TestManager_NotifySenderOnCompletion(t *testing.T) {
 func TestManager_NotifySenderOnTimeout(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
-	mgr := NewManager(st, dp, nil)
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 	msg := &types.Message{
 		MessageID: "msg-timeout-notify",
@@ -546,7 +547,7 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 	t.Run("parallel initial dispatch", func(t *testing.T) {
 		st := newMockStorage()
 		dp := &mockDispatcher{}
-		mgr := NewManager(st, dp, nil)
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 		msg := &types.Message{
 			MessageID: "msg-wfid-p",
@@ -571,7 +572,7 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 	t.Run("sequential initial and next-step dispatch", func(t *testing.T) {
 		st := newMockStorage()
 		dp := &mockDispatcher{}
-		mgr := NewManager(st, dp, nil)
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 		msg := &types.Message{
 			MessageID: "msg-wfid-s",
@@ -608,7 +609,7 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 	t.Run("conditional initial and branch dispatch", func(t *testing.T) {
 		st := newMockStorage()
 		dp := &mockDispatcher{}
-		mgr := NewManager(st, dp, nil)
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 		msg := &types.Message{
 			MessageID:  "msg-wfid-c",
@@ -655,7 +656,7 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 	t.Run("completion notification", func(t *testing.T) {
 		st := newMockStorage()
 		dp := &mockDispatcher{}
-		mgr := NewManager(st, dp, nil)
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
 
 		msg := &types.Message{
 			MessageID: "msg-wfid-n",
@@ -681,6 +682,176 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 		}
 		if dp.dispatched[0].WorkflowID != wf.WorkflowID {
 			t.Errorf("Notification WorkflowID = %q, want %q", dp.dispatched[0].WorkflowID, wf.WorkflowID)
+		}
+	})
+}
+
+func TestManager_EngineDispatchedMessagesAreValid(t *testing.T) {
+	assertValidDispatch := func(t *testing.T, m *types.Message) {
+		t.Helper()
+		if err := m.Validate(); err != nil {
+			t.Errorf("Dispatched message is not a valid protocol message: %v", err)
+		}
+		if !uuid.IsValidV7(m.MessageID) {
+			t.Errorf("Dispatched message ID %q is not a valid UUIDv7", m.MessageID)
+		}
+		if m.Version != "1.0" {
+			t.Errorf("Dispatched message version = %q, want 1.0", m.Version)
+		}
+		if m.Timestamp.IsZero() {
+			t.Errorf("Dispatched message timestamp is zero")
+		}
+	}
+
+	t.Run("sequential steps get fresh identities", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
+
+		msg := &types.Message{
+			MessageID: "msg-valid-s",
+			Sender:    "initiator@localhost",
+			Coordination: &types.CoordinationConfig{
+				Type:     "sequential",
+				Sequence: []string{"a1", "a2"},
+			},
+		}
+
+		wf, err := mgr.Initialize(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("Initialize failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected 1 dispatch, got %d", len(dp.dispatched))
+		}
+		first := dp.dispatched[0]
+		assertValidDispatch(t, first)
+		if first.Sender != "initiator@localhost" {
+			t.Errorf("Step sender = %q, want the workflow initiator", first.Sender)
+		}
+
+		dp.dispatched = nil
+		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
+			t.Fatalf("ProcessResponse failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected next-step dispatch, got %d", len(dp.dispatched))
+		}
+		second := dp.dispatched[0]
+		assertValidDispatch(t, second)
+		if second.MessageID == first.MessageID {
+			t.Errorf("Each step dispatch should get its own message ID")
+		}
+		if second.IdempotencyKey == first.IdempotencyKey {
+			t.Errorf("Each step dispatch should get its own idempotency key")
+		}
+	})
+
+	t.Run("sequential step idempotency key is stable across re-dispatch", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
+
+		msg := &types.Message{
+			MessageID: "msg-valid-s2",
+			Sender:    "initiator@localhost",
+			Coordination: &types.CoordinationConfig{
+				Type:     "sequential",
+				Sequence: []string{"a1"},
+			},
+		}
+
+		wf, _ := mgr.Initialize(context.Background(), msg)
+
+		// Re-dispatching the same step of the same workflow must reuse the
+		// idempotency key so receiving gateways can deduplicate.
+		if err := mgr.(*managerImpl).executeSequentialNext(context.Background(), wf, wf.CoordinationConfig, 0); err != nil {
+			t.Fatalf("re-dispatch failed: %v", err)
+		}
+		if len(dp.dispatched) != 2 {
+			t.Fatalf("Expected 2 dispatches, got %d", len(dp.dispatched))
+		}
+		if dp.dispatched[0].IdempotencyKey == "" {
+			t.Fatalf("Step dispatch should carry an idempotency key")
+		}
+		if dp.dispatched[0].IdempotencyKey != dp.dispatched[1].IdempotencyKey {
+			t.Errorf("Same step re-dispatch should reuse idempotency key: %q vs %q",
+				dp.dispatched[0].IdempotencyKey, dp.dispatched[1].IdempotencyKey)
+		}
+	})
+
+	t.Run("conditional branch dispatch is valid", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
+
+		msg := &types.Message{
+			MessageID:  "msg-valid-c",
+			Sender:     "initiator@localhost",
+			Recipients: []string{"eval"},
+			Coordination: &types.CoordinationConfig{
+				Type: "conditional",
+				Conditions: []types.ConditionalRule{
+					{
+						If:   "status == \"ok\"",
+						Then: []string{"a1"},
+					},
+				},
+			},
+		}
+
+		wf, err := mgr.Initialize(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("Initialize failed: %v", err)
+		}
+		dp.dispatched = nil
+
+		reply := &types.Message{
+			Sender:     "eval",
+			WorkflowID: wf.WorkflowID,
+			Payload:    json.RawMessage(`{"status":"ok"}`),
+		}
+		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
+			t.Fatalf("ProcessResponse failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected branch dispatch, got %d", len(dp.dispatched))
+		}
+		assertValidDispatch(t, dp.dispatched[0])
+	})
+
+	t.Run("notification has system sender and full identity", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil, "workflow@localhost")
+
+		msg := &types.Message{
+			MessageID: "msg-valid-n",
+			Sender:    "initiator@localhost",
+			Coordination: &types.CoordinationConfig{
+				Type:              "parallel",
+				RequiredResponses: []string{"a1"},
+			},
+		}
+
+		wf, err := mgr.Initialize(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("Initialize failed: %v", err)
+		}
+		dp.dispatched = nil
+
+		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
+			t.Fatalf("ProcessResponse failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected 1 notification dispatch, got %d", len(dp.dispatched))
+		}
+		notif := dp.dispatched[0]
+		assertValidDispatch(t, notif)
+		if notif.Sender != "workflow@localhost" {
+			t.Errorf("Notification sender = %q, want the configured system sender", notif.Sender)
 		}
 	})
 }

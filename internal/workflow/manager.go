@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,22 +18,26 @@ import (
 )
 
 type managerImpl struct {
-	storage    storage.Storage
-	dispatcher Dispatcher
-	logger     *logging.Logger
-	doneChan   chan struct{}
-	stopOnce   sync.Once
+	storage      storage.Storage
+	dispatcher   Dispatcher
+	logger       *logging.Logger
+	systemSender string
+	doneChan     chan struct{}
+	stopOnce     sync.Once
 }
 
-func NewManager(s storage.Storage, d Dispatcher, logger *logging.Logger) Manager {
+// NewManager creates a workflow manager. systemSender is the address used as
+// the sender of engine-generated notifications (e.g. "workflow@<domain>").
+func NewManager(s storage.Storage, d Dispatcher, logger *logging.Logger, systemSender string) Manager {
 	if logger == nil {
 		logger = logging.NewNoopLogger()
 	}
 	return &managerImpl{
-		storage:    s,
-		dispatcher: d,
-		logger:     logger,
-		doneChan:   make(chan struct{}),
+		storage:      s,
+		dispatcher:   d,
+		logger:       logger,
+		systemSender: systemSender,
+		doneChan:     make(chan struct{}),
 	}
 }
 
@@ -155,7 +161,10 @@ func (m *managerImpl) executeSequentialNext(ctx context.Context, workflow *types
 	}
 
 	nextAgent := coord.Sequence[index]
-	msgCopy := m.buildTemplateMessage(workflow)
+	msgCopy, err := m.buildTemplateMessage(workflow, fmt.Sprintf("seq:%d", index))
+	if err != nil {
+		return err
+	}
 	msgCopy.Recipients = []string{nextAgent}
 
 	return m.dispatcher.Dispatch(ctx, msgCopy)
@@ -222,17 +231,41 @@ func (m *managerImpl) isParticipantPending(wf *types.Workflow, address string) b
 	return false
 }
 
-// buildTemplateMessage constructs a minimal Message from the workflow's stored
-// sender/subject/schema/payload, suitable as a dispatch template for sequential/conditional
-// branching. Recipients and coordination are set by the caller.
-func (m *managerImpl) buildTemplateMessage(wf *types.Workflow) *types.Message {
-	return &types.Message{
-		WorkflowID: wf.WorkflowID,
-		Sender:     wf.Sender,
-		Subject:    wf.Subject,
-		Schema:     wf.Schema,
-		Payload:    wf.Payload,
+// deterministicIdempotencyKey derives a stable UUID-shaped key from the given
+// parts, so re-dispatching the same logical step (e.g. after a retry) is
+// deduplicated by receiving gateways instead of delivered twice.
+func deterministicIdempotencyKey(parts ...string) string {
+	hash := sha256.Sum256([]byte(strings.Join(parts, ":")))
+	hashHex := hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%s-%s-4%s-8%s-%s",
+		hashHex[0:8],
+		hashHex[8:12],
+		hashHex[13:16],
+		hashHex[16:19],
+		hashHex[20:32])
+}
+
+// buildTemplateMessage constructs a full protocol Message from the workflow's
+// stored sender/subject/schema/payload, suitable as a dispatch template for
+// sequential/conditional branching. dispatchKey identifies the logical step so
+// its idempotency key stays stable across re-dispatch. Recipients are set by
+// the caller.
+func (m *managerImpl) buildTemplateMessage(wf *types.Workflow, dispatchKey string) (*types.Message, error) {
+	messageID, err := uuid.GenerateV7()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate message ID: %w", err)
 	}
+	return &types.Message{
+		Version:        "1.0",
+		MessageID:      messageID,
+		IdempotencyKey: deterministicIdempotencyKey(wf.WorkflowID, dispatchKey),
+		Timestamp:      time.Now().UTC(),
+		WorkflowID:     wf.WorkflowID,
+		Sender:         wf.Sender,
+		Subject:        wf.Subject,
+		Schema:         wf.Schema,
+		Payload:        wf.Payload,
+	}, nil
 }
 
 // notifySender dispatches an aggregated completion/failure notification back to
@@ -264,13 +297,22 @@ func (m *managerImpl) notifySender(ctx context.Context, wf *types.Workflow, fina
 		"results":           results,
 	})
 
+	messageID, err := uuid.GenerateV7()
+	if err != nil {
+		m.logger.Error("Failed to generate notification message ID", err)
+		return
+	}
 	notif := &types.Message{
-		Sender:     "", // system-generated
-		Recipients: []string{wf.Sender},
-		Subject:    fmt.Sprintf("Workflow %s: %s", wf.WorkflowID, finalStatus),
-		InReplyTo:  wf.WorkflowID,
-		WorkflowID: wf.WorkflowID,
-		Payload:    json.RawMessage(aggPayload),
+		Version:        "1.0",
+		MessageID:      messageID,
+		IdempotencyKey: deterministicIdempotencyKey(wf.WorkflowID, "notify", string(finalStatus)),
+		Timestamp:      time.Now().UTC(),
+		Sender:         m.systemSender,
+		Recipients:     []string{wf.Sender},
+		Subject:        fmt.Sprintf("Workflow %s: %s", wf.WorkflowID, finalStatus),
+		InReplyTo:      wf.WorkflowID,
+		WorkflowID:     wf.WorkflowID,
+		Payload:        json.RawMessage(aggPayload),
 	}
 	if err := m.dispatcher.Dispatch(ctx, notif); err != nil {
 		m.logger.Errorf(err, "Failed to notify workflow sender %s of %s", wf.Sender, finalStatus)
@@ -394,7 +436,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 					m.logger.Error("Failed to unmarshal payload for conditional evaluation", err)
 				}
 
-				for _, condition := range coord.Conditions {
+				for condIdx, condition := range coord.Conditions {
 					matched := false
 					if strings.Contains(condition.If, " == ") {
 						parts := strings.Split(condition.If, " == ")
@@ -426,7 +468,11 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 					}
 
 					if len(targets) > 0 {
-						msgCopy := m.buildTemplateMessage(workflow)
+						msgCopy, buildErr := m.buildTemplateMessage(workflow, fmt.Sprintf("cond:%d", condIdx))
+						if buildErr != nil {
+							m.logger.Error("Failed to build conditional branch message", buildErr)
+							continue
+						}
 						msgCopy.Recipients = targets
 						if err := m.dispatcher.Dispatch(ctx, msgCopy); err != nil {
 							m.logger.Error("Failed to dispatch conditional branch messages", err)
