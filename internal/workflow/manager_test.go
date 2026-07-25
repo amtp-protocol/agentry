@@ -541,3 +541,146 @@ func TestManager_NotifySenderOnTimeout(t *testing.T) {
 
 	mgr.Stop()
 }
+
+func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
+	t.Run("parallel initial dispatch", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil)
+
+		msg := &types.Message{
+			MessageID: "msg-wfid-p",
+			Coordination: &types.CoordinationConfig{
+				Type:              "parallel",
+				RequiredResponses: []string{"a1", "a2"},
+			},
+		}
+
+		wf, err := mgr.Initialize(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("Initialize failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected 1 dispatch, got %d", len(dp.dispatched))
+		}
+		if dp.dispatched[0].WorkflowID != wf.WorkflowID {
+			t.Errorf("Dispatched message WorkflowID = %q, want %q", dp.dispatched[0].WorkflowID, wf.WorkflowID)
+		}
+	})
+
+	t.Run("sequential initial and next-step dispatch", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil)
+
+		msg := &types.Message{
+			MessageID: "msg-wfid-s",
+			Coordination: &types.CoordinationConfig{
+				Type:     "sequential",
+				Sequence: []string{"a1", "a2"},
+			},
+		}
+
+		wf, err := mgr.Initialize(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("Initialize failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected 1 dispatch, got %d", len(dp.dispatched))
+		}
+		if dp.dispatched[0].WorkflowID != wf.WorkflowID {
+			t.Errorf("Initial dispatch WorkflowID = %q, want %q", dp.dispatched[0].WorkflowID, wf.WorkflowID)
+		}
+
+		dp.dispatched = nil
+		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
+			t.Fatalf("ProcessResponse failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected next-step dispatch to a2, got %d", len(dp.dispatched))
+		}
+		if dp.dispatched[0].WorkflowID != wf.WorkflowID {
+			t.Errorf("Next-step dispatch WorkflowID = %q, want %q", dp.dispatched[0].WorkflowID, wf.WorkflowID)
+		}
+	})
+
+	t.Run("conditional initial and branch dispatch", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil)
+
+		msg := &types.Message{
+			MessageID:  "msg-wfid-c",
+			Recipients: []string{"eval"},
+			Coordination: &types.CoordinationConfig{
+				Type: "conditional",
+				Conditions: []types.ConditionalRule{
+					{
+						If:   "status == \"ok\"",
+						Then: []string{"a1"},
+					},
+				},
+			},
+		}
+
+		wf, err := mgr.Initialize(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("Initialize failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected 1 dispatch to evaluator, got %d", len(dp.dispatched))
+		}
+		if dp.dispatched[0].WorkflowID != wf.WorkflowID {
+			t.Errorf("Evaluator dispatch WorkflowID = %q, want %q", dp.dispatched[0].WorkflowID, wf.WorkflowID)
+		}
+
+		dp.dispatched = nil
+		reply := &types.Message{
+			Sender:     "eval",
+			WorkflowID: wf.WorkflowID,
+			Payload:    json.RawMessage(`{"status":"ok"}`),
+		}
+		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
+			t.Fatalf("ProcessResponse failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected branch dispatch to a1, got %d", len(dp.dispatched))
+		}
+		if dp.dispatched[0].WorkflowID != wf.WorkflowID {
+			t.Errorf("Branch dispatch WorkflowID = %q, want %q", dp.dispatched[0].WorkflowID, wf.WorkflowID)
+		}
+	})
+
+	t.Run("completion notification", func(t *testing.T) {
+		st := newMockStorage()
+		dp := &mockDispatcher{}
+		mgr := NewManager(st, dp, nil)
+
+		msg := &types.Message{
+			MessageID: "msg-wfid-n",
+			Sender:    "initiator@localhost",
+			Coordination: &types.CoordinationConfig{
+				Type:              "parallel",
+				RequiredResponses: []string{"a1"},
+			},
+		}
+
+		wf, err := mgr.Initialize(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("Initialize failed: %v", err)
+		}
+		dp.dispatched = nil
+
+		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
+			t.Fatalf("ProcessResponse failed: %v", err)
+		}
+		if len(dp.dispatched) != 1 {
+			t.Fatalf("Expected 1 notification dispatch, got %d", len(dp.dispatched))
+		}
+		if dp.dispatched[0].WorkflowID != wf.WorkflowID {
+			t.Errorf("Notification WorkflowID = %q, want %q", dp.dispatched[0].WorkflowID, wf.WorkflowID)
+		}
+	})
+}

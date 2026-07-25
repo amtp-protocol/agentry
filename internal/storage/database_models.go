@@ -50,6 +50,7 @@ type Message struct {
 	Schema         string    `gorm:"type:text" json:"schema,omitempty"`
 	InReplyTo      *string   `gorm:"type:uuid" json:"in_reply_to,omitempty" validate:"omitempty,uuid"`
 	ResponseType   string    `gorm:"size:50" json:"response_type,omitempty"`
+	WorkflowID     *string   `gorm:"type:uuid" json:"workflow_id,omitempty" validate:"omitempty,uuid"`
 
 	// JSON fields
 	Recipients   datatypes.JSON `gorm:"type:jsonb;not null" json:"recipients" validate:"required"`

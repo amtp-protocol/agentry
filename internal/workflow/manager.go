@@ -139,8 +139,9 @@ func (m *managerImpl) startExecution(ctx context.Context, workflow *types.Workfl
 }
 
 // executeParallel sends message to all participants at once
-func (m *managerImpl) executeParallel(ctx context.Context, _ *types.Workflow, msg *types.Message) error {
+func (m *managerImpl) executeParallel(ctx context.Context, workflow *types.Workflow, msg *types.Message) error {
 	msgCopy := msg.Clone()
+	msgCopy.WorkflowID = workflow.WorkflowID
 	msgCopy.Recipients = append(msg.Coordination.RequiredResponses, msg.Coordination.OptionalResponses...)
 
 	// We pass down to the dispatcher. The dispatcher should route the message properly.
@@ -160,8 +161,10 @@ func (m *managerImpl) executeSequentialNext(ctx context.Context, workflow *types
 	return m.dispatcher.Dispatch(ctx, msgCopy)
 }
 
-func (m *managerImpl) executeConditional(ctx context.Context, _ *types.Workflow, msg *types.Message) error {
-	return m.dispatcher.Dispatch(ctx, msg)
+func (m *managerImpl) executeConditional(ctx context.Context, workflow *types.Workflow, msg *types.Message) error {
+	msgCopy := msg.Clone()
+	msgCopy.WorkflowID = workflow.WorkflowID
+	return m.dispatcher.Dispatch(ctx, msgCopy)
 }
 
 func (m *managerImpl) ProcessResponse(ctx context.Context, workflowID string, replyMsg *types.Message) error {
@@ -224,10 +227,11 @@ func (m *managerImpl) isParticipantPending(wf *types.Workflow, address string) b
 // branching. Recipients and coordination are set by the caller.
 func (m *managerImpl) buildTemplateMessage(wf *types.Workflow) *types.Message {
 	return &types.Message{
-		Sender:  wf.Sender,
-		Subject: wf.Subject,
-		Schema:  wf.Schema,
-		Payload: wf.Payload,
+		WorkflowID: wf.WorkflowID,
+		Sender:     wf.Sender,
+		Subject:    wf.Subject,
+		Schema:     wf.Schema,
+		Payload:    wf.Payload,
 	}
 }
 
@@ -265,6 +269,7 @@ func (m *managerImpl) notifySender(ctx context.Context, wf *types.Workflow, fina
 		Recipients: []string{wf.Sender},
 		Subject:    fmt.Sprintf("Workflow %s: %s", wf.WorkflowID, finalStatus),
 		InReplyTo:  wf.WorkflowID,
+		WorkflowID: wf.WorkflowID,
 		Payload:    json.RawMessage(aggPayload),
 	}
 	if err := m.dispatcher.Dispatch(ctx, notif); err != nil {

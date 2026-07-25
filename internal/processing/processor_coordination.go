@@ -40,7 +40,7 @@ func (mp *MessageProcessor) processWithCoordination(
 	}
 
 	// Persist the workflow to DB and begin the state machine execution based on "type"
-	_, err := mp.workflow.Initialize(ctx, message)
+	wf, err := mp.workflow.Initialize(ctx, message)
 	if err != nil {
 		// Update status as failed
 		result.Status = types.StatusFailed
@@ -57,6 +57,7 @@ func (mp *MessageProcessor) processWithCoordination(
 		return result, err
 	}
 
+	result.WorkflowID = wf.WorkflowID
 	result.Status = types.StatusQueued
 	return result, nil
 }

@@ -617,12 +617,17 @@ test_workflow_coordination() {
         }')
         
     local message_id=$(echo "$response" | jq -r '.message_id // empty')
-    
+    local workflow_id=$(echo "$response" | jq -r '.workflow_id // empty')
+
     if [ -z "$message_id" ]; then
         log_error "Failed to create cross-domain sequential workflow. Response: $response"
         exit 1
     fi
-    log_info "Sequential Workflow created. ID: $message_id"
+    if [ -z "$workflow_id" ]; then
+        log_error "Send response did not include workflow_id. Response: $response"
+        exit 1
+    fi
+    log_info "Sequential Workflow created. Message ID: $message_id, Workflow ID: $workflow_id"
 
     # Wait for processing queues to flush
     sleep 2
@@ -632,13 +637,13 @@ test_workflow_coordination() {
 
     log_info "Verifying sequence logic before first agent responds..."
     local inbox1=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://company-b.local:8080/v1/inbox/$recip1" -H "Authorization: Bearer $payment_key")
-    echo "Inbox 1 contains:"; echo "$inbox1"; local has_msg1=$(echo "$inbox1" | jq "[.messages[]? | select(.message_id == \"$message_id\")] | length")
+    echo "Inbox 1 contains:"; echo "$inbox1"; local has_msg1=$(echo "$inbox1" | jq "[.messages[]? | select(.workflow_id == \"$workflow_id\")] | length")
     if [ "$has_msg1" != "1" ]; then
         log_error "First agent $recip1 did not receive the sequential message."
         exit 1
     fi
     local inbox2=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://partner.local:8080/v1/inbox/$recip2" -H "Authorization: Bearer $integration_key")
-    local has_msg2=$(echo "$inbox2" | jq "[.messages[]? | select(.message_id == \"$message_id\")] | length")
+    local has_msg2=$(echo "$inbox2" | jq "[.messages[]? | select(.workflow_id == \"$workflow_id\")] | length")
     if [ "$has_msg2" != "0" ]; then
         log_error "Second agent $recip2 prematurely received the sequential message! (count: $has_msg2)"
         exit 1
@@ -654,7 +659,7 @@ test_workflow_coordination() {
             "recipients": ["'"$sender"'"],
             "subject": "Payment Processed",
             "schema": "agntcy:finance.payment.v1",
-            "in_reply_to": "'"$message_id"'",
+            "workflow_id": "'"$workflow_id"'",
             "response_type": "workflow_response",
             "payload": {"payment": "PAY-123", "status": "completed"}
         }')
@@ -670,7 +675,7 @@ test_workflow_coordination() {
 
     log_info "Verifying sequence logic after first agent responded..."
     local inbox2_after=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://partner.local:8080/v1/inbox/$recip2" -H "Authorization: Bearer $integration_key")
-    local has_msg2_after=$(echo "$inbox2_after" | jq "[.messages[]? | select(.message_id == \"$message_id\")] | length")
+    local has_msg2_after=$(echo "$inbox2_after" | jq "[.messages[]? | select(.workflow_id == \"$workflow_id\")] | length")
     if [ "$has_msg2_after" != "1" ]; then
         log_error "Second agent $recip2 did not receive the sequential message after first agent finished. (Response: $inbox2_after)"
         exit 1
@@ -686,7 +691,7 @@ test_workflow_coordination() {
             "recipients": ["'"$sender"'"],
             "subject": "Order Shipped",
             "schema": "agntcy:commerce.order.v1",
-            "in_reply_to": "'"$message_id"'",
+            "workflow_id": "'"$workflow_id"'",
             "response_type": "workflow_response",
             "payload": {"tracking_number": "TRK-987654", "status": "shipped"}
         }')
@@ -723,12 +728,17 @@ test_workflow_coordination() {
         }')
         
     local cond_message_id=$(echo "$cond_response" | jq -r '.message_id // empty')
-    
+    local cond_workflow_id=$(echo "$cond_response" | jq -r '.workflow_id // empty')
+
     if [ -z "$cond_message_id" ]; then
         log_error "Failed to create conditional workflow. Response: $cond_response"
         exit 1
     fi
-    log_info "Conditional Workflow created. ID: $cond_message_id"
+    if [ -z "$cond_workflow_id" ]; then
+        log_error "Conditional send response did not include workflow_id. Response: $cond_response"
+        exit 1
+    fi
+    log_info "Conditional Workflow created. Message ID: $cond_message_id, Workflow ID: $cond_workflow_id"
 
     sleep 2
 
@@ -741,7 +751,7 @@ test_workflow_coordination() {
             "recipients": ["'"$sender"'"],
             "subject": "Contract Approved",
             "schema": "agntcy:finance.payment.v1",
-            "in_reply_to": "'"$cond_message_id"'",
+            "workflow_id": "'"$cond_workflow_id"'",
             "response_type": "workflow_response",
             "payload": {"payment": "PAY-COND-1", "status": "approved"}
         }')
@@ -758,7 +768,7 @@ test_workflow_coordination() {
     # Check inbox to ensure 'integration' (recip2) got the message because it matched 'Then' branch
     log_info "Verifying conditional dispatch..."
     local cond_inbox_then=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://partner.local:8080/v1/inbox/$recip2" -H "Authorization: Bearer $integration_key")
-    local cond_has_msg_then=$(echo "$cond_inbox_then" | jq "[.messages[]? | select(.message_id == \"$cond_message_id\")] | length")
+    local cond_has_msg_then=$(echo "$cond_inbox_then" | jq "[.messages[]? | select(.workflow_id == \"$cond_workflow_id\")] | length")
     
     if [ "$cond_has_msg_then" != "1" ]; then
         log_error "Conditional targets ('Then' branch - $recip2) did NOT receive the message! Inbox: $cond_inbox_then"
@@ -768,7 +778,7 @@ test_workflow_coordination() {
     # Check accounting inbox, should NOT have the message ('Else' branch)
     local accounting_key=$(cat /tmp/amtp-keys/accounting.key 2>/dev/null)
     local cond_inbox_else=$(docker-compose -f "$COMPOSE_FILE" exec -T $TEST_CLIENT curl -s "http://company-b.local:8080/v1/inbox/accounting@company-b.local" -H "Authorization: Bearer $accounting_key")
-    local cond_has_msg_else=$(echo "$cond_inbox_else" | jq "[.messages[]? | select(.message_id == \"$cond_message_id\")] | length")
+    local cond_has_msg_else=$(echo "$cond_inbox_else" | jq "[.messages[]? | select(.workflow_id == \"$cond_workflow_id\")] | length")
     
     if [ "$cond_has_msg_else" != "0" ]; then
         log_error "Conditional skipped targets ('Else' branch - accounting) prematurely received the message!"

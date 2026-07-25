@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS messages (
     schema TEXT,
     in_reply_to UUID,
     response_type VARCHAR(50),
+    workflow_id UUID,
 
     -- JSON fields
     recipients JSONB NOT NULL,
@@ -73,6 +74,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_idempotency_key ON messages(idempotency_
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_in_reply_to ON messages(in_reply_to);
+
+-- Upgrade path for databases created before workflow_id existed
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS workflow_id UUID;
+CREATE INDEX IF NOT EXISTS idx_messages_workflow_id ON messages(workflow_id);
 
 -- Message statuses table indexes
 CREATE INDEX IF NOT EXISTS idx_message_statuses_message_id ON message_statuses(message_id);

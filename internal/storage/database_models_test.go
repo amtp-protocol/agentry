@@ -82,3 +82,30 @@ func TestTableNames(t *testing.T) {
 		t.Errorf("RecipientStatus table name incorrect")
 	}
 }
+
+func TestMessage_ConversionRoundTrip_PreservesWorkflowID(t *testing.T) {
+	ds := &DatabaseStorage{}
+
+	original := &types.Message{
+		Version:        "1.0",
+		MessageID:      "0198c5b2-0000-7000-8000-000000000010",
+		IdempotencyKey: "key-1",
+		Sender:         "initiator@example.com",
+		Recipients:     []string{"agent1@example.com"},
+		WorkflowID:     "0198c5b2-0000-7000-8000-000000000011",
+	}
+
+	dbMsg, err := ds.convertToDBMessage(original)
+	if err != nil {
+		t.Fatalf("convertToDBMessage failed: %v", err)
+	}
+
+	restored, err := ds.convertToTypesMessage(dbMsg)
+	if err != nil {
+		t.Fatalf("convertToTypesMessage failed: %v", err)
+	}
+
+	if restored.WorkflowID != original.WorkflowID {
+		t.Errorf("WorkflowID after round-trip = %q, want %q", restored.WorkflowID, original.WorkflowID)
+	}
+}

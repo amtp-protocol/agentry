@@ -39,6 +39,7 @@ type Message struct {
 	Signature      *MessageSignature      `json:"signature,omitempty"`
 	InReplyTo      string                 `json:"in_reply_to,omitempty" validate:"omitempty,uuidv7"`
 	ResponseType   string                 `json:"response_type,omitempty"`
+	WorkflowID     string                 `json:"workflow_id,omitempty" validate:"omitempty,uuidv7"`
 }
 
 // CoordinationConfig defines multi-agent coordination parameters
@@ -127,6 +128,7 @@ type SendMessageRequest struct {
 	Headers        map[string]interface{} `json:"headers,omitempty"`
 	ResponseType   string                 `json:"response_type,omitempty"`
 	InReplyTo      string                 `json:"in_reply_to,omitempty"`
+	WorkflowID     string                 `json:"workflow_id,omitempty"`
 	Payload        json.RawMessage        `json:"payload,omitempty"`
 	Attachments    []Attachment           `json:"attachments,omitempty"`
 }
@@ -134,6 +136,7 @@ type SendMessageRequest struct {
 // SendMessageResponse represents the API response for sending a message
 type SendMessageResponse struct {
 	MessageID  string            `json:"message_id"`
+	WorkflowID string            `json:"workflow_id,omitempty"`
 	Status     string            `json:"status"`
 	Recipients []RecipientStatus `json:"recipients"`
 }

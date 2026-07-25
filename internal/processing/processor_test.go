@@ -444,3 +444,34 @@ func BenchmarkIdempotencyCheck(b *testing.B) {
 		processor.checkIdempotency(key)
 	}
 }
+
+func TestProcessMessage_CoordinationResultCarriesWorkflowID(t *testing.T) {
+	discovery := NewMockDiscovery()
+	deliveryEngine := NewMockDeliveryEngine()
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+	mockWorkflow := &MockWorkflowManager{
+		InitializeFunc: func(ctx context.Context, msg *types.Message) (*types.Workflow, error) {
+			return &types.Workflow{WorkflowID: "0198c5b2-0000-7000-8000-000000000001"}, nil
+		},
+	}
+	processor.SetWorkflowManager(mockWorkflow)
+
+	message := createTestMessage()
+	message.Coordination = &types.CoordinationConfig{
+		Type:    "parallel",
+		Timeout: 30,
+	}
+
+	result, err := processor.ProcessMessage(context.Background(), message, ProcessingOptions{
+		ImmediatePath: false,
+		Timeout:       30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Failed to process message: %v", err)
+	}
+
+	if result.WorkflowID != "0198c5b2-0000-7000-8000-000000000001" {
+		t.Errorf("ProcessingResult.WorkflowID = %q, want the workflow ID from Initialize", result.WorkflowID)
+	}
+}

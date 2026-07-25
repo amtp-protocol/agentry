@@ -149,6 +149,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		Payload:        req.Payload,
 		ResponseType:   req.ResponseType,
 		InReplyTo:      req.InReplyTo,
+		WorkflowID:     req.WorkflowID,
 		Attachments:    req.Attachments,
 	}
 
@@ -178,11 +179,17 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	// non-shared DB), a workflow created on replica A is invisible to replica B.
 	// There is currently NO cross-replica forwarding of workflow responses; the
 	// owning replica must directly receive the response, e.g. via a frontend
-	// load-balancer that routes requests by InReplyTo (workflow ID) affinity.
+	// load-balancer that routes requests by workflow_id affinity.
 	// See docs/DEPLOYMENT.md for deployment topology guidance.
-	if message.ResponseType == "workflow_response" && message.InReplyTo != "" {
+	// Correlation key: prefer the dedicated workflow_id field; fall back to
+	// in_reply_to for clients that predate it.
+	workflowRef := message.WorkflowID
+	if workflowRef == "" {
+		workflowRef = message.InReplyTo
+	}
+	if message.ResponseType == "workflow_response" && workflowRef != "" {
 		if s.workflow != nil {
-			err := s.workflow.ProcessResponse(c.Request.Context(), message.InReplyTo, message)
+			err := s.workflow.ProcessResponse(c.Request.Context(), workflowRef, message)
 			if err != nil {
 				if errors.Is(err, storage.ErrWorkflowNotFound) {
 					// Workflow not found in this storage. Fall through to normal
@@ -248,6 +255,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	// Return response
 	response := types.SendMessageResponse{
 		MessageID:  result.MessageID,
+		WorkflowID: result.WorkflowID,
 		Status:     status,
 		Recipients: result.Recipients,
 	}

@@ -37,6 +37,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/internal/validation"
+	"github.com/amtp-protocol/agentry/pkg/uuid"
 )
 
 // MockMessageProcessor for testing
@@ -1801,4 +1802,114 @@ func (m *MockStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID
 }
 func (m *MockStorage) ListTimedOutWorkflows(ctx context.Context) ([]*types.Workflow, error) {
 	return nil, nil
+}
+
+func TestHandleSendMessage_WorkflowResponseRoutedByWorkflowID(t *testing.T) {
+	server := createTestServer()
+
+	workflowID, err := uuid.GenerateV7()
+	if err != nil {
+		t.Fatalf("Failed to generate workflow ID: %v", err)
+	}
+
+	var gotWorkflowID string
+	var gotSender string
+	server.workflow = &processing.MockWorkflowManager{
+		ProcessResponseFunc: func(ctx context.Context, wfID string, replyMsg *types.Message) error {
+			gotWorkflowID = wfID
+			gotSender = replyMsg.Sender
+			return nil
+		},
+	}
+
+	requestBody := types.SendMessageRequest{
+		Sender:       "agent1@example.com",
+		Recipients:   []string{"initiator@test.com"},
+		Subject:      "Workflow step done",
+		ResponseType: "workflow_response",
+		WorkflowID:   workflowID,
+		Payload:      json.RawMessage(`{"status": "completed"}`),
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		t.Fatalf("Failed to marshal request body: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", "/v1/messages", bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	if gotWorkflowID != workflowID {
+		t.Errorf("ProcessResponse called with workflow ID %q, want %q", gotWorkflowID, workflowID)
+	}
+	if gotSender != "agent1@example.com" {
+		t.Errorf("ProcessResponse reply sender = %q, want agent1@example.com", gotSender)
+	}
+}
+
+func TestHandleSendMessage_ResponseIncludesWorkflowID(t *testing.T) {
+	server := createTestServer()
+
+	workflowID, err := uuid.GenerateV7()
+	if err != nil {
+		t.Fatalf("Failed to generate workflow ID: %v", err)
+	}
+
+	mockProcessor := server.processor.(*MockMessageProcessor)
+	mockProcessor.processResult = &processing.ProcessingResult{
+		Status:     types.StatusQueued,
+		WorkflowID: workflowID,
+		Recipients: []types.RecipientStatus{
+			{Address: "agent1@test.com", Status: types.StatusQueued},
+		},
+	}
+
+	requestBody := types.SendMessageRequest{
+		Sender:     "initiator@example.com",
+		Recipients: []string{"agent1@test.com"},
+		Subject:    "Coordinated task",
+		Coordination: &types.CoordinationConfig{
+			Type:              "parallel",
+			Timeout:           60,
+			RequiredResponses: []string{"agent1@test.com"},
+		},
+		Payload: json.RawMessage(`{"task": "do it"}`),
+	}
+
+	body, err := json.Marshal(requestBody)
+	if err != nil {
+		t.Fatalf("Failed to marshal request body: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", "/v1/messages", bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("Expected status code %d, got %d: %s", http.StatusAccepted, rr.Code, rr.Body.String())
+	}
+
+	var response types.SendMessageResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+
+	if response.WorkflowID != workflowID {
+		t.Errorf("Response workflow_id = %q, want %q", response.WorkflowID, workflowID)
+	}
 }

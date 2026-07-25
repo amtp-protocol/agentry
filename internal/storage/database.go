@@ -711,6 +711,10 @@ func (ds *DatabaseStorage) convertToDBMessage(message *types.Message) (*Message,
 	if message.InReplyTo != "" {
 		inReplyToStr = &message.InReplyTo
 	}
+	var workflowIDStr *string
+	if message.WorkflowID != "" {
+		workflowIDStr = &message.WorkflowID
+	}
 
 	dbMessage := &Message{
 		Version:        message.Version,
@@ -722,6 +726,7 @@ func (ds *DatabaseStorage) convertToDBMessage(message *types.Message) (*Message,
 		Schema:         message.Schema,
 		InReplyTo:      inReplyToStr,
 		ResponseType:   message.ResponseType,
+		WorkflowID:     workflowIDStr,
 	}
 
 	// Convert recipients
@@ -809,6 +814,10 @@ func (ds *DatabaseStorage) convertToTypesMessage(dbMessage *Message) (*types.Mes
 	if dbMessage.InReplyTo != nil {
 		inReplyToStr = *dbMessage.InReplyTo
 	}
+	var workflowIDStr string
+	if dbMessage.WorkflowID != nil {
+		workflowIDStr = *dbMessage.WorkflowID
+	}
 
 	message := &types.Message{
 		Version:        dbMessage.Version,
@@ -820,6 +829,7 @@ func (ds *DatabaseStorage) convertToTypesMessage(dbMessage *Message) (*types.Mes
 		Schema:         dbMessage.Schema,
 		InReplyTo:      inReplyToStr,
 		ResponseType:   dbMessage.ResponseType,
+		WorkflowID:     workflowIDStr,
 	}
 
 	// Convert recipients

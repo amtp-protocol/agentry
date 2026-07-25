@@ -40,6 +40,7 @@ type MessageProcessor struct {
 // ProcessingResult represents the result of message processing
 type ProcessingResult struct {
 	MessageID    string
+	WorkflowID   string
 	Status       types.DeliveryStatus
 	Recipients   []types.RecipientStatus
 	ProcessedAt  time.Time
