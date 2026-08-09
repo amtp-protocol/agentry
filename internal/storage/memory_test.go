@@ -369,6 +369,85 @@ func TestMemoryStorage_UpdateStatus_NotFound(t *testing.T) {
 	}
 }
 
+// TestMemoryStorage_GetStatuses verifies that GetStatuses returns the statuses
+// for the requested message IDs in one batch, omits IDs without a stored
+// status, and returns clones so callers cannot mutate the store.
+func TestMemoryStorage_GetStatuses(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	if err := storage.StoreStatus(ctx, "msg-1", &types.MessageStatus{
+		MessageID: "msg-1",
+		Status:    types.StatusDelivered,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("store status msg-1: %v", err)
+	}
+	if err := storage.StoreStatus(ctx, "msg-2", &types.MessageStatus{
+		MessageID: "msg-2",
+		Status:    types.StatusQueued,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("store status msg-2: %v", err)
+	}
+	// msg-3 has no stored status.
+
+	statuses, err := storage.GetStatuses(ctx, []string{"msg-1", "msg-2", "msg-3"})
+	if err != nil {
+		t.Fatalf("GetStatuses failed: %v", err)
+	}
+
+	// Only statuses that exist are returned; msg-3 is omitted.
+	if len(statuses) != 2 {
+		t.Fatalf("Expected 2 statuses, got %d", len(statuses))
+	}
+	if statuses["msg-1"] == nil || statuses["msg-1"].Status != types.StatusDelivered {
+		t.Errorf("Expected delivered status for msg-1, got %+v", statuses["msg-1"])
+	}
+	if statuses["msg-2"] == nil || statuses["msg-2"].Status != types.StatusQueued {
+		t.Errorf("Expected queued status for msg-2, got %+v", statuses["msg-2"])
+	}
+	if _, exists := statuses["msg-3"]; exists {
+		t.Error("Expected msg-3 to be omitted (no stored status)")
+	}
+
+	// Returned statuses must be clones: mutating one must not affect the store.
+	statuses["msg-1"].Status = types.StatusFailed
+	got, err := storage.GetStatus(ctx, "msg-1")
+	if err != nil {
+		t.Fatalf("GetStatus failed: %v", err)
+	}
+	if got.Status != types.StatusDelivered {
+		t.Errorf("Expected stored status to remain delivered, got %s (returned statuses must be clones)", got.Status)
+	}
+}
+
+// TestMemoryStorage_GetStatuses_Empty verifies that an empty request returns
+// an empty result without error.
+func TestMemoryStorage_GetStatuses_Empty(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	statuses, err := storage.GetStatuses(ctx, nil)
+	if err != nil {
+		t.Fatalf("GetStatuses with nil input failed: %v", err)
+	}
+	if len(statuses) != 0 {
+		t.Errorf("Expected empty result, got %d entries", len(statuses))
+	}
+
+	statuses, err = storage.GetStatuses(ctx, []string{})
+	if err != nil {
+		t.Fatalf("GetStatuses with empty input failed: %v", err)
+	}
+	if len(statuses) != 0 {
+		t.Errorf("Expected empty result for empty input, got %d entries", len(statuses))
+	}
+}
+
 func TestMemoryStorage_GetInboxMessages(t *testing.T) {
 	storage := NewMemoryStorage(MemoryStorageConfig{})
 	ctx := context.Background()

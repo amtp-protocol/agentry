@@ -507,7 +507,10 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	}
 
 	// Attach delivery status to each message so callers get a complete view.
+	// Collect the page's message IDs first, then fetch all statuses in a
+	// single batch to avoid an N+1 GetStatus call per message.
 	response := make([]gin.H, 0, len(messages))
+	statusIDs := make([]string, 0, len(messages))
 	for _, msg := range messages {
 		// Post-filter for safety: the storage filter may be an OR match, so
 		// only include messages the authenticated agent sent or received.
@@ -529,11 +532,23 @@ func (s *Server) handleListMessages(c *gin.Context) {
 		if msg.Payload != nil {
 			item["payload"] = msg.Payload
 		}
-		if st, err := s.storage.GetStatus(c.Request.Context(), msg.MessageID); err == nil && st != nil {
+		response = append(response, item)
+		statusIDs = append(statusIDs, msg.MessageID)
+	}
+
+	statuses, err := s.storage.GetStatuses(c.Request.Context(), statusIDs)
+	if err != nil {
+		s.respondWithError(c, http.StatusInternalServerError, "MESSAGE_LIST_FAILED",
+			"Failed to get message statuses", map[string]interface{}{
+				"error": err.Error(),
+			})
+		return
+	}
+	for i, item := range response {
+		if st, ok := statuses[statusIDs[i]]; ok && st != nil {
 			item["status"] = st.Status
 			item["delivery"] = st
 		}
-		response = append(response, item)
 	}
 
 	// total is the number of messages in the filtered set before pagination.

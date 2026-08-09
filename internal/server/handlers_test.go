@@ -60,6 +60,12 @@ type MockStorage struct {
 	// countError, when set, makes CountMessages fail so handler tests can
 	// verify count failures surface as errors instead of being swallowed.
 	countError error
+	// statusBatches records every message ID slice passed to GetStatuses so
+	// handler tests can assert statuses are fetched in one batch call.
+	statusBatches [][]string
+	// statusesError, when set, makes GetStatuses fail so handler tests can
+	// verify status failures surface as errors.
+	statusesError error
 }
 
 func NewMockMessageProcessor() *MockMessageProcessor {
@@ -122,6 +128,20 @@ func (m *MockStorage) GetStatus(ctx context.Context, messageID string) (*types.M
 		return status, nil
 	}
 	return nil, fmt.Errorf("message status not found: %s", messageID)
+}
+
+func (m *MockStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	m.statusBatches = append(m.statusBatches, messageIDs)
+	if m.statusesError != nil {
+		return nil, m.statusesError
+	}
+	result := make(map[string]*types.MessageStatus)
+	for _, id := range messageIDs {
+		if status, exists := m.statuses[id]; exists {
+			result[id] = status
+		}
+	}
+	return result, nil
 }
 
 func (m *MockStorage) UpdateStatus(ctx context.Context, messageID string, updater storage.StatusUpdater) error {
@@ -1670,6 +1690,120 @@ func TestHandleListMessages_CountFailure(t *testing.T) {
 	key := registerTestAgent(t, server, "viewer")
 
 	mockStorage.countError = fmt.Errorf("count exploded")
+
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errorResponse.Error.Code != "MESSAGE_LIST_FAILED" {
+		t.Errorf("Expected error code MESSAGE_LIST_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleListMessages_StatusesBatch verifies that delivery statuses for the
+// whole page are fetched in a single GetStatuses call (not N+1 GetStatus
+// calls) and attached to the response items.
+func TestHandleListMessages_StatusesBatch(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	now := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		msgID := fmt.Sprintf("019fbd30-%04d-75aa-8cd4-de1f14e011ab", i)
+		if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+			MessageID:  msgID,
+			Timestamp:  now.Add(-time.Duration(i) * time.Minute),
+			Sender:     "viewer@localhost",
+			Recipients: []string{"peer@localhost"},
+			Subject:    fmt.Sprintf("msg-%d", i),
+		}); err != nil {
+			t.Fatalf("seed message %d: %v", i, err)
+		}
+		if err := mockStorage.StoreStatus(context.Background(), msgID, &types.MessageStatus{
+			MessageID: msgID,
+			Status:    types.StatusDelivered,
+		}); err != nil {
+			t.Fatalf("seed status %d: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// Statuses must be fetched in exactly one batch containing every page
+	// message ID, not one GetStatus call per message.
+	if len(mockStorage.statusBatches) != 1 {
+		t.Fatalf("Expected exactly 1 GetStatuses batch, got %d", len(mockStorage.statusBatches))
+	}
+	batch := mockStorage.statusBatches[0]
+	if len(batch) != 3 {
+		t.Fatalf("Expected batch of 3 message IDs, got %d", len(batch))
+	}
+	got := make(map[string]bool)
+	for _, id := range batch {
+		got[id] = true
+	}
+	for i := 0; i < 3; i++ {
+		msgID := fmt.Sprintf("019fbd30-%04d-75aa-8cd4-de1f14e011ab", i)
+		if !got[msgID] {
+			t.Errorf("Expected batch to include %s, got %v", msgID, batch)
+		}
+	}
+
+	// Each response item must carry its delivery status.
+	var response struct {
+		Messages []map[string]interface{} `json:"messages"`
+		Total    int                      `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(response.Messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d", len(response.Messages))
+	}
+	for _, m := range response.Messages {
+		if m["status"] != string(types.StatusDelivered) {
+			t.Errorf("Expected status %s on message %v, got %v", types.StatusDelivered, m["message_id"], m["status"])
+		}
+		if _, ok := m["delivery"].(map[string]interface{}); !ok {
+			t.Errorf("Expected delivery attached to message %v", m["message_id"])
+		}
+	}
+}
+
+// TestHandleListMessages_StatusesFailure verifies that a GetStatuses failure
+// surfaces as an error response instead of silently dropping statuses.
+func TestHandleListMessages_StatusesFailure(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+		MessageID:  "019fbd30-0000-75aa-8cd4-de1f14e011ab",
+		Timestamp:  time.Now().UTC(),
+		Sender:     "viewer@localhost",
+		Recipients: []string{"peer@localhost"},
+		Subject:    "hello",
+	}); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+	mockStorage.statusesError = fmt.Errorf("statuses exploded")
 
 	req := httptest.NewRequest("GET", "/v1/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+key)

@@ -477,6 +477,97 @@ func TestGetStatus_NotFound(t *testing.T) {
 	}
 }
 
+// TestGetStatuses_Batch verifies that GetStatuses fetches message statuses and
+// recipient statuses with two IN queries and groups the result by message ID.
+func TestGetStatuses_Batch(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "message_statuses" WHERE message_id IN ($1,$2)`)).WithArgs("msg-1", "msg-2").WillReturnRows(
+		sqlmock.NewRows([]string{"message_id", "status", "attempts", "created_at", "updated_at"}).
+			AddRow("msg-1", "delivered", 1, now, now).
+			AddRow("msg-2", "queued", 0, now, now),
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "recipient_statuses" WHERE message_id IN ($1,$2)`)).WithArgs("msg-1", "msg-2").WillReturnRows(
+		sqlmock.NewRows([]string{"message_id", "address", "status", "timestamp"}).
+			AddRow("msg-1", "r1@example.com", "delivered", now).
+			AddRow("msg-1", "r2@example.com", "delivered", now).
+			AddRow("msg-2", "r3@example.com", "queued", now),
+	)
+
+	statuses, err := storage.GetStatuses(context.Background(), []string{"msg-1", "msg-2"})
+	if err != nil {
+		t.Fatalf("GetStatuses failed: %v", err)
+	}
+	if len(statuses) != 2 {
+		t.Fatalf("expected 2 statuses, got %d", len(statuses))
+	}
+	if st := statuses["msg-1"]; st == nil || st.Status != types.StatusDelivered || len(st.Recipients) != 2 {
+		t.Errorf("unexpected msg-1 status: %+v", st)
+	}
+	if st := statuses["msg-2"]; st == nil || st.Status != types.StatusQueued || len(st.Recipients) != 1 {
+		t.Errorf("unexpected msg-2 status: %+v", st)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestGetStatuses_MissingIDs verifies that message IDs without a stored status
+// are omitted from the result.
+func TestGetStatuses_MissingIDs(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "message_statuses" WHERE message_id IN ($1,$2)`)).WithArgs("msg-1", "no-status").WillReturnRows(
+		sqlmock.NewRows([]string{"message_id", "status", "attempts", "created_at", "updated_at"}).
+			AddRow("msg-1", "delivered", 1, now, now),
+	)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "recipient_statuses" WHERE message_id IN ($1,$2)`)).WithArgs("msg-1", "no-status").WillReturnRows(
+		sqlmock.NewRows([]string{"message_id", "address", "status", "timestamp"}),
+	)
+
+	statuses, err := storage.GetStatuses(context.Background(), []string{"msg-1", "no-status"})
+	if err != nil {
+		t.Fatalf("GetStatuses failed: %v", err)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status (no-status omitted), got %d", len(statuses))
+	}
+	if _, exists := statuses["no-status"]; exists {
+		t.Error("expected no-status to be omitted")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestGetStatuses_Empty verifies that an empty request performs no queries and
+// returns an empty result.
+func TestGetStatuses_Empty(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	statuses, err := storage.GetStatuses(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("GetStatuses with nil input failed: %v", err)
+	}
+	if len(statuses) != 0 {
+		t.Errorf("expected empty result, got %d entries", len(statuses))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
 func TestUpdateStatus_Success(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	sqlDB, _ := gormDB.DB()

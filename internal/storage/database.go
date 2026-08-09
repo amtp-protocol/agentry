@@ -370,6 +370,48 @@ func (ds *DatabaseStorage) GetStatus(ctx context.Context, messageID string) (*ty
 	return ds.convertToTypesMessageStatus(&messageStatus, recipientStatuses)
 }
 
+// GetStatuses retrieves the message statuses for the given IDs with two IN
+// queries (message statuses + recipient statuses) so the caller avoids an
+// N+1 GetStatus per message. IDs without a stored status are omitted from
+// the result, keyed by message ID.
+func (ds *DatabaseStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	if len(messageIDs) == 0 {
+		return map[string]*types.MessageStatus{}, nil
+	}
+
+	// Fetch all message statuses in one batch.
+	var messageStatuses []MessageStatus
+	if err := ds.db.WithContext(ctx).
+		Where("message_id IN ?", messageIDs).
+		Find(&messageStatuses).Error; err != nil {
+		return nil, fmt.Errorf("failed to get message statuses: %w", err)
+	}
+
+	// Fetch all recipient statuses in one batch.
+	var recipientStatuses []RecipientStatus
+	if err := ds.db.WithContext(ctx).
+		Where("message_id IN ?", messageIDs).
+		Find(&recipientStatuses).Error; err != nil {
+		return nil, fmt.Errorf("failed to get recipient statuses: %w", err)
+	}
+
+	// Group recipient statuses by message ID.
+	recipientsByMessageID := make(map[string][]RecipientStatus, len(messageStatuses))
+	for _, rs := range recipientStatuses {
+		recipientsByMessageID[rs.MessageID] = append(recipientsByMessageID[rs.MessageID], rs)
+	}
+
+	result := make(map[string]*types.MessageStatus, len(messageStatuses))
+	for i := range messageStatuses {
+		status, err := ds.convertToTypesMessageStatus(&messageStatuses[i], recipientsByMessageID[messageStatuses[i].MessageID])
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert message status: %w", err)
+		}
+		result[messageStatuses[i].MessageID] = status
+	}
+	return result, nil
+}
+
 // UpdateStatus updates message status using the provided updater function
 func (ds *DatabaseStorage) UpdateStatus(ctx context.Context, messageID string, updater StatusUpdater) error {
 	if messageID == "" {

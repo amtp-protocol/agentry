@@ -203,6 +203,26 @@ func (ms *MemoryStorage) GetStatus(ctx context.Context, messageID string) (*type
 	return cloneStatus(status), nil
 }
 
+// GetStatuses retrieves the message statuses for the given IDs in one batch
+// under a single lock. IDs without a stored status are omitted from the
+// result. Returned statuses are clones so callers cannot mutate the store.
+func (ms *MemoryStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	if len(messageIDs) == 0 {
+		return map[string]*types.MessageStatus{}, nil
+	}
+
+	ms.statusesMux.RLock()
+	defer ms.statusesMux.RUnlock()
+
+	result := make(map[string]*types.MessageStatus, len(messageIDs))
+	for _, messageID := range messageIDs {
+		if status, exists := ms.statuses[messageID]; exists {
+			result[messageID] = cloneStatus(status)
+		}
+	}
+	return result, nil
+}
+
 // UpdateStatus updates message status using the provided updater function
 func (ms *MemoryStorage) UpdateStatus(ctx context.Context, messageID string, updater StatusUpdater) error {
 	if messageID == "" {

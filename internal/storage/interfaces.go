@@ -51,6 +51,10 @@ type Storage interface {
 	// Status operations
 	StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error
 	GetStatus(ctx context.Context, messageID string) (*types.MessageStatus, error)
+	// GetStatuses returns the delivery statuses for the given message IDs in
+	// one batch operation. IDs without a stored status are omitted from the
+	// result, keyed by message ID.
+	GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error)
 	UpdateStatus(ctx context.Context, messageID string, updater StatusUpdater) error
 	DeleteStatus(ctx context.Context, messageID string) error
 

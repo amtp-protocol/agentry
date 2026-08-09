@@ -201,6 +201,21 @@ func (m *MockStorage) GetStatus(ctx context.Context, messageID string) (*types.M
 	return nil, fmt.Errorf("message status not found: %s", messageID)
 }
 
+func (m *MockStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	if m.error != nil {
+		return nil, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	result := make(map[string]*types.MessageStatus)
+	for _, id := range messageIDs {
+		if status, exists := m.statuses[id]; exists {
+			result[id] = status
+		}
+	}
+	return result, nil
+}
+
 func (m *MockStorage) UpdateStatus(ctx context.Context, messageID string, updater storage.StatusUpdater) error {
 	if m.error != nil {
 		return m.error
