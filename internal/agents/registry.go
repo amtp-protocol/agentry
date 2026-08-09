@@ -475,6 +475,14 @@ func (r *Registry) resolveAgentAddress(nameOrAddress string) (string, error) {
 	return r.normalizeAgentAddress(nameOrAddress)
 }
 
+// ResolveAgentAddress accepts either a bare agent name or a full address
+// matching the local domain and returns the normalized full address. It
+// wraps resolveAgentAddress so callers outside the package (e.g. the server
+// layer normalizing filter parameters) share the same resolution semantics.
+func (r *Registry) ResolveAgentAddress(nameOrAddress string) (string, error) {
+	return r.resolveAgentAddress(nameOrAddress)
+}
+
 // normalizeAgentAddress processes agent name and constructs full address
 func (r *Registry) normalizeAgentAddress(agentName string) (string, error) {
 	// Reject full addresses - only accept agent names

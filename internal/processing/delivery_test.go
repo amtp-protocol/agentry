@@ -152,6 +152,15 @@ func (m *MockAgentRegistry) UpdateAgent(ctx context.Context, agentNameOrAddress 
 	return &agentCopy, nil
 }
 
+func (m *MockAgentRegistry) ResolveAgentAddress(nameOrAddress string) (string, error) {
+	for i := 0; i < len(nameOrAddress); i++ {
+		if nameOrAddress[i] == '@' {
+			return nameOrAddress, nil
+		}
+	}
+	return nameOrAddress + "@localhost", nil
+}
+
 func (m *MockAgentRegistry) StoreMessage(recipient string, message *types.Message) error {
 	if m.inbox[recipient] == nil {
 		m.inbox[recipient] = make([]*types.Message, 0)

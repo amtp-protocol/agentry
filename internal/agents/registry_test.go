@@ -576,6 +576,44 @@ func TestUnregisterAgent(t *testing.T) {
 	}
 }
 
+// TestResolveAgentAddress verifies that ResolveAgentAddress accepts either a
+// bare agent name or a full address matching the local domain and returns the
+// normalized full address, and rejects foreign domains and invalid names.
+func TestResolveAgentAddress(t *testing.T) {
+	registry := createTestRegistry()
+
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"bare name", "viewer", "viewer@localhost", false},
+		{"full address matching local domain", "viewer@localhost", "viewer@localhost", false},
+		{"foreign domain", "viewer@example.com", "", true},
+		{"invalid characters", "bad name!", "", true},
+		{"empty", "", "", true},
+		{"name with dots", "sales.us", "sales.us@localhost", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := registry.ResolveAgentAddress(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Expected error for input %q, got %q", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveAgentAddress(%q) failed: %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Errorf("Expected %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
 // Test getting all agents
 func TestGetAllAgents(t *testing.T) {
 	registry := createTestRegistry()

@@ -41,6 +41,11 @@ type AgentRegistry interface {
 	GetAllAgents(ctx context.Context) map[string]*LocalAgent
 	GetSupportedSchemas(ctx context.Context) []string
 	UpdateAgent(ctx context.Context, agentNameOrAddress string, updates *AgentUpdate) (*LocalAgent, error)
+	// ResolveAgentAddress accepts either a bare agent name or a full address
+	// matching the local domain and returns the normalized full address. It
+	// fails when the input is not a valid agent name or references a foreign
+	// domain.
+	ResolveAgentAddress(nameOrAddress string) (string, error)
 
 	// API key management
 	GenerateAPIKey() (string, error)

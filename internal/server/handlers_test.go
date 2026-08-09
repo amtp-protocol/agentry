@@ -1377,6 +1377,149 @@ func TestHandleListMessages_ForbiddenOtherAgent(t *testing.T) {
 	}
 }
 
+// TestHandleListMessages_BareNameFilters verifies that sender/recipient
+// filters accept bare agent names (normalized to full addresses) exactly like
+// full addresses, against real storage so the filter predicates are applied.
+func TestHandleListMessages_BareNameFilters(t *testing.T) {
+	server := createTestServerWithRealProcessor()
+	key := registerTestAgent(t, server, "viewer")
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := []*types.Message{
+		{
+			MessageID:  "019fbd30-0001-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now,
+			Sender:     "viewer@localhost",
+			Recipients: []string{"peer@localhost"},
+			Subject:    "sent",
+		},
+		{
+			MessageID:  "019fbd30-0002-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now.Add(-time.Minute),
+			Sender:     "peer@localhost",
+			Recipients: []string{"viewer@localhost"},
+			Subject:    "received",
+		},
+		{
+			MessageID:  "019fbd30-0003-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now.Add(-2 * time.Minute),
+			Sender:     "viewer@localhost",
+			Recipients: []string{"viewer@localhost"},
+			Subject:    "self",
+		},
+	}
+	for _, msg := range seed {
+		if err := server.storage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("seed %s: %v", msg.MessageID, err)
+		}
+	}
+
+	tests := []struct {
+		name    string
+		query   string
+		wantIDs []string
+	}{
+		{"bare sender", "?sender=viewer", []string{"019fbd30-0001-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		{"full sender", "?sender=viewer@localhost", []string{"019fbd30-0001-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		{"bare recipient", "?recipient=viewer", []string{"019fbd30-0002-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		{"full recipient", "?recipient=viewer@localhost", []string{"019fbd30-0002-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		// Both filters AND: only the self message was sent by and addressed
+		// to the viewer.
+		{"bare both", "?sender=viewer&recipient=viewer", []string{"019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+			}
+
+			var response struct {
+				Messages []map[string]interface{} `json:"messages"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(response.Messages) != len(tt.wantIDs) {
+				t.Fatalf("Expected %d messages, got %d", len(tt.wantIDs), len(response.Messages))
+			}
+			got := make(map[string]bool)
+			for _, m := range response.Messages {
+				got[m["message_id"].(string)] = true
+			}
+			for _, id := range tt.wantIDs {
+				if !got[id] {
+					t.Errorf("Expected message %s in response, got %v", id, got)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleListMessages_BareNameFilterNormalized verifies that a bare-name
+// filter is normalized to the full address before reaching the storage layer.
+func TestHandleListMessages_BareNameFilterNormalized(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages?sender=viewer&recipient=viewer", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	filter := mockStorage.listFilters[0]
+	if filter.Sender != "viewer@localhost" {
+		t.Errorf("Expected normalized sender viewer@localhost in storage filter, got %q", filter.Sender)
+	}
+	if len(filter.Recipients) != 1 || filter.Recipients[0] != "viewer@localhost" {
+		t.Errorf("Expected normalized recipient [viewer@localhost] in storage filter, got %v", filter.Recipients)
+	}
+}
+
+// TestHandleListMessages_ForbiddenBareOtherAgent verifies that a bare name
+// referencing another agent, and a foreign-domain address, are both rejected
+// with 403.
+func TestHandleListMessages_ForbiddenBareOtherAgent(t *testing.T) {
+	server := createTestServer()
+	registerTestAgent(t, server, "viewer")
+	key := registerTestAgent(t, server, "other")
+
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{"bare other sender", "?sender=viewer"},
+		{"bare other recipient", "?recipient=viewer"},
+		{"foreign domain sender", "?sender=viewer@example.com"},
+		{"invalid sender", "?sender=bad%20name%21"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("Expected status %d, got %d: %s", http.StatusForbidden, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleListMessages_InvalidLimit(t *testing.T) {
 	server := createTestServer()
 	key := registerTestAgent(t, server, "viewer")

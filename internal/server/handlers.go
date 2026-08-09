@@ -420,6 +420,17 @@ func buildListMessagesFilter(status, sender, recipient, agentAddr string, since 
 	return filter
 }
 
+// normalizeAgentFilter normalizes a bare agent name to its full address
+// (name@localdomain) for filter parameters, accepting full addresses that
+// already match the local domain. An empty value is returned unchanged,
+// meaning the filter is absent.
+func (s *Server) normalizeAgentFilter(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	return s.agentRegistry.ResolveAgentAddress(value)
+}
+
 // handleListMessages handles GET /v1/messages
 // Requires an Agent API key. Results are scoped to the authenticated agent:
 // the sender/recipient filters must reference that agent, and the returned
@@ -466,11 +477,26 @@ func (s *Server) handleListMessages(c *gin.Context) {
 		sinceTime = &parsed
 	}
 
-	// A caller may only query their own agent's traffic. Reject filters that
-	// reference other agents.
+	// A caller may only query their own agent's traffic. Normalize bare-name
+	// filters to full addresses so "?sender=viewer" works like
+	// "?sender=viewer@localhost"; then reject filters that reference other
+	// agents. A filter that cannot be resolved to a local agent — an invalid
+	// name or a foreign domain — is treated as referencing another agent.
+	sender, err = s.normalizeAgentFilter(sender)
+	if err != nil {
+		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
+			"Sender filter must reference the authenticated agent", nil)
+		return
+	}
 	if sender != "" && sender != agentAddr {
 		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
 			"Sender filter must reference the authenticated agent", nil)
+		return
+	}
+	recipient, err = s.normalizeAgentFilter(recipient)
+	if err != nil {
+		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
+			"Recipient filter must reference the authenticated agent", nil)
 		return
 	}
 	if recipient != "" && recipient != agentAddr {
