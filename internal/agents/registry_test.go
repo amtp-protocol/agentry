@@ -47,6 +47,11 @@ func NewMockSchemaManager() *MockSchemaManager {
 
 type inMemoryAgentStore struct {
 	agents map[string]*LocalAgent
+	// fullUpdates counts full-record UpdateAgent calls; fieldUpdates counts
+	// field-level UpdateAgentFields calls. The registry must never perform a
+	// full-record update, which could clobber a concurrent key rotation.
+	fullUpdates  int
+	fieldUpdates int
 }
 
 func newInMemoryAgentStore() *inMemoryAgentStore {
@@ -86,6 +91,7 @@ func (s *inMemoryAgentStore) GetAgent(ctx context.Context, agentAddress string) 
 }
 
 func (s *inMemoryAgentStore) UpdateAgent(ctx context.Context, agent *LocalAgent) error {
+	s.fullUpdates++
 	if agent == nil {
 		return fmt.Errorf("agent cannot be nil")
 	}
@@ -95,6 +101,38 @@ func (s *inMemoryAgentStore) UpdateAgent(ctx context.Context, agent *LocalAgent)
 
 	agentCopy := *agent
 	s.agents[agent.Address] = &agentCopy
+	return nil
+}
+
+func (s *inMemoryAgentStore) UpdateAgentFields(ctx context.Context, agentAddress string, fields AgentFields) error {
+	s.fieldUpdates++
+	agent, exists := s.agents[agentAddress]
+	if !exists {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	if fields.DeliveryMode != nil {
+		agent.DeliveryMode = *fields.DeliveryMode
+	}
+	if fields.PushTarget != nil {
+		agent.PushTarget = *fields.PushTarget
+	}
+	if fields.PushHeaders != nil {
+		agent.Headers = make(map[string]string, len(fields.PushHeaders))
+		for k, v := range fields.PushHeaders {
+			agent.Headers[k] = v
+		}
+	}
+	if fields.SupportedSchemas != nil {
+		agent.SupportedSchemas = append([]string(nil), fields.SupportedSchemas...)
+		agent.RequiresSchema = len(fields.SupportedSchemas) > 0
+	}
+	if fields.LastAccess != nil {
+		agent.LastAccess = *fields.LastAccess
+	}
+	if fields.APIKey != nil {
+		agent.APIKey = *fields.APIKey
+	}
 	return nil
 }
 
@@ -310,6 +348,139 @@ func TestUpdateLastAccess(t *testing.T) {
 
 	if _, err := registry.GetAgent(ctx, "nonexistent@localhost"); err == nil {
 		t.Error("Non-existent agent should not be created during last access update")
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// TestUpdateAgent_UsesFieldLevelUpdate verifies that the registry updates an
+// agent with a field-level storage write (leaving the API key untouched)
+// instead of a full-record read-modify-write that could clobber a concurrent
+// key rotation.
+func TestUpdateAgent_UsesFieldLevelUpdate(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	agent := &LocalAgent{
+		Address:      "test",
+		DeliveryMode: "pull",
+	}
+	if err := registry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+	store := registry.storage.(*inMemoryAgentStore)
+	// The stored API key is the hash, not the plaintext returned to callers.
+	storedKey := store.agents[agent.Address].APIKey
+
+	updated, err := registry.UpdateAgent(ctx, agent.Address, &AgentUpdate{
+		DeliveryMode: strPtr("push"),
+		PushTarget:   strPtr("http://localhost:8080/hook"),
+	})
+	if err != nil {
+		t.Fatalf("UpdateAgent failed: %v", err)
+	}
+
+	// The update must go through the field-level path exclusively.
+	if store.fieldUpdates != 1 || store.fullUpdates != 0 {
+		t.Errorf("Expected 1 field-level update and 0 full-record updates, got field=%d full=%d",
+			store.fieldUpdates, store.fullUpdates)
+	}
+
+	got, err := registry.GetAgent(ctx, agent.Address)
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if got.DeliveryMode != "push" || got.PushTarget != "http://localhost:8080/hook" {
+		t.Errorf("Expected updated delivery fields, got mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+	// The API key hash in storage must be unchanged.
+	if store.agents[agent.Address].APIKey != storedKey {
+		t.Error("UpdateAgent must not modify the stored API key hash")
+	}
+	// The returned record redacts the key.
+	if updated.APIKey != "" {
+		t.Errorf("Expected redacted API key in update response, got %q", updated.APIKey)
+	}
+}
+
+// TestUpdateAgent_SupportedSchemasDerivesRequiresSchema verifies that setting
+// supported schemas also updates the derived RequiresSchema flag.
+func TestUpdateAgent_SupportedSchemasDerivesRequiresSchema(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	agent := &LocalAgent{Address: "test", DeliveryMode: "pull"}
+	if err := registry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+
+	if _, err := registry.UpdateAgent(ctx, agent.Address, &AgentUpdate{
+		SupportedSchemas: []string{"agntcy:test.hello.v1"},
+	}); err != nil {
+		t.Fatalf("UpdateAgent failed: %v", err)
+	}
+
+	store := registry.storage.(*inMemoryAgentStore)
+	stored := store.agents[agent.Address]
+	if !stored.RequiresSchema {
+		t.Error("Expected RequiresSchema to be derived true when schemas are set")
+	}
+	if len(stored.SupportedSchemas) != 1 || stored.SupportedSchemas[0] != "agntcy:test.hello.v1" {
+		t.Errorf("Expected updated supported schemas, got %v", stored.SupportedSchemas)
+	}
+}
+
+// TestUpdateLastAccess_UsesFieldLevelUpdate verifies that UpdateLastAccess
+// performs a field-level write so it cannot clobber a concurrent rotation.
+func TestUpdateLastAccess_UsesFieldLevelUpdate(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	agent := &LocalAgent{Address: "test", DeliveryMode: "pull"}
+	if err := registry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+	store := registry.storage.(*inMemoryAgentStore)
+	storedKey := store.agents[agent.Address].APIKey
+
+	registry.UpdateLastAccess(ctx, agent.Address)
+
+	if store.fieldUpdates != 1 || store.fullUpdates != 0 {
+		t.Errorf("Expected 1 field-level update and 0 full-record updates, got field=%d full=%d",
+			store.fieldUpdates, store.fullUpdates)
+	}
+	if store.agents[agent.Address].APIKey != storedKey {
+		t.Error("UpdateLastAccess must not modify the stored API key hash")
+	}
+}
+
+// TestRotateAPIKey_UsesFieldLevelUpdate verifies that key rotation performs a
+// field-level write so it cannot clobber a concurrent agent update.
+func TestRotateAPIKey_UsesFieldLevelUpdate(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	agent := &LocalAgent{Address: "test", DeliveryMode: "pull"}
+	if err := registry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("Failed to register agent: %v", err)
+	}
+	store := registry.storage.(*inMemoryAgentStore)
+	oldKey := agent.APIKey
+
+	newKey, err := registry.RotateAPIKey(ctx, agent.Address)
+	if err != nil {
+		t.Fatalf("RotateAPIKey failed: %v", err)
+	}
+
+	if store.fieldUpdates != 1 || store.fullUpdates != 0 {
+		t.Errorf("Expected 1 field-level update and 0 full-record updates, got field=%d full=%d",
+			store.fieldUpdates, store.fullUpdates)
+	}
+	if !registry.VerifyAPIKey(ctx, agent.Address, newKey) {
+		t.Error("New key should verify after rotation")
+	}
+	if registry.VerifyAPIKey(ctx, agent.Address, oldKey) {
+		t.Error("Old key should no longer verify after rotation")
 	}
 }
 

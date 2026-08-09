@@ -18,6 +18,7 @@ package agents
 
 import (
 	"context"
+	"time"
 
 	"github.com/amtp-protocol/agentry/internal/types"
 )
@@ -28,8 +29,25 @@ type AgentStore interface {
 	DeleteAgent(ctx context.Context, agentAddress string) error
 	GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error)
 	UpdateAgent(ctx context.Context, agent *LocalAgent) error
+	// UpdateAgentFields updates only the specified fields of an agent,
+	// leaving everything else (notably the API key hash) untouched. This
+	// avoids read-modify-write races where a full-record update could clobber
+	// a concurrent key rotation. When SupportedSchemas is provided,
+	// RequiresSchema is derived as len(SupportedSchemas) > 0.
+	UpdateAgentFields(ctx context.Context, agentAddress string, fields AgentFields) error
 	ListAgents(ctx context.Context) ([]*LocalAgent, error)
 	GetSupportedSchemas(ctx context.Context) ([]string, error)
+}
+
+// AgentFields contains the optional fields for a field-level agent update.
+// Nil fields are left unchanged. APIKey must already be hashed.
+type AgentFields struct {
+	DeliveryMode     *string
+	PushTarget       *string
+	PushHeaders      map[string]string
+	SupportedSchemas []string
+	LastAccess       *time.Time
+	APIKey           *string
 }
 
 // AgentRegistry defines the interface for managing local agents

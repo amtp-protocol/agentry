@@ -1311,6 +1311,138 @@ func TestMemoryStorage_UpdateAgent_NilAgent(t *testing.T) {
 	}
 }
 
+// TestMemoryStorage_UpdateAgentFields verifies that a field-level update
+// touches only the specified fields: the API key hash is preserved even when
+// other fields change, so a concurrent key rotation cannot be clobbered.
+func TestMemoryStorage_UpdateAgentFields(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	deliveryMode := "push"
+	pushTarget := "http://localhost:8080/hook"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+		PushTarget:   &pushTarget,
+	}); err != nil {
+		t.Fatalf("UpdateAgentFields failed: %v", err)
+	}
+
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if got.DeliveryMode != "push" || got.PushTarget != "http://localhost:8080/hook" {
+		t.Errorf("Expected updated delivery fields, got mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+	// The API key hash must be untouched by a field-level update.
+	if got.APIKey != "hash-A" {
+		t.Errorf("Expected API key hash preserved, got %q", got.APIKey)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_SchemasAndLastAccess verifies that
+// supported schemas, the derived RequiresSchema flag, last access, and the
+// API key can each be updated in isolation.
+func TestMemoryStorage_UpdateAgentFields_SchemasAndLastAccess(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	lastAccess := time.Now().UTC()
+	apiKey := "hash-B"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		SupportedSchemas: []string{"agntcy:test.hello.v1"},
+		LastAccess:       &lastAccess,
+		APIKey:           &apiKey,
+	}); err != nil {
+		t.Fatalf("UpdateAgentFields failed: %v", err)
+	}
+
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if len(got.SupportedSchemas) != 1 || got.SupportedSchemas[0] != "agntcy:test.hello.v1" {
+		t.Errorf("Expected updated supported schemas, got %v", got.SupportedSchemas)
+	}
+	if !got.RequiresSchema {
+		t.Error("Expected RequiresSchema to be derived true when schemas are set")
+	}
+	if !got.LastAccess.Equal(lastAccess) {
+		t.Errorf("Expected last access %v, got %v", lastAccess, got.LastAccess)
+	}
+	if got.APIKey != "hash-B" {
+		t.Errorf("Expected API key hash updated to hash-B, got %q", got.APIKey)
+	}
+	// Delivery mode must be untouched by the field-level update.
+	if got.DeliveryMode != "pull" {
+		t.Errorf("Expected delivery mode untouched, got %q", got.DeliveryMode)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_NotFound verifies the error for an
+// unknown agent address.
+func TestMemoryStorage_UpdateAgentFields_NotFound(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	deliveryMode := "push"
+	err := storage.UpdateAgentFields(ctx, "non-existent@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+	})
+	if err == nil {
+		t.Fatal("Expected error updating non-existent agent")
+	}
+	if err.Error() != "agent not found: non-existent@localhost" {
+		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_Empty verifies that a field-level update
+// with no fields is a no-op that preserves the stored agent.
+func TestMemoryStorage_UpdateAgentFields_Empty(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{}); err != nil {
+		t.Fatalf("UpdateAgentFields with no fields failed: %v", err)
+	}
+
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if got.DeliveryMode != "pull" || got.APIKey != "hash-A" {
+		t.Errorf("Expected agent unchanged, got mode=%q key=%q", got.DeliveryMode, got.APIKey)
+	}
+}
+
 func TestMemoryStorage_DeleteAgent(t *testing.T) {
 	storage := NewMemoryStorage(MemoryStorageConfig{})
 	ctx := context.Background()

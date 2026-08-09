@@ -196,6 +196,10 @@ func (r *Registry) getAgentInternal(ctx context.Context, agentAddress string) (*
 // UpdateAgent updates mutable delivery configuration for an existing agent.
 // Supported fields: delivery mode, push target, push headers, and supported
 // schemas. The API key is preserved.
+//
+// The update is applied as a field-level storage write so a concurrent key
+// rotation (which only touches the API key hash) is never clobbered by a
+// full-record read-modify-write.
 func (r *Registry) UpdateAgent(ctx context.Context, agentNameOrAddress string, updates *AgentUpdate) (*LocalAgent, error) {
 	fullAddress, err := r.resolveAgentAddress(agentNameOrAddress)
 	if err != nil {
@@ -207,37 +211,44 @@ func (r *Registry) UpdateAgent(ctx context.Context, agentNameOrAddress string, u
 		return nil, err
 	}
 
+	// Validate against the merged state (current values overridden by the
+	// requested updates) before writing anything.
+	deliveryMode := agent.DeliveryMode
 	if updates.DeliveryMode != nil {
 		if *updates.DeliveryMode != "push" && *updates.DeliveryMode != "pull" {
 			return nil, fmt.Errorf("delivery mode must be 'push' or 'pull'")
 		}
-		agent.DeliveryMode = *updates.DeliveryMode
+		deliveryMode = *updates.DeliveryMode
 	}
+	pushTarget := agent.PushTarget
 	if updates.PushTarget != nil {
-		agent.PushTarget = *updates.PushTarget
+		pushTarget = *updates.PushTarget
 	}
-	if updates.PushHeaders != nil {
-		agent.Headers = updates.PushHeaders
+	if deliveryMode == "push" && pushTarget == "" {
+		return nil, fmt.Errorf("push target URL is required for push delivery mode")
 	}
 	if updates.SupportedSchemas != nil {
 		if err := r.validateSupportedSchemas(ctx, updates.SupportedSchemas); err != nil {
 			return nil, fmt.Errorf("invalid supported schemas: %w", err)
 		}
-		agent.SupportedSchemas = updates.SupportedSchemas
-		agent.RequiresSchema = len(updates.SupportedSchemas) > 0
 	}
 
-	// Push mode requires a target.
-	if agent.DeliveryMode == "push" && agent.PushTarget == "" {
-		return nil, fmt.Errorf("push target URL is required for push delivery mode")
+	fields := AgentFields{
+		DeliveryMode:     updates.DeliveryMode,
+		PushTarget:       updates.PushTarget,
+		PushHeaders:      updates.PushHeaders,
+		SupportedSchemas: updates.SupportedSchemas,
 	}
-
-	if err := r.storage.UpdateAgent(ctx, agent); err != nil {
+	if err := r.storage.UpdateAgentFields(ctx, fullAddress, fields); err != nil {
 		return nil, fmt.Errorf("failed to update agent: %w", err)
 	}
 
-	// Return a copy with the API key redacted.
-	result := *agent
+	// Return a copy of the freshly stored record with the API key redacted.
+	updated, err := r.getAgentInternal(ctx, fullAddress)
+	if err != nil {
+		return nil, err
+	}
+	result := *updated
 	result.APIKey = ""
 	return &result, nil
 }
@@ -304,24 +315,19 @@ func (r *Registry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string
 	return subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashedInput)) == 1
 }
 
-// UpdateLastAccess updates the last access timestamp for an agent
+// UpdateLastAccess updates the last access timestamp for an agent using a
+// field-level write so it cannot clobber a concurrent key rotation.
 func (r *Registry) UpdateLastAccess(ctx context.Context, agentAddress string) {
-	agent, err := r.getAgentInternal(ctx, agentAddress)
-	if err != nil || agent == nil {
-		return
-	}
-
-	agent.LastAccess = time.Now().UTC()
-	err = r.storage.UpdateAgent(ctx, agent)
-	if err != nil {
+	now := time.Now().UTC()
+	if err := r.storage.UpdateAgentFields(ctx, agentAddress, AgentFields{LastAccess: &now}); err != nil {
 		return
 	}
 }
 
-// RotateAPIKey generates a new API key for an existing agent
+// RotateAPIKey generates a new API key for an existing agent. Only the API
+// key hash is written, so a concurrent agent update is never clobbered.
 func (r *Registry) RotateAPIKey(ctx context.Context, agentAddress string) (string, error) {
-	agent, err := r.GetAgent(ctx, agentAddress)
-	if err != nil || agent == nil {
+	if _, err := r.getAgentInternal(ctx, agentAddress); err != nil {
 		return "", fmt.Errorf("agent not found: %s", agentAddress)
 	}
 
@@ -331,10 +337,10 @@ func (r *Registry) RotateAPIKey(ctx context.Context, agentAddress string) (strin
 		return "", fmt.Errorf("failed to generate new API key: %w", err)
 	}
 
-	// Update agent with new key
-	agent.APIKey = r.hashAPIKey(newAPIKey)
-	err = r.storage.UpdateAgent(ctx, agent)
-	if err != nil {
+	// Update only the key hash; other fields (and concurrent updates) are
+	// left untouched.
+	hashed := r.hashAPIKey(newAPIKey)
+	if err := r.storage.UpdateAgentFields(ctx, agentAddress, AgentFields{APIKey: &hashed}); err != nil {
 		return "", fmt.Errorf("failed to update agent with new API key: %w", err)
 	}
 

@@ -492,6 +492,46 @@ func (ms *MemoryStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAge
 	return nil
 }
 
+// UpdateAgentFields updates only the specified fields of an existing local
+// agent. The API key hash and any other unmentioned fields are preserved, so
+// a concurrent key rotation cannot be clobbered by a full-record update.
+func (ms *MemoryStorage) UpdateAgentFields(ctx context.Context, agentAddress string, fields agents.AgentFields) error {
+	if agentAddress == "" {
+		return fmt.Errorf("agent address cannot be empty")
+	}
+	ms.agentsMux.Lock()
+	defer ms.agentsMux.Unlock()
+
+	agent, exists := ms.agents[agentAddress]
+	if !exists {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	if fields.DeliveryMode != nil {
+		agent.DeliveryMode = *fields.DeliveryMode
+	}
+	if fields.PushTarget != nil {
+		agent.PushTarget = *fields.PushTarget
+	}
+	if fields.PushHeaders != nil {
+		agent.Headers = make(map[string]string, len(fields.PushHeaders))
+		for k, v := range fields.PushHeaders {
+			agent.Headers[k] = v
+		}
+	}
+	if fields.SupportedSchemas != nil {
+		agent.SupportedSchemas = append([]string(nil), fields.SupportedSchemas...)
+		agent.RequiresSchema = len(fields.SupportedSchemas) > 0
+	}
+	if fields.LastAccess != nil {
+		agent.LastAccess = *fields.LastAccess
+	}
+	if fields.APIKey != nil {
+		agent.APIKey = *fields.APIKey
+	}
+	return nil
+}
+
 // DeleteAgent removes a local agent from storage
 func (ms *MemoryStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
 	if agentAddress == "" {

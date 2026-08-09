@@ -1241,6 +1241,111 @@ func TestUpdateAgent(t *testing.T) {
 	}
 }
 
+// TestUpdateAgentFields verifies that a field-level agent update emits an
+// UPDATE touching only the specified columns, so a concurrent key rotation is
+// never clobbered by a full-record write.
+func TestUpdateAgentFields(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	deliveryMode := "push"
+	pushTarget := "http://localhost:8080/hook"
+	fields := agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+		PushTarget:   &pushTarget,
+	}
+
+	// GORM sorts map keys alphabetically and runs map updates in a default
+	// transaction.
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1,"push_target"=$2 WHERE address = $3`)).WithArgs(
+		deliveryMode,
+		pushTarget,
+		"agent1@localhost",
+	).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", fields)
+	if err != nil {
+		t.Fatalf("UpdateAgentFields failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestUpdateAgentFields_NotFound verifies that updating an unknown agent
+// returns an error when no row is affected.
+func TestUpdateAgentFields_NotFound(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	deliveryMode := "push"
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1 WHERE address = $2`)).WithArgs(
+		deliveryMode,
+		"missing@localhost",
+	).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	err := storage.UpdateAgentFields(context.Background(), "missing@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+	})
+	if err == nil || !regexp.MustCompile(`agent not found`).MatchString(err.Error()) {
+		t.Fatalf("expected agent not found error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestUpdateAgentFields_APIKeyOnly verifies that rotating only the key emits
+// an UPDATE with only the api_key column.
+func TestUpdateAgentFields_APIKeyOnly(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	apiKey := "hash-B"
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "api_key"=$1 WHERE address = $2`)).WithArgs(
+		apiKey,
+		"agent1@localhost",
+	).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{
+		APIKey: &apiKey,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAgentFields failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestUpdateAgentFields_Empty verifies that a field-level update with no
+// fields issues no SQL and returns no error.
+func TestUpdateAgentFields_Empty(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	if err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{}); err != nil {
+		t.Fatalf("UpdateAgentFields with no fields failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
 func TestDeleteAgent_Success(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	sqlDB, _ := gormDB.DB()

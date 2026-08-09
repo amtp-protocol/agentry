@@ -712,6 +712,66 @@ func (ds *DatabaseStorage) UpdateAgent(ctx context.Context, agent *agents.LocalA
 	return nil
 }
 
+// UpdateAgentFields updates only the specified fields of an existing agent.
+// The API key hash and any other unmentioned columns are preserved, so a
+// concurrent key rotation cannot be clobbered by a full-record update.
+func (ds *DatabaseStorage) UpdateAgentFields(ctx context.Context, agentAddress string, fields agents.AgentFields) error {
+	if agentAddress == "" {
+		return fmt.Errorf("agent address cannot be empty")
+	}
+
+	updates := map[string]interface{}{}
+	if fields.DeliveryMode != nil {
+		updates["delivery_mode"] = *fields.DeliveryMode
+	}
+	if fields.PushTarget != nil {
+		updates["push_target"] = *fields.PushTarget
+	}
+	if fields.PushHeaders != nil {
+		headersJSON, err := json.Marshal(fields.PushHeaders)
+		if err != nil {
+			return fmt.Errorf("failed to marshal headers: %w", err)
+		}
+		updates["headers"] = datatypes.JSON(headersJSON)
+	}
+	if fields.SupportedSchemas != nil {
+		schemasJSON, err := json.Marshal(fields.SupportedSchemas)
+		if err != nil {
+			return fmt.Errorf("failed to marshal supported schemas: %w", err)
+		}
+		if len(schemasJSON) == 0 || string(schemasJSON) == "null" {
+			schemasJSON = []byte("[]")
+		}
+		updates["supported_schemas"] = datatypes.JSON(schemasJSON)
+		updates["requires_schema"] = len(fields.SupportedSchemas) > 0
+	}
+	if fields.LastAccess != nil {
+		updates["last_access"] = *fields.LastAccess
+	}
+	if fields.APIKey != nil {
+		updates["api_key"] = *fields.APIKey
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	result := ds.db.WithContext(ctx).
+		Model(&Agent{}).
+		Where("address = ?", agentAddress).
+		Updates(updates)
+
+	if result.Error != nil {
+		return fmt.Errorf("failed to update agent: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	return nil
+}
+
 // DeleteAgent deletes an agent from the database
 func (ds *DatabaseStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
 	if agentAddress == "" {
