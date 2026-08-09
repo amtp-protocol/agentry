@@ -380,6 +380,46 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 	s.respondWithSuccess(c, http.StatusOK, status)
 }
 
+// buildListMessagesFilter returns the storage filter for the message list
+// endpoint, scoped to the authenticated agent. The storage layer applies AND
+// semantics between Sender and Recipients by default; the "all traffic" case
+// (no direction) uses OR semantics via MessageFilter.Or so a single query
+// covers sent + received and pagination applies to the merged, newest-first
+// result set.
+func buildListMessagesFilter(status, sender, recipient, agentAddr string, since *time.Time, limit, offset int) storage.MessageFilter {
+	filter := storage.MessageFilter{
+		Status: types.DeliveryStatus(status),
+		Limit:  limit,
+		Offset: offset,
+	}
+	if since != nil {
+		unix := since.Unix()
+		filter.Since = &unix
+	}
+
+	switch {
+	case sender != "" && recipient != "":
+		// Explicit direction: a specific sender AND recipient conversation.
+		filter.Sender = sender
+		filter.Recipients = []string{recipient}
+	case sender != "":
+		filter.Sender = sender
+	case recipient != "":
+		filter.Recipients = []string{recipient}
+	default:
+		// No direction: everything the agent sent or received. A single
+		// OR-mode query covers both directions so Limit/Offset are applied
+		// to the merged result set. (Previously two queries were paginated
+		// independently and merged, which could return up to 2*limit
+		// messages, overlap or drop rows across offsets, and left the merged
+		// list unsorted.)
+		filter.Sender = agentAddr
+		filter.Recipients = []string{agentAddr}
+		filter.Or = true
+	}
+	return filter
+}
+
 // handleListMessages handles GET /v1/messages
 // Requires an Agent API key. Results are scoped to the authenticated agent:
 // the sender/recipient filters must reference that agent, and the returned
@@ -444,65 +484,26 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	// default; the "all traffic" case (no direction) uses OR semantics via
 	// MessageFilter.Or so a single query covers sent + received and
 	// pagination applies to the merged, newest-first result set.
-	filter := storage.MessageFilter{
-		Status: types.DeliveryStatus(status),
-		Limit:  limit,
-		Offset: offset,
-	}
-	if sinceTime != nil {
-		unix := sinceTime.Unix()
-		filter.Since = &unix
-	}
+	filter := buildListMessagesFilter(status, sender, recipient, agentAddr, sinceTime, limit, offset)
 
-	var queries []storage.MessageFilter
-	switch {
-	case sender != "" && recipient != "":
-		// Explicit direction: a specific sender AND recipient conversation.
-		q := filter
-		q.Sender = sender
-		q.Recipients = []string{recipient}
-		queries = append(queries, q)
-	case sender != "":
-		q := filter
-		q.Sender = sender
-		queries = append(queries, q)
-	case recipient != "":
-		q := filter
-		q.Recipients = []string{recipient}
-		queries = append(queries, q)
-	default:
-		// No direction: everything the agent sent or received. A single
-		// OR-mode query covers both directions so Limit/Offset are applied
-		// to the merged result set. (Previously two queries were paginated
-		// independently and merged, which could return up to 2*limit
-		// messages, overlap or drop rows across offsets, and left the merged
-		// list unsorted.)
-		q := filter
-		q.Sender = agentAddr
-		q.Recipients = []string{agentAddr}
-		q.Or = true
-		queries = append(queries, q)
-	}
-
-	// Run queries, merging results with de-duplication.
+	// List the page. De-duplication is defensive: the filter yields at most
+	// one row per message.
 	seen := make(map[string]struct{})
 	messages := []*types.Message{}
-	for _, q := range queries {
-		page, err := s.storage.ListMessages(c.Request.Context(), q)
-		if err != nil {
-			s.respondWithError(c, http.StatusInternalServerError, "MESSAGE_LIST_FAILED",
-				"Failed to list messages", map[string]interface{}{
-					"error": err.Error(),
-				})
-			return
+	page, err := s.storage.ListMessages(c.Request.Context(), filter)
+	if err != nil {
+		s.respondWithError(c, http.StatusInternalServerError, "MESSAGE_LIST_FAILED",
+			"Failed to list messages", map[string]interface{}{
+				"error": err.Error(),
+			})
+		return
+	}
+	for _, msg := range page {
+		if _, dup := seen[msg.MessageID]; dup {
+			continue
 		}
-		for _, msg := range page {
-			if _, dup := seen[msg.MessageID]; dup {
-				continue
-			}
-			seen[msg.MessageID] = struct{}{}
-			messages = append(messages, msg)
-		}
+		seen[msg.MessageID] = struct{}{}
+		messages = append(messages, msg)
 	}
 
 	// Attach delivery status to each message so callers get a complete view.
@@ -536,29 +537,16 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	}
 
 	// total is the number of messages in the filtered set before pagination.
-	// Re-run the queries without limit/offset and count unique matches.
-	total := 0
-	{
-		totalSeen := make(map[string]struct{})
-		for _, q := range queries {
-			tq := q
-			tq.Limit = 0
-			tq.Offset = 0
-			page, err := s.storage.ListMessages(c.Request.Context(), tq)
-			if err != nil {
-				continue
-			}
-			for _, msg := range page {
-				if !s.messageBelongsToAgent(msg, agentAddr) {
-					continue
-				}
-				if _, dup := totalSeen[msg.MessageID]; dup {
-					continue
-				}
-				totalSeen[msg.MessageID] = struct{}{}
-				total++
-			}
-		}
+	// CountMessages covers the full filtered set without materializing rows:
+	// Limit/Offset are ignored by the storage backends, and a count failure
+	// surfaces as an error instead of silently undercounting.
+	total, err := s.storage.CountMessages(c.Request.Context(), filter)
+	if err != nil {
+		s.respondWithError(c, http.StatusInternalServerError, "MESSAGE_LIST_FAILED",
+			"Failed to count messages", map[string]interface{}{
+				"error": err.Error(),
+			})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{

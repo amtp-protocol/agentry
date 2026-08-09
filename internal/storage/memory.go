@@ -152,6 +152,24 @@ func (ms *MemoryStorage) ListMessages(ctx context.Context, filter MessageFilter)
 	return matched, nil
 }
 
+// CountMessages returns the number of messages matching the filter criteria
+// without materializing the result set. Limit and Offset are ignored: the
+// count always covers the full filtered set.
+func (ms *MemoryStorage) CountMessages(ctx context.Context, filter MessageFilter) (int64, error) {
+	ms.messagesMux.RLock()
+	ms.statusesMux.RLock()
+	defer ms.messagesMux.RUnlock()
+	defer ms.statusesMux.RUnlock()
+
+	var count int64
+	for messageID, message := range ms.messages {
+		if ms.matchesFilter(message, messageID, filter) {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // StoreStatus stores message status
 func (ms *MemoryStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
 	if messageID == "" {

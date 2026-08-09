@@ -191,14 +191,13 @@ func (ds *DatabaseStorage) DeleteMessage(ctx context.Context, messageID string) 
 	})
 }
 
-// ListMessages returns messages matching the filter criteria
-func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilter) ([]*types.Message, error) {
-	query := ds.db.WithContext(ctx).Model(&Message{})
-
-	// Apply sender/recipient filters. They are ANDed by default; when
-	// filter.Or is set with both sides present, a single clause matches
-	// "sent by OR addressed to" so that pagination applies to the merged
-	// result set.
+// applyMessageFilters applies the shared filter predicates (sender/recipients,
+// status, since) to a message query. Ordering and pagination are applied by
+// the caller so that ListMessages and CountMessages stay consistent.
+func (ds *DatabaseStorage) applyMessageFilters(query *gorm.DB, filter MessageFilter) (*gorm.DB, error) {
+	// Sender/recipient filters are ANDed by default; when filter.Or is set
+	// with both sides present, a single clause matches "sent by OR addressed
+	// to" so that pagination applies to the merged result set.
 	if filter.Or && filter.Sender != "" && len(filter.Recipients) > 0 {
 		recipientsJSON, err := json.Marshal(filter.Recipients)
 		if err != nil {
@@ -230,6 +229,18 @@ func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilte
 		query = query.Where("timestamp >= ?", time.Unix(*filter.Since, 0))
 	}
 
+	return query, nil
+}
+
+// ListMessages returns messages matching the filter criteria
+func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilter) ([]*types.Message, error) {
+	query := ds.db.WithContext(ctx).Model(&Message{})
+
+	query, err := ds.applyMessageFilters(query, filter)
+	if err != nil {
+		return nil, err
+	}
+
 	// Apply ordering and pagination
 	query = query.Order("created_at DESC")
 
@@ -257,6 +268,24 @@ func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilte
 	}
 
 	return messages, nil
+}
+
+// CountMessages returns the number of messages matching the filter criteria
+// without materializing the result set. Limit and Offset are ignored: the
+// count always covers the full filtered set.
+func (ds *DatabaseStorage) CountMessages(ctx context.Context, filter MessageFilter) (int64, error) {
+	query := ds.db.WithContext(ctx).Model(&Message{})
+
+	query, err := ds.applyMessageFilters(query, filter)
+	if err != nil {
+		return 0, err
+	}
+
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("failed to count messages: %w", err)
+	}
+	return count, nil
 }
 
 // StoreStatus stores message status

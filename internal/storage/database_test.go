@@ -321,6 +321,92 @@ func TestListMessages_OrFilterSingleSide(t *testing.T) {
 	}
 }
 
+// TestCountMessages_EmptyResult verifies that CountMessages issues a COUNT
+// query and returns zero for an empty table.
+func TestCountMessages_EmptyResult(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "messages"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	count, err := storage.CountMessages(context.Background(), MessageFilter{})
+	if err != nil {
+		t.Errorf("CountMessages failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected count 0, got %d", count)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCountMessages_WithFilters verifies that CountMessages applies the same
+// filter predicates as ListMessages (OR sender/recipients, status join,
+// since) without materializing rows or applying pagination.
+func TestCountMessages_WithFilters(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	since := time.Now().Add(-time.Hour).Unix()
+	filter := MessageFilter{
+		Sender:     "agent@localhost",
+		Recipients: []string{"agent@localhost"},
+		Or:         true,
+		Status:     types.StatusDelivered,
+		Since:      &since,
+		Limit:      3,
+		Offset:     2,
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "messages" JOIN message_statuses ON messages.message_id = message_statuses.message_id WHERE (sender = $1 OR recipients @> $2) AND message_statuses.status = $3 AND timestamp >= $4`)).WithArgs(
+		filter.Sender,
+		`["agent@localhost"]`,
+		string(filter.Status),
+		sqlmock.AnyArg(),
+	).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(4))
+
+	count, err := storage.CountMessages(context.Background(), filter)
+	if err != nil {
+		t.Errorf("CountMessages with filters failed: %v", err)
+	}
+	if count != 4 {
+		t.Errorf("expected count 4, got %d", count)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCountMessages_IgnoresPagination verifies that Limit/Offset do not
+// produce OFFSET/LIMIT clauses in the COUNT query.
+func TestCountMessages_IgnoresPagination(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	filter := MessageFilter{Sender: "agent@localhost", Limit: 3, Offset: 2}
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "messages" WHERE sender = $1`)).WithArgs(
+		filter.Sender,
+	).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(7))
+
+	count, err := storage.CountMessages(context.Background(), filter)
+	if err != nil {
+		t.Errorf("CountMessages with pagination failed: %v", err)
+	}
+	if count != 7 {
+		t.Errorf("expected count 7, got %d", count)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
 func TestStoreStatus_NilStatus(t *testing.T) {
 	gormDB, _ := newMockDB(t)
 	sqlDB, _ := gormDB.DB()

@@ -43,6 +43,10 @@ type Storage interface {
 	GetMessage(ctx context.Context, messageID string) (*types.Message, error)
 	DeleteMessage(ctx context.Context, messageID string) error
 	ListMessages(ctx context.Context, filter MessageFilter) ([]*types.Message, error)
+	// CountMessages returns the number of messages matching the filter
+	// criteria without materializing the result set. Limit and Offset are
+	// ignored: the count always covers the full filtered set.
+	CountMessages(ctx context.Context, filter MessageFilter) (int64, error)
 
 	// Status operations
 	StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error

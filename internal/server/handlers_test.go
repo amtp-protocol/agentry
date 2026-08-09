@@ -55,6 +55,11 @@ type MockStorage struct {
 	// listFilters records every filter passed to ListMessages so handler
 	// tests can assert the shape of the underlying storage query.
 	listFilters []storage.MessageFilter
+	// countFilters records every filter passed to CountMessages.
+	countFilters []storage.MessageFilter
+	// countError, when set, makes CountMessages fail so handler tests can
+	// verify count failures surface as errors instead of being swallowed.
+	countError error
 }
 
 func NewMockMessageProcessor() *MockMessageProcessor {
@@ -97,6 +102,14 @@ func (m *MockStorage) ListMessages(ctx context.Context, filter storage.MessageFi
 		messages = append(messages, msg)
 	}
 	return messages, nil
+}
+
+func (m *MockStorage) CountMessages(ctx context.Context, filter storage.MessageFilter) (int64, error) {
+	m.countFilters = append(m.countFilters, filter)
+	if m.countError != nil {
+		return 0, m.countError
+	}
+	return int64(len(m.messages)), nil
 }
 
 func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
@@ -1480,11 +1493,11 @@ func TestHandleListMessages_MergedQueryUsesOrFilter(t *testing.T) {
 		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 
-	// The merged path must issue an OR-mode query for the page plus a second
-	// OR-mode query for the total count, so limit/offset apply to the merged,
-	// newest-first result set rather than to each direction independently.
-	if len(mockStorage.listFilters) != 2 {
-		t.Fatalf("Expected 2 storage queries (page + total) for the merged path, got %d", len(mockStorage.listFilters))
+	// The merged path must issue one OR-mode ListMessages query (limit/offset
+	// intact) and one OR-mode CountMessages query for the total, so the count
+	// covers the full filtered set without materializing it.
+	if len(mockStorage.listFilters) != 1 {
+		t.Fatalf("Expected 1 ListMessages query for the merged path, got %d", len(mockStorage.listFilters))
 	}
 	filter := mockStorage.listFilters[0]
 	if !filter.Or {
@@ -1503,13 +1516,20 @@ func TestHandleListMessages_MergedQueryUsesOrFilter(t *testing.T) {
 		t.Errorf("Expected offset 2 propagated to storage, got %d", filter.Offset)
 	}
 
-	// The total-count query must keep OR semantics but drop pagination.
-	totalFilter := mockStorage.listFilters[1]
-	if !totalFilter.Or {
+	// The total-count query must keep OR semantics; pagination is ignored by
+	// the storage backends for counting.
+	if len(mockStorage.countFilters) != 1 {
+		t.Fatalf("Expected 1 CountMessages query for the merged path, got %d", len(mockStorage.countFilters))
+	}
+	countFilter := mockStorage.countFilters[0]
+	if !countFilter.Or {
 		t.Error("Expected the total-count query to keep OR semantics")
 	}
-	if totalFilter.Limit != 0 || totalFilter.Offset != 0 {
-		t.Errorf("Expected unpaginated total query, got limit=%d offset=%d", totalFilter.Limit, totalFilter.Offset)
+	if countFilter.Sender != "viewer@localhost" {
+		t.Errorf("Expected count query sender viewer@localhost, got %q", countFilter.Sender)
+	}
+	if len(countFilter.Recipients) != 1 || countFilter.Recipients[0] != "viewer@localhost" {
+		t.Errorf("Expected count query recipients [viewer@localhost], got %v", countFilter.Recipients)
 	}
 
 	// Both directions must be surfaced in the response.
@@ -1638,6 +1658,34 @@ func TestHandleListMessages_MergedQueryPagination(t *testing.T) {
 		if i < len(all) && all[i] != id {
 			t.Errorf("Position %d: expected %s, got %s (merged list must be newest-first)", i, id, all[i])
 		}
+	}
+}
+
+// TestHandleListMessages_CountFailure verifies that a CountMessages failure
+// surfaces as an error response instead of being silently swallowed (the
+// previous total computation ignored storage errors and undercounted).
+func TestHandleListMessages_CountFailure(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	mockStorage.countError = fmt.Errorf("count exploded")
+
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errorResponse.Error.Code != "MESSAGE_LIST_FAILED" {
+		t.Errorf("Expected error code MESSAGE_LIST_FAILED, got %s", errorResponse.Error.Code)
 	}
 }
 

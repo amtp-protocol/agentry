@@ -859,6 +859,74 @@ func TestMemoryStorage_ListMessages_OrFilterSingleSide(t *testing.T) {
 	}
 }
 
+// TestMemoryStorage_CountMessages verifies that CountMessages returns the
+// number of messages matching the filter without materializing the result
+// set, and that Limit/Offset are ignored (the count covers the full
+// filtered set).
+func TestMemoryStorage_CountMessages(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := "agent@localhost"
+	peer := "peer@localhost"
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	seed := []*types.Message{
+		{MessageID: "sent-0", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(7 * time.Minute)},
+		{MessageID: "recv-1", Sender: peer, Recipients: []string{agent}, Timestamp: base.Add(6 * time.Minute)},
+		{MessageID: "sent-2", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(5 * time.Minute)},
+		{MessageID: "recv-3", Sender: peer, Recipients: []string{agent}, Timestamp: base.Add(4 * time.Minute)},
+		{MessageID: "other-4", Sender: peer, Recipients: []string{"third@example.com"}, Timestamp: base.Add(3 * time.Minute)},
+	}
+	for _, msg := range seed {
+		if err := storage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("store %s: %v", msg.MessageID, err)
+		}
+	}
+	// Give two of the agent's messages a delivered status.
+	if err := storage.StoreStatus(ctx, "sent-0", &types.MessageStatus{MessageID: "sent-0", Status: types.StatusDelivered}); err != nil {
+		t.Fatalf("store status sent-0: %v", err)
+	}
+	if err := storage.StoreStatus(ctx, "recv-1", &types.MessageStatus{MessageID: "recv-1", Status: types.StatusDelivered}); err != nil {
+		t.Fatalf("store status recv-1: %v", err)
+	}
+
+	basePlus4 := base.Add(4 * time.Minute).Unix()
+	tests := []struct {
+		name   string
+		filter MessageFilter
+		want   int64
+	}{
+		{"all", MessageFilter{}, 5},
+		{"sender", MessageFilter{Sender: agent}, 2},
+		{"recipients", MessageFilter{Recipients: []string{agent}}, 2},
+		{"or both directions", MessageFilter{Sender: agent, Recipients: []string{agent}, Or: true}, 4},
+		{"status", MessageFilter{Status: types.StatusDelivered}, 2},
+		{"status with sender", MessageFilter{Sender: agent, Status: types.StatusDelivered}, 1},
+		{"since", MessageFilter{Since: &basePlus4}, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := storage.CountMessages(ctx, tt.filter)
+			if err != nil {
+				t.Fatalf("CountMessages failed: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Expected count %d, got %d", tt.want, got)
+			}
+		})
+	}
+
+	// Limit and Offset must be ignored: the count covers the full filtered set.
+	got, err := storage.CountMessages(ctx, MessageFilter{Limit: 1, Offset: 3})
+	if err != nil {
+		t.Fatalf("CountMessages with pagination failed: %v", err)
+	}
+	if got != 5 {
+		t.Errorf("Expected count 5 with limit/offset set (ignored), got %d", got)
+	}
+}
+
 func TestMemoryStorage_GetStats(t *testing.T) {
 	storage := NewMemoryStorage(MemoryStorageConfig{})
 	ctx := context.Background()

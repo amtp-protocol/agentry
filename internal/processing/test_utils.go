@@ -170,6 +170,15 @@ func (m *MockStorage) ListMessages(ctx context.Context, filter storage.MessageFi
 	return results, nil
 }
 
+func (m *MockStorage) CountMessages(ctx context.Context, filter storage.MessageFilter) (int64, error) {
+	if m.error != nil {
+		return 0, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	return int64(len(m.messages)), nil
+}
+
 func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
 	if m.error != nil {
 		return m.error
