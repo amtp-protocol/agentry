@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +48,8 @@ func NewMockSchemaManager() *MockSchemaManager {
 }
 
 type inMemoryAgentStore struct {
+	mu sync.Mutex
+	// agents maps the full address to the stored agent.
 	agents map[string]*LocalAgent
 	// fullUpdates counts full-record UpdateAgent calls; fieldUpdates counts
 	// field-level UpdateAgentFields calls. The registry must never perform a
@@ -64,6 +68,8 @@ func (s *inMemoryAgentStore) CreateAgent(ctx context.Context, agent *LocalAgent)
 	if agent == nil {
 		return fmt.Errorf("agent cannot be nil")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, exists := s.agents[agent.Address]; exists {
 		return fmt.Errorf("agent already exists: %s", agent.Address)
 	}
@@ -74,6 +80,8 @@ func (s *inMemoryAgentStore) CreateAgent(ctx context.Context, agent *LocalAgent)
 }
 
 func (s *inMemoryAgentStore) DeleteAgent(ctx context.Context, agentAddress string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, exists := s.agents[agentAddress]; !exists {
 		return fmt.Errorf("agent not found: %s", agentAddress)
 	}
@@ -82,6 +90,8 @@ func (s *inMemoryAgentStore) DeleteAgent(ctx context.Context, agentAddress strin
 }
 
 func (s *inMemoryAgentStore) GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	agent, exists := s.agents[agentAddress]
 	if !exists {
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
@@ -91,6 +101,8 @@ func (s *inMemoryAgentStore) GetAgent(ctx context.Context, agentAddress string) 
 }
 
 func (s *inMemoryAgentStore) UpdateAgent(ctx context.Context, agent *LocalAgent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.fullUpdates++
 	if agent == nil {
 		return fmt.Errorf("agent cannot be nil")
@@ -105,10 +117,26 @@ func (s *inMemoryAgentStore) UpdateAgent(ctx context.Context, agent *LocalAgent)
 }
 
 func (s *inMemoryAgentStore) UpdateAgentFields(ctx context.Context, agentAddress string, fields AgentFields) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.fieldUpdates++
 	agent, exists := s.agents[agentAddress]
 	if !exists {
 		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	if fields.DeliveryMode != nil || fields.PushTarget != nil {
+		mergedMode := agent.DeliveryMode
+		if fields.DeliveryMode != nil {
+			mergedMode = *fields.DeliveryMode
+		}
+		mergedTarget := agent.PushTarget
+		if fields.PushTarget != nil {
+			mergedTarget = *fields.PushTarget
+		}
+		if err := ValidateDeliveryConfig(mergedMode, mergedTarget); err != nil {
+			return err
+		}
 	}
 
 	if fields.DeliveryMode != nil {
@@ -137,6 +165,8 @@ func (s *inMemoryAgentStore) UpdateAgentFields(ctx context.Context, agentAddress
 }
 
 func (s *inMemoryAgentStore) ListAgents(ctx context.Context) ([]*LocalAgent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var list []*LocalAgent
 	for _, agent := range s.agents {
 		agentCopy := *agent
@@ -146,6 +176,8 @@ func (s *inMemoryAgentStore) ListAgents(ctx context.Context) ([]*LocalAgent, err
 }
 
 func (s *inMemoryAgentStore) GetSupportedSchemas(ctx context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	schemaSet := make(map[string]struct{})
 	for _, agent := range s.agents {
 		for _, schemaID := range agent.SupportedSchemas {
@@ -202,12 +234,35 @@ func TestGenerateAPIKey(t *testing.T) {
 	}
 }
 
+// TestValidateDeliveryConfig verifies the delivery-mode invariants shared by
+// registration and field-level updates.
+func TestValidateDeliveryConfig(t *testing.T) {
+	// Valid combinations.
+	if err := ValidateDeliveryConfig("push", "http://localhost:8080/hook"); err != nil {
+		t.Errorf("push with target should be valid: %v", err)
+	}
+	if err := ValidateDeliveryConfig("pull", ""); err != nil {
+		t.Errorf("pull without target should be valid: %v", err)
+	}
+	if err := ValidateDeliveryConfig("pull", "http://localhost:8080/hook"); err != nil {
+		t.Errorf("pull with target should be valid: %v", err)
+	}
+
+	// Invalid combinations.
+	if err := ValidateDeliveryConfig("push", ""); err == nil ||
+		!strings.Contains(err.Error(), "push target URL is required") {
+		t.Errorf("push without target should be rejected, got: %v", err)
+	}
+	if err := ValidateDeliveryConfig("smtp", "http://localhost:8080/hook"); err == nil ||
+		!strings.Contains(err.Error(), "delivery mode must be 'push' or 'pull'") {
+		t.Errorf("invalid mode should be rejected, got: %v", err)
+	}
+}
+
 // Test agent API key verification
 func TestVerifyAPIKey(t *testing.T) {
 	registry := createTestRegistry()
-	ctx := context.Background()
-
-	// Register an agent
+	ctx := context.Background() // Register an agent
 	agent := &LocalAgent{
 		Address:      "test",
 		DeliveryMode: "pull",
@@ -427,6 +482,138 @@ func TestUpdateAgent_SupportedSchemasDerivesRequiresSchema(t *testing.T) {
 	}
 	if len(stored.SupportedSchemas) != 1 || stored.SupportedSchemas[0] != "agntcy:test.hello.v1" {
 		t.Errorf("Expected updated supported schemas, got %v", stored.SupportedSchemas)
+	}
+}
+
+// TestUpdateAgent_InvalidDeliveryCombination verifies the delivery invariant
+// on the merged state: switching to push without a target, and clearing the
+// target while in push mode, are both rejected with the stored record
+// unchanged.
+func TestUpdateAgent_InvalidDeliveryCombination(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("switch to push without target", func(t *testing.T) {
+		registry := createTestRegistry()
+		agent := &LocalAgent{Address: "test", DeliveryMode: "pull"}
+		if err := registry.RegisterAgent(ctx, agent); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+
+		if _, err := registry.UpdateAgent(ctx, agent.Address, &AgentUpdate{
+			DeliveryMode: strPtr("push"),
+		}); err == nil || !strings.Contains(err.Error(), "push target URL is required") {
+			t.Fatalf("expected push target required error, got: %v", err)
+		}
+
+		got, err := registry.GetAgent(ctx, agent.Address)
+		if err != nil {
+			t.Fatalf("get agent: %v", err)
+		}
+		if got.DeliveryMode != "pull" || got.PushTarget != "" {
+			t.Errorf("agent mutated by rejected update: mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+		}
+	})
+
+	t.Run("clear target in push mode", func(t *testing.T) {
+		registry := createTestRegistry()
+		agent := &LocalAgent{Address: "test", DeliveryMode: "push", PushTarget: "http://localhost:8080/hook"}
+		if err := registry.RegisterAgent(ctx, agent); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+
+		if _, err := registry.UpdateAgent(ctx, agent.Address, &AgentUpdate{
+			PushTarget: strPtr(""),
+		}); err == nil || !strings.Contains(err.Error(), "push target URL is required") {
+			t.Fatalf("expected push target required error, got: %v", err)
+		}
+
+		got, err := registry.GetAgent(ctx, agent.Address)
+		if err != nil {
+			t.Fatalf("get agent: %v", err)
+		}
+		if got.DeliveryMode != "push" || got.PushTarget != "http://localhost:8080/hook" {
+			t.Errorf("agent mutated by rejected update: mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+		}
+	})
+
+	t.Run("invalid mode", func(t *testing.T) {
+		registry := createTestRegistry()
+		agent := &LocalAgent{Address: "test", DeliveryMode: "pull"}
+		if err := registry.RegisterAgent(ctx, agent); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+
+		if _, err := registry.UpdateAgent(ctx, agent.Address, &AgentUpdate{
+			DeliveryMode: strPtr("smtp"),
+		}); err == nil || !strings.Contains(err.Error(), "delivery mode must be 'push' or 'pull'") {
+			t.Fatalf("expected delivery mode error, got: %v", err)
+		}
+	})
+}
+
+// TestUpdateAgent_ConcurrentDeliveryUpdatesInvariantHeld verifies the race
+// fixed by enforcing the delivery invariant atomically in storage: two
+// concurrent UpdateAgent calls — one clearing push_target, the other
+// switching to push — each validate against the state committed by the other,
+// so exactly one fails and the final state is never push mode with an empty
+// push target.
+func TestUpdateAgent_ConcurrentDeliveryUpdatesInvariantHeld(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		registry := createTestRegistry()
+		ctx := context.Background()
+
+		agent := &LocalAgent{
+			Address:      "race",
+			DeliveryMode: "pull",
+			PushTarget:   "http://localhost:8080/hook",
+		}
+		if err := registry.RegisterAgent(ctx, agent); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := registry.UpdateAgent(ctx, agent.Address, &AgentUpdate{PushTarget: strPtr("")})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := registry.UpdateAgent(ctx, agent.Address, &AgentUpdate{DeliveryMode: strPtr("push")})
+			errs <- err
+		}()
+		close(start)
+		wg.Wait()
+		close(errs)
+
+		okCount, errCount := 0, 0
+		for err := range errs {
+			if err == nil {
+				okCount++
+			} else {
+				errCount++
+				if !strings.Contains(err.Error(), "push target URL is required") {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		}
+		if okCount != 1 || errCount != 1 {
+			t.Fatalf("iteration %d: expected exactly one success and one failure, got %d success and %d failures",
+				i, okCount, errCount)
+		}
+
+		got, err := registry.GetAgent(ctx, agent.Address)
+		if err != nil {
+			t.Fatalf("get agent: %v", err)
+		}
+		if got.DeliveryMode == "push" && got.PushTarget == "" {
+			t.Errorf("iteration %d: concurrent updates stored invalid state: push mode with empty push target", i)
+		}
 	}
 }
 

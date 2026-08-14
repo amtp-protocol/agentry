@@ -756,17 +756,56 @@ func (ds *DatabaseStorage) UpdateAgentFields(ctx context.Context, agentAddress s
 		return nil
 	}
 
-	result := ds.db.WithContext(ctx).
+	query := ds.db.WithContext(ctx).
 		Model(&Agent{}).
-		Where("address = ?", agentAddress).
-		Updates(updates)
+		Where("address = ?", agentAddress)
+
+	// Delivery-invariant guard. COALESCE overlays the requested values (or
+	// NULL when a field is untouched) on the current row, so the predicate
+	// tests the combined state the UPDATE would produce. Postgres evaluates
+	// it under the row lock of the UPDATE itself, making the check atomic.
+	if fields.DeliveryMode != nil || fields.PushTarget != nil {
+		var newMode, newTarget interface{}
+		if fields.DeliveryMode != nil {
+			newMode = *fields.DeliveryMode
+		}
+		if fields.PushTarget != nil {
+			newTarget = *fields.PushTarget
+		}
+		query = query.Where(
+			"NOT (COALESCE(?, delivery_mode) NOT IN ('push','pull') OR (COALESCE(?, delivery_mode) = 'push' AND COALESCE(?, push_target) = ''))",
+			newMode, newMode, newTarget)
+	}
+
+	result := query.Updates(updates)
 
 	if result.Error != nil {
 		return fmt.Errorf("failed to update agent: %w", result.Error)
 	}
 
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		// Either the agent does not exist or the merged state violates the
+		// delivery invariant. Re-read the row to tell the cases apart and
+		// return the precise validation error.
+		var existing Agent
+		if err := ds.db.WithContext(ctx).First(&existing, "address = ?", agentAddress).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("agent not found: %s", agentAddress)
+			}
+			return fmt.Errorf("failed to update agent: %w", err)
+		}
+		mergedMode := existing.DeliveryMode
+		if fields.DeliveryMode != nil {
+			mergedMode = *fields.DeliveryMode
+		}
+		mergedTarget := ""
+		if existing.PushTarget != nil {
+			mergedTarget = *existing.PushTarget
+		}
+		if fields.PushTarget != nil {
+			mergedTarget = *fields.PushTarget
+		}
+		return agents.ValidateDeliveryConfig(mergedMode, mergedTarget)
 	}
 
 	return nil

@@ -507,6 +507,20 @@ func (ms *MemoryStorage) UpdateAgentFields(ctx context.Context, agentAddress str
 		return fmt.Errorf("agent not found: %s", agentAddress)
 	}
 
+	if fields.DeliveryMode != nil || fields.PushTarget != nil {
+		mergedMode := agent.DeliveryMode
+		if fields.DeliveryMode != nil {
+			mergedMode = *fields.DeliveryMode
+		}
+		mergedTarget := agent.PushTarget
+		if fields.PushTarget != nil {
+			mergedTarget = *fields.PushTarget
+		}
+		if err := agents.ValidateDeliveryConfig(mergedMode, mergedTarget); err != nil {
+			return err
+		}
+	}
+
 	if fields.DeliveryMode != nil {
 		agent.DeliveryMode = *fields.DeliveryMode
 	}

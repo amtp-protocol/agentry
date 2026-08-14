@@ -90,6 +90,22 @@ func (r *Registry) schemaManagerAvailable() bool {
 	return true
 }
 
+// ValidateDeliveryConfig enforces the delivery-mode invariants shared by
+// registration and field-level updates: the mode must be 'push' or 'pull',
+// and push mode requires a non-empty push target. Storage backends call it on
+// the merged state inside their atomic update, so two concurrent field-level
+// updates cannot jointly store an invalid combination even though each passes
+// validation against the record it read.
+func ValidateDeliveryConfig(deliveryMode, pushTarget string) error {
+	if deliveryMode != "push" && deliveryMode != "pull" {
+		return fmt.Errorf("delivery mode must be 'push' or 'pull'")
+	}
+	if deliveryMode == "push" && pushTarget == "" {
+		return fmt.Errorf("push target URL is required for push delivery mode")
+	}
+	return nil
+}
+
 // RegisterAgent registers a local agent with delivery configuration
 func (r *Registry) RegisterAgent(ctx context.Context, agent *LocalAgent) error {
 	if agent.Address == "" {
@@ -105,12 +121,8 @@ func (r *Registry) RegisterAgent(ctx context.Context, agent *LocalAgent) error {
 	// Update the agent with the normalized full address
 	agent.Address = fullAddress
 
-	if agent.DeliveryMode != "push" && agent.DeliveryMode != "pull" {
-		return fmt.Errorf("delivery mode must be 'push' or 'pull'")
-	}
-
-	if agent.DeliveryMode == "push" && agent.PushTarget == "" {
-		return fmt.Errorf("push target URL is required for push delivery mode")
+	if err := ValidateDeliveryConfig(agent.DeliveryMode, agent.PushTarget); err != nil {
+		return err
 	}
 
 	// Validate supported schemas
@@ -212,20 +224,20 @@ func (r *Registry) UpdateAgent(ctx context.Context, agentNameOrAddress string, u
 	}
 
 	// Validate against the merged state (current values overridden by the
-	// requested updates) before writing anything.
+	// requested updates) before writing anything. This is a fast-fail check;
+	// the storage layer re-validates the merged state atomically inside its
+	// update, because the record read here may be stale by the time the write
+	// lands when two updates race.
 	deliveryMode := agent.DeliveryMode
 	if updates.DeliveryMode != nil {
-		if *updates.DeliveryMode != "push" && *updates.DeliveryMode != "pull" {
-			return nil, fmt.Errorf("delivery mode must be 'push' or 'pull'")
-		}
 		deliveryMode = *updates.DeliveryMode
 	}
 	pushTarget := agent.PushTarget
 	if updates.PushTarget != nil {
 		pushTarget = *updates.PushTarget
 	}
-	if deliveryMode == "push" && pushTarget == "" {
-		return nil, fmt.Errorf("push target URL is required for push delivery mode")
+	if err := ValidateDeliveryConfig(deliveryMode, pushTarget); err != nil {
+		return nil, err
 	}
 	if updates.SupportedSchemas != nil {
 		if err := r.validateSupportedSchemas(ctx, updates.SupportedSchemas); err != nil {

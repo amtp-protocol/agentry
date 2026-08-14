@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -1056,6 +1057,181 @@ func TestIntegration_AgentDiscoveryEndpoint(t *testing.T) {
 
 	if _, exists := response["timestamp"]; !exists {
 		t.Error("Expected timestamp field to be present")
+	}
+}
+
+// patchAgent sends an admin-authenticated PATCH to /v1/admin/agents/:name and
+// returns the HTTP status and response body.
+func patchAgent(t *testing.T, baseURL, name string, body interface{}) (int, []byte) {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal patch body: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPatch, baseURL+"/v1/admin/agents/"+name, bytes.NewBuffer(payload))
+	if err != nil {
+		t.Fatalf("build patch request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("patch agent: %v", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, rb
+}
+
+// TestIntegration_UpdateAgentPushInvariant is a functional verification test
+// for the push-mode delivery invariant (push mode requires a non-empty push
+// target). The invariant must hold for the combined state, not just the
+// pre-update record: two concurrent PATCHes — one clearing push_target, the
+// other switching to push mode — must not jointly store the invalid
+// combination. Each request validates against the state committed by the
+// other, so exactly one succeeds and the final state stays valid.
+func TestIntegration_UpdateAgentPushInvariant(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	baseURL := testServer.URL
+
+	// 1. Push mode without a target is rejected.
+	registerLocalAgentWithAddress(t, baseURL, "push-rigid")
+	status, body := patchAgent(t, baseURL, "push-rigid", map[string]string{"delivery_mode": "push"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("push without target: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(body, &errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("push without target: expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+
+	// 2. Push mode with a target succeeds.
+	status, body = patchAgent(t, baseURL, "push-rigid", map[string]string{
+		"delivery_mode": "push",
+		"push_target":   "https://hooks.example.com/push-rigid",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("push with target: expected status %d, got %d: %s", http.StatusOK, status, string(body))
+	}
+
+	// 3. Clearing the target while in push mode is rejected, and the stored
+	// record stays unchanged.
+	status, body = patchAgent(t, baseURL, "push-rigid", map[string]string{"push_target": ""})
+	if status != http.StatusBadRequest {
+		t.Fatalf("clear target in push mode: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	}
+
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/admin/agents", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	defer resp.Body.Close()
+	var listing struct {
+		Agents map[string]struct {
+			DeliveryMode string `json:"delivery_mode"`
+			PushTarget   string `json:"push_target"`
+		} `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	stored, ok := listing.Agents["push-rigid@localhost"]
+	if !ok {
+		t.Fatalf("expected agent push-rigid@localhost in listing, got %v", listing.Agents)
+	}
+	if stored.DeliveryMode != "push" || stored.PushTarget != "https://hooks.example.com/push-rigid" {
+		t.Errorf("agent mutated by rejected update: got mode=%q target=%q", stored.DeliveryMode, stored.PushTarget)
+	}
+
+	// 4. Two concurrent PATCHes cannot jointly store push mode with an empty
+	// target. Starting state: pull mode with a non-empty target. The pair is
+	// repeated on several agents so a regression that allows the invalid
+	// combination is reliably caught regardless of goroutine scheduling.
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("race-agent-%d", i)
+		registerLocalAgentWithAddress(t, baseURL, name)
+		status, body = patchAgent(t, baseURL, name, map[string]string{
+			"delivery_mode": "push",
+			"push_target":   "https://hooks.example.com/" + name,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("seed %s: expected status %d, got %d: %s", name, http.StatusOK, status, string(body))
+		}
+		status, body = patchAgent(t, baseURL, name, map[string]string{"delivery_mode": "pull"})
+		if status != http.StatusOK {
+			t.Fatalf("switch %s to pull: expected status %d, got %d: %s", name, http.StatusOK, status, string(body))
+		}
+
+		// Fire both PATCHes at once: one clears the target, the other switches
+		// back to push. Each validates against the state committed by the
+		// other, so exactly one must fail and the final state must stay valid.
+		start := make(chan struct{})
+		results := make(chan int, 2)
+		var wg sync.WaitGroup
+		for _, payload := range []map[string]string{{"push_target": ""}, {"delivery_mode": "push"}} {
+			wg.Add(1)
+			go func(p map[string]string) {
+				defer wg.Done()
+				<-start
+				status, _ := patchAgent(t, baseURL, name, p)
+				results <- status
+			}(payload)
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		okCount, badCount := 0, 0
+		for s := range results {
+			switch s {
+			case http.StatusOK:
+				okCount++
+			case http.StatusBadRequest:
+				badCount++
+			}
+		}
+		if okCount != 1 || badCount != 1 {
+			t.Fatalf("%s: concurrent updates: expected exactly one 200 and one 400, got %d 200 and %d 400",
+				name, okCount, badCount)
+		}
+
+		req, err = http.NewRequest(http.MethodGet, baseURL+"/v1/admin/agents", nil)
+		if err != nil {
+			t.Fatalf("build list request: %v", err)
+		}
+		req.Header.Set("X-Admin-Key", adminKeyValue)
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("list agents: %v", err)
+		}
+		rb, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		listing = struct {
+			Agents map[string]struct {
+				DeliveryMode string `json:"delivery_mode"`
+				PushTarget   string `json:"push_target"`
+			} `json:"agents"`
+		}{}
+		if err := json.Unmarshal(rb, &listing); err != nil {
+			t.Fatalf("decode list response: %v", err)
+		}
+		final, ok := listing.Agents[name+"@localhost"]
+		if !ok {
+			t.Fatalf("expected agent %s@localhost in listing, got %v", name, listing.Agents)
+		}
+		if final.DeliveryMode == "push" && final.PushTarget == "" {
+			t.Errorf("%s: concurrent updates stored invalid state: push mode with empty push target", name)
+		}
 	}
 }
 

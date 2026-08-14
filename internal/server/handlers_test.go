@@ -2794,6 +2794,51 @@ func TestHandleUpdateAgent_PushWithoutTarget(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateAgent_RemovePushTargetRejected verifies that clearing the
+// push target while the agent is in push mode is rejected and the stored
+// record stays unchanged, so the delivery invariant holds for the combined
+// state rather than only the pre-update record.
+func TestHandleUpdateAgent_RemovePushTargetRejected(t *testing.T) {
+	server := createTestServer()
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "upd-agent3",
+		DeliveryMode: "push",
+		PushTarget:   "https://hooks.example.com/upd-agent3",
+	}
+	if err := server.agentRegistry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	body := []byte(`{"push_target":""}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent3", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+
+	// The stored record must be untouched by the rejected update.
+	stored, err := server.agentRegistry.GetAgent(ctx, "upd-agent3@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if stored.DeliveryMode != "push" || stored.PushTarget != "https://hooks.example.com/upd-agent3" {
+		t.Errorf("agent mutated by rejected update: mode=%q target=%q", stored.DeliveryMode, stored.PushTarget)
+	}
+}
+
 // TestHandleUpdateAgent_NotFound verifies updating an unknown agent fails.
 func TestHandleUpdateAgent_NotFound(t *testing.T) {
 	server := createTestServer()

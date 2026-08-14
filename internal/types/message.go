@@ -116,9 +116,6 @@ const (
 )
 
 // Valid reports whether the delivery status is one of the known values.
-// API handlers use it to reject unknown status filters before they reach
-// storage, where the database backend would fail with a Postgres enum-cast
-// error (22P02) while the memory backend silently matches nothing.
 func (s DeliveryStatus) Valid() bool {
 	switch s {
 	case StatusPending, StatusQueued, StatusDelivering, StatusDelivered, StatusFailed, StatusRetrying:

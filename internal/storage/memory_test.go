@@ -19,6 +19,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1440,6 +1441,154 @@ func TestMemoryStorage_UpdateAgentFields_Empty(t *testing.T) {
 	}
 	if got.DeliveryMode != "pull" || got.APIKey != "hash-A" {
 		t.Errorf("Expected agent unchanged, got mode=%q key=%q", got.DeliveryMode, got.APIKey)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_PushInvariant verifies that a field-level
+// update is validated against the merged state: switching to push mode without
+// a target, or clearing the target while in push mode, is rejected and the
+// stored record stays unchanged. Non-delivery updates are never blocked.
+func TestMemoryStorage_UpdateAgentFields_PushInvariant(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	// Switch to push without a target: rejected.
+	deliveryMode := "push"
+	err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+	})
+	if err == nil || !strings.Contains(err.Error(), "push target URL is required") {
+		t.Fatalf("expected push target required error, got: %v", err)
+	}
+	// The record must be unchanged.
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode != "pull" || got.PushTarget != "" {
+		t.Errorf("agent mutated by rejected update: mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+
+	// Push mode with a target succeeds.
+	target := "http://localhost:8080/hook"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+		PushTarget:   &target,
+	}); err != nil {
+		t.Fatalf("set push mode with target: %v", err)
+	}
+
+	// Clearing the target while in push mode: rejected.
+	emptyTarget := ""
+	err = storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		PushTarget: &emptyTarget,
+	})
+	if err == nil || !strings.Contains(err.Error(), "push target URL is required") {
+		t.Fatalf("expected push target required error, got: %v", err)
+	}
+	got, err = storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode != "push" || got.PushTarget != "http://localhost:8080/hook" {
+		t.Errorf("agent mutated by rejected update: mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+
+	// A non-delivery update (last access) is never blocked by the invariant.
+	lastAccess := time.Now().UTC()
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		LastAccess: &lastAccess,
+	}); err != nil {
+		t.Fatalf("last access update failed: %v", err)
+	}
+
+	// Pull mode with a cleared target is fine (pull needs no target).
+	pullMode := "pull"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &pullMode,
+		PushTarget:   &emptyTarget,
+	}); err != nil {
+		t.Fatalf("switch to pull and clear target: %v", err)
+	}
+	got, err = storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode != "pull" || got.PushTarget != "" {
+		t.Errorf("expected pull mode with empty target, got mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_ConcurrentInvariant verifies that two
+// concurrent field-level updates cannot jointly store push mode with an empty
+// push target. Both requests validate against the state committed by the
+// other (the store lock serializes the read-modify-write), so exactly one
+// fails and the final state stays valid.
+func TestMemoryStorage_UpdateAgentFields_ConcurrentInvariant(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	// Start from pull mode with a non-empty target.
+	agent := &agents.LocalAgent{
+		Address:      "race@localhost",
+		DeliveryMode: "pull",
+		PushTarget:   "http://localhost:8080/hook",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	emptyTarget := ""
+	deliveryMode := "push"
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		errs <- storage.UpdateAgentFields(ctx, "race@localhost", agents.AgentFields{PushTarget: &emptyTarget})
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		errs <- storage.UpdateAgentFields(ctx, "race@localhost", agents.AgentFields{DeliveryMode: &deliveryMode})
+	}()
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	okCount, errCount := 0, 0
+	for err := range errs {
+		if err == nil {
+			okCount++
+		} else {
+			errCount++
+			if !strings.Contains(err.Error(), "push target URL is required") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}
+	}
+	if okCount != 1 || errCount != 1 {
+		t.Fatalf("expected exactly one success and one failure, got %d success and %d failures", okCount, errCount)
+	}
+
+	got, err := storage.GetAgent(ctx, "race@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode == "push" && got.PushTarget == "" {
+		t.Error("concurrent updates stored invalid state: push mode with empty push target")
 	}
 }
 

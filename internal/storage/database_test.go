@@ -1260,10 +1260,13 @@ func TestUpdateAgentFields(t *testing.T) {
 	// GORM sorts map keys alphabetically and runs map updates in a default
 	// transaction.
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1,"push_target"=$2 WHERE address = $3`)).WithArgs(
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1,"push_target"=$2 WHERE address = $3 AND (NOT (COALESCE($4, delivery_mode) NOT IN ('push','pull') OR (COALESCE($5, delivery_mode) = 'push' AND COALESCE($6, push_target) = '')))`)).WithArgs(
 		deliveryMode,
 		pushTarget,
 		"agent1@localhost",
+		deliveryMode,
+		deliveryMode,
+		pushTarget,
 	).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
@@ -1286,11 +1289,18 @@ func TestUpdateAgentFields_NotFound(t *testing.T) {
 
 	deliveryMode := "push"
 	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1 WHERE address = $2`)).WithArgs(
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1 WHERE address = $2 AND (NOT (COALESCE($3, delivery_mode) NOT IN ('push','pull') OR (COALESCE($4, delivery_mode) = 'push' AND COALESCE($5, push_target) = '')))`)).WithArgs(
 		deliveryMode,
 		"missing@localhost",
+		deliveryMode,
+		deliveryMode,
+		nil,
 	).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs(
+		"missing@localhost",
+		1,
+	).WillReturnRows(sqlmock.NewRows([]string{"address"}))
 
 	err := storage.UpdateAgentFields(context.Background(), "missing@localhost", agents.AgentFields{
 		DeliveryMode: &deliveryMode,
@@ -1301,6 +1311,83 @@ func TestUpdateAgentFields_NotFound(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unfulfilled expectations: %v", err)
 	}
+}
+
+// TestUpdateAgentFields_PushInvariantRejected verifies that a field-level
+// update whose merged state violates the push-mode invariant (push mode with
+// an empty push target) is rejected atomically: the UPDATE matches no rows and
+// the re-read of the existing record yields the validation error. This closes
+// the race where two concurrent updates — one clearing push_target, the other
+// switching to push — could jointly store an invalid state.
+func TestUpdateAgentFields_PushInvariantRejected(t *testing.T) {
+	t.Run("switch to push without target", func(t *testing.T) {
+		gormDB, mock := newMockDB(t)
+		sqlDB, _ := gormDB.DB()
+		defer sqlDB.Close()
+		storage := &DatabaseStorage{db: gormDB}
+
+		deliveryMode := "push"
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1 WHERE address = $2 AND (NOT (COALESCE($3, delivery_mode) NOT IN ('push','pull') OR (COALESCE($4, delivery_mode) = 'push' AND COALESCE($5, push_target) = '')))`)).WithArgs(
+			deliveryMode,
+			"agent1@localhost",
+			deliveryMode,
+			deliveryMode,
+			nil,
+		).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
+		// The existing record is pull mode with no push target, so the merged
+		// state is push with an empty target.
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs(
+			"agent1@localhost",
+			1,
+		).WillReturnRows(sqlmock.NewRows([]string{"id", "address", "delivery_mode", "push_target"}).AddRow(1, "agent1@localhost", "pull", nil))
+
+		err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{
+			DeliveryMode: &deliveryMode,
+		})
+		if err == nil || !regexp.MustCompile(`push target URL is required`).MatchString(err.Error()) {
+			t.Fatalf("expected push target required error, got: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unfulfilled expectations: %v", err)
+		}
+	})
+
+	t.Run("clear target in push mode", func(t *testing.T) {
+		gormDB, mock := newMockDB(t)
+		sqlDB, _ := gormDB.DB()
+		defer sqlDB.Close()
+		storage := &DatabaseStorage{db: gormDB}
+
+		pushTarget := ""
+		target := "http://localhost:8080/hook"
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "push_target"=$1 WHERE address = $2 AND (NOT (COALESCE($3, delivery_mode) NOT IN ('push','pull') OR (COALESCE($4, delivery_mode) = 'push' AND COALESCE($5, push_target) = '')))`)).WithArgs(
+			pushTarget,
+			"agent1@localhost",
+			nil,
+			nil,
+			pushTarget,
+		).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
+		// The existing record is push mode with a target, so clearing the
+		// target would leave push mode with an empty target.
+		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs(
+			"agent1@localhost",
+			1,
+		).WillReturnRows(sqlmock.NewRows([]string{"id", "address", "delivery_mode", "push_target"}).AddRow(1, "agent1@localhost", "push", &target))
+
+		err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{
+			PushTarget: &pushTarget,
+		})
+		if err == nil || !regexp.MustCompile(`push target URL is required`).MatchString(err.Error()) {
+			t.Fatalf("expected push target required error, got: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unfulfilled expectations: %v", err)
+		}
+	})
 }
 
 // TestUpdateAgentFields_APIKeyOnly verifies that rotating only the key emits
@@ -1340,6 +1427,125 @@ func TestUpdateAgentFields_Empty(t *testing.T) {
 
 	if err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{}); err != nil {
 		t.Fatalf("UpdateAgentFields with no fields failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestUpdateAgentFields_EmptyAddress verifies the error for an empty address.
+func TestUpdateAgentFields_EmptyAddress(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	err := storage.UpdateAgentFields(context.Background(), "", agents.AgentFields{})
+	if err == nil || !regexp.MustCompile(`agent address cannot be empty`).MatchString(err.Error()) {
+		t.Fatalf("expected agent address cannot be empty error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestUpdateAgentFields_HeadersAndLastAccess verifies that a non-delivery
+// update (headers and last access) emits an UPDATE without the delivery
+// invariant guard, so LastAccess-only updates are never blocked.
+func TestUpdateAgentFields_HeadersAndLastAccess(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	headers := map[string]string{"X-Custom": "v1"}
+	lastAccess := time.Now().UTC()
+	headersJSON, err := json.Marshal(headers)
+	if err != nil {
+		t.Fatalf("marshal headers: %v", err)
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "headers"=$1,"last_access"=$2 WHERE address = $3`)).WithArgs(
+		string(headersJSON),
+		lastAccess,
+		"agent1@localhost",
+	).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	err = storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{
+		PushHeaders: headers,
+		LastAccess:  &lastAccess,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAgentFields failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestUpdateAgentFields_UpdateError verifies that a database failure during
+// the UPDATE is surfaced as an error.
+func TestUpdateAgentFields_UpdateError(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	deliveryMode := "push"
+	target := "http://localhost:8080/hook"
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1,"push_target"=$2 WHERE address = $3 AND (NOT (COALESCE($4, delivery_mode) NOT IN ('push','pull') OR (COALESCE($5, delivery_mode) = 'push' AND COALESCE($6, push_target) = '')))`)).WithArgs(
+		deliveryMode,
+		target,
+		"agent1@localhost",
+		deliveryMode,
+		deliveryMode,
+		target,
+	).WillReturnError(errors.New("db down"))
+	mock.ExpectRollback()
+
+	err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+		PushTarget:   &target,
+	})
+	if err == nil || !regexp.MustCompile(`failed to update agent`).MatchString(err.Error()) {
+		t.Fatalf("expected failed to update agent error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestUpdateAgentFields_ReReadError verifies that a database failure while
+// disambiguating a zero-rows update is surfaced as an error.
+func TestUpdateAgentFields_ReReadError(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	deliveryMode := "push"
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1 WHERE address = $2 AND (NOT (COALESCE($3, delivery_mode) NOT IN ('push','pull') OR (COALESCE($4, delivery_mode) = 'push' AND COALESCE($5, push_target) = '')))`)).WithArgs(
+		deliveryMode,
+		"agent1@localhost",
+		deliveryMode,
+		deliveryMode,
+		nil,
+	).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs(
+		"agent1@localhost",
+		1,
+	).WillReturnError(errors.New("db down"))
+
+	err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+	})
+	if err == nil || !regexp.MustCompile(`failed to update agent`).MatchString(err.Error()) {
+		t.Fatalf("expected failed to update agent error, got: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unfulfilled expectations: %v", err)
