@@ -30,6 +30,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/amtp-protocol/agentry/internal/agents"
+	"github.com/amtp-protocol/agentry/internal/middleware"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/storage"
@@ -301,8 +302,8 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 }
 
 // handleGetMessage handles GET /v1/messages/:id
-// Requires an Agent API key; only messages where the authenticated agent is
-// the sender or a recipient are returned.
+// Requires an Agent API key or the gateway admin key; agents may only read
+// messages they sent or received, while the admin may read any message.
 func (s *Server) handleGetMessage(c *gin.Context) {
 	messageID := c.Param("id")
 
@@ -313,8 +314,8 @@ func (s *Server) handleGetMessage(c *gin.Context) {
 		return
 	}
 
-	// Authenticate the caller as an agent.
-	agentAddr, ok := s.authenticateAgent(c)
+	// Authenticate the caller as an agent or the gateway admin.
+	agentAddr, isAdmin, ok := s.authenticateAgent(c)
 	if !ok {
 		return
 	}
@@ -327,8 +328,10 @@ func (s *Server) handleGetMessage(c *gin.Context) {
 		return
 	}
 
-	// Ownership check: caller must be sender or a recipient.
-	if !s.messageBelongsToAgent(message, agentAddr) {
+	// Ownership check: agents must be the sender or a recipient; the admin
+	// may inspect any message (including ones submitted by unregistered
+	// senders, which no agent key can reach).
+	if !isAdmin && !s.messageBelongsToAgent(message, agentAddr) {
 		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
 			"Message not found", nil)
 		return
@@ -338,8 +341,8 @@ func (s *Server) handleGetMessage(c *gin.Context) {
 }
 
 // handleGetMessageStatus handles GET /v1/messages/:id/status
-// Requires an Agent API key; only messages where the authenticated agent is
-// the sender or a recipient are returned.
+// Requires an Agent API key or the gateway admin key; agents may only read
+// statuses for messages they sent or received, while the admin may read any.
 func (s *Server) handleGetMessageStatus(c *gin.Context) {
 	messageID := c.Param("id")
 
@@ -350,8 +353,8 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 		return
 	}
 
-	// Authenticate the caller as an agent.
-	agentAddr, ok := s.authenticateAgent(c)
+	// Authenticate the caller as an agent or the gateway admin.
+	agentAddr, isAdmin, ok := s.authenticateAgent(c)
 	if !ok {
 		return
 	}
@@ -363,7 +366,7 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 			"Message not found", nil)
 		return
 	}
-	if !s.messageBelongsToAgent(message, agentAddr) {
+	if !isAdmin && !s.messageBelongsToAgent(message, agentAddr) {
 		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
 			"Message not found", nil)
 		return
@@ -385,7 +388,8 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 // semantics between Sender and Recipients by default; the "all traffic" case
 // (no direction) uses OR semantics via MessageFilter.Or so a single query
 // covers sent + received and pagination applies to the merged, newest-first
-// result set.
+// result set. An empty agentAddr (the admin caller) leaves the result
+// unrestricted when no direction filter is given.
 func buildListMessagesFilter(status, sender, recipient, agentAddr string, since *time.Time, limit, offset int) storage.MessageFilter {
 	filter := storage.MessageFilter{
 		Status: types.DeliveryStatus(status),
@@ -412,32 +416,42 @@ func buildListMessagesFilter(status, sender, recipient, agentAddr string, since 
 		// to the merged result set. (Previously two queries were paginated
 		// independently and merged, which could return up to 2*limit
 		// messages, overlap or drop rows across offsets, and left the merged
-		// list unsorted.)
-		filter.Sender = agentAddr
-		filter.Recipients = []string{agentAddr}
-		filter.Or = true
+		// list unsorted.) Admin callers have no agent address, so no
+		// direction constraint is applied and the full set is returned.
+		if agentAddr != "" {
+			filter.Sender = agentAddr
+			filter.Recipients = []string{agentAddr}
+			filter.Or = true
+		}
 	}
 	return filter
 }
 
-// normalizeAgentFilter normalizes a bare agent name to its full address
-// (name@localdomain) for filter parameters, accepting full addresses that
-// already match the local domain. An empty value is returned unchanged,
-// meaning the filter is absent.
-func (s *Server) normalizeAgentFilter(value string) (string, error) {
+// normalizeParticipantFilter normalizes a sender/recipient filter parameter
+// on the message list endpoint. Bare agent names are resolved to their full
+// local address so "?sender=viewer" works like "?sender=viewer@localhost";
+// full local addresses are normalized too. Admin callers may also filter by
+// foreign-domain addresses — e.g. the sender of a message routed in from
+// another gateway — which no local agent key can reference. An empty value is
+// returned unchanged, meaning the filter is absent.
+func (s *Server) normalizeParticipantFilter(value string, isAdmin bool) (string, error) {
 	if value == "" {
 		return "", nil
+	}
+	if isAdmin && strings.Contains(value, "@") {
+		return value, nil
 	}
 	return s.agentRegistry.ResolveAgentAddress(value)
 }
 
 // handleListMessages handles GET /v1/messages
-// Requires an Agent API key. Results are scoped to the authenticated agent:
-// the sender/recipient filters must reference that agent, and the returned
-// set is always restricted to messages it sent or received.
+// Requires an Agent API key or the gateway admin key. Results are scoped to
+// the authenticated agent: the sender/recipient filters must reference that
+// agent, and the returned set is always restricted to messages it sent or
+// received. The admin may list any message and filter by any participant.
 func (s *Server) handleListMessages(c *gin.Context) {
-	// Authenticate the caller as an agent.
-	agentAddr, ok := s.authenticateAgent(c)
+	// Authenticate the caller as an agent or the gateway admin.
+	agentAddr, isAdmin, ok := s.authenticateAgent(c)
 	if !ok {
 		return
 	}
@@ -451,11 +465,7 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	offsetStr := c.DefaultQuery("offset", "0")
 
 	// Validate the status filter against the known delivery statuses before
-	// it reaches storage. On the database backend the status is compared
-	// against the Postgres delivery_status enum column, so an arbitrary
-	// value would raise a 22P02 enum-cast error and surface as a 500; the
-	// memory backend would silently return an empty set. Rejecting unknown
-	// values here keeps behavior identical across backends.
+	// it reaches storage.
 	if status != "" && !types.DeliveryStatus(status).Valid() {
 		s.respondWithError(c, http.StatusBadRequest, "INVALID_STATUS",
 			"Status must be one of: pending, queued, delivering, delivered, failed, retrying", nil)
@@ -494,24 +504,26 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	// "?sender=viewer@localhost"; then reject filters that reference other
 	// agents. A filter that cannot be resolved to a local agent — an invalid
 	// name or a foreign domain — is treated as referencing another agent.
-	sender, err = s.normalizeAgentFilter(sender)
+	// Admin callers may filter by any participant, including foreign-domain
+	// addresses that no local agent key can reference.
+	sender, err = s.normalizeParticipantFilter(sender, isAdmin)
 	if err != nil {
+		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
+			"Sender filter must reference a valid agent", nil)
+		return
+	}
+	if !isAdmin && sender != "" && sender != agentAddr {
 		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
 			"Sender filter must reference the authenticated agent", nil)
 		return
 	}
-	if sender != "" && sender != agentAddr {
-		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
-			"Sender filter must reference the authenticated agent", nil)
-		return
-	}
-	recipient, err = s.normalizeAgentFilter(recipient)
+	recipient, err = s.normalizeParticipantFilter(recipient, isAdmin)
 	if err != nil {
 		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
-			"Recipient filter must reference the authenticated agent", nil)
+			"Recipient filter must reference a valid agent", nil)
 		return
 	}
-	if recipient != "" && recipient != agentAddr {
+	if !isAdmin && recipient != "" && recipient != agentAddr {
 		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
 			"Recipient filter must reference the authenticated agent", nil)
 		return
@@ -552,7 +564,9 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	for _, msg := range messages {
 		// Post-filter for safety: the storage filter may be an OR match, so
 		// only include messages the authenticated agent sent or received.
-		if !s.messageBelongsToAgent(msg, agentAddr) {
+		// Admin callers see the full set, including messages whose
+		// participants are all foreign.
+		if !isAdmin && !s.messageBelongsToAgent(msg, agentAddr) {
 			continue
 		}
 		item := gin.H{
@@ -1144,44 +1158,76 @@ func (s *Server) verifyAgentAccess(c *gin.Context, agentAddress string) bool {
 	return true
 }
 
-// authenticateAgent authenticates a request using an Agent API key. On
-// success it returns the agent's full address and true. The key is verified
-// against every registered agent, since the caller does not identify itself
-// in the path for message query endpoints.
-func (s *Server) authenticateAgent(c *gin.Context) (string, bool) {
+// authenticateAgent authenticates a request to a message query endpoint
+// using an Agent API key, falling back to the gateway admin key. On success
+// it returns the caller's identity: a registered agent's full address
+// (agentAddr), or the admin identity (isAdmin), plus true. Agents are scoped
+// to messages they sent or received; the admin may inspect any message.
+//
+// The admin fallback lets operators inspect messages submitted by
+// unregistered senders (e.g. routed in from a foreign gateway), which no
+// agent key can access since neither sender nor recipient is a registered
+// local agent. POST /v1/messages is intentionally public — AMTP is a
+// federated protocol where remote senders have no local key — so without the
+// fallback such messages would be permanently unreadable.
+func (s *Server) authenticateAgent(c *gin.Context) (agentAddr string, isAdmin bool, ok bool) {
 	authHeader := c.GetHeader("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		apiKey := strings.TrimPrefix(authHeader, "Bearer ")
+		if apiKey == "" {
+			s.respondWithError(c, http.StatusUnauthorized, "EMPTY_API_KEY",
+				"API key cannot be empty", nil)
+			return "", false, false
+		}
+
+		// Find the agent that owns this key by scanning the registry. This is
+		// acceptable for the control-plane scale of a gateway; keys are opaque
+		// and salted, so there is no way to look up by key directly.
+		for address, agent := range s.agentRegistry.GetAllAgents(c.Request.Context()) {
+			if agent == nil {
+				continue
+			}
+			// Reuse the inbox verification path which hashes with the same salt.
+			if s.agentRegistry.VerifyAPIKey(c.Request.Context(), address, apiKey) {
+				s.agentRegistry.UpdateLastAccess(c.Request.Context(), address)
+				return address, false, true
+			}
+		}
+	}
+
+	// Admin fallback: a valid admin key may inspect any message.
+	if s.isAdminRequest(c) {
+		return "", true, true
+	}
+
+	// No valid credentials. Distinguish "no credentials at all" (401) from
+	// "invalid credentials" (403) so clients can tell the cases apart.
+	if authHeader == "" && c.GetHeader(s.config.Auth.AdminAPIKeyHeader) == "" {
 		s.respondWithError(c, http.StatusUnauthorized, "MISSING_AUTHORIZATION",
-			"Agent API key required", map[string]interface{}{
-				"required_header": "Authorization: Bearer <api-key>",
+			"Agent API key or admin key required", map[string]interface{}{
+				"required_header": "Authorization: Bearer <api-key> or " + s.config.Auth.AdminAPIKeyHeader,
 			})
-		return "", false
+	} else {
+		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
+			"Invalid API key", nil)
 	}
+	return "", false, false
+}
 
-	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
-	if apiKey == "" {
-		s.respondWithError(c, http.StatusUnauthorized, "EMPTY_API_KEY",
-			"API key cannot be empty", nil)
-		return "", false
+// isAdminRequest reports whether the request carries a valid gateway admin
+// key. The fallback only activates when an admin key file is configured;
+// without one there is no admin identity to grant, and message queries stay
+// restricted to registered agents.
+func (s *Server) isAdminRequest(c *gin.Context) bool {
+	auth := s.config.Auth
+	if auth.AdminKeyFile == "" {
+		return false
 	}
-
-	// Find the agent that owns this key by scanning the registry. This is
-	// acceptable for the control-plane scale of a gateway; keys are opaque
-	// and salted, so there is no way to look up by key directly.
-	for address, agent := range s.agentRegistry.GetAllAgents(c.Request.Context()) {
-		if agent == nil {
-			continue
-		}
-		// Reuse the inbox verification path which hashes with the same salt.
-		if s.agentRegistry.VerifyAPIKey(c.Request.Context(), address, apiKey) {
-			s.agentRegistry.UpdateLastAccess(c.Request.Context(), address)
-			return address, true
-		}
+	adminKey := c.GetHeader(auth.AdminAPIKeyHeader)
+	if adminKey == "" {
+		return false
 	}
-
-	s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
-		"Invalid API key", nil)
-	return "", false
+	return middleware.ValidateAdminKey(adminKey, auth.AdminKeyFile)
 }
 
 // messageBelongsToAgent reports whether the message was sent by or addressed

@@ -217,7 +217,7 @@ func AdminAuth(cfg config.AuthConfig) gin.HandlerFunc {
 		}
 
 		// Validate admin key against file
-		if !validateAdminKey(adminKey, cfg.AdminKeyFile) {
+		if !ValidateAdminKey(adminKey, cfg.AdminKeyFile) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": gin.H{
 					"code":    "ADMIN_ACCESS_DENIED",
@@ -316,8 +316,11 @@ func isRateLimited(clientIP string) bool {
 	return false
 }
 
-// validateAdminKey validates the provided admin key against the key file
-func validateAdminKey(providedKey, keyFile string) bool {
+// ValidateAdminKey validates the provided admin key against the key file.
+// It is exported so the server layer can grant the same admin identity on
+// message query endpoints (get/status/list), where the admin middleware is
+// not installed, keeping admin-key semantics consistent across the API.
+func ValidateAdminKey(providedKey, keyFile string) bool {
 	// Read admin keys from file
 	data, err := os.ReadFile(filepath.Clean(keyFile))
 	if err != nil {

@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -406,6 +408,21 @@ func createTestServer() *Server {
 	return server
 }
 
+// createTestServerWithAdminKey returns a test server configured with an admin
+// key file containing the given key, so tests can exercise the admin fallback
+// on message query endpoints. The admin key is sent in the X-Admin-Key header.
+func createTestServerWithAdminKey(t *testing.T, adminKey string) *Server {
+	t.Helper()
+	server := createTestServer()
+	keyFile := filepath.Join(t.TempDir(), "admin.key")
+	if err := os.WriteFile(keyFile, []byte(adminKey), 0o600); err != nil {
+		t.Fatalf("write admin key file: %v", err)
+	}
+	server.config.Auth.AdminKeyFile = keyFile
+	server.config.Auth.AdminAPIKeyHeader = "X-Admin-Key"
+	return server
+}
+
 // registerTestAgent registers an agent in the given server and returns its
 // plaintext API key for use in Authorization headers.
 func registerTestAgent(t *testing.T, server *Server, name string) string {
@@ -724,6 +741,87 @@ func TestHandleGetMessage_NoAuth(t *testing.T) {
 	}
 }
 
+// TestHandleGetMessage_AdminAccess verifies the admin key fallback on
+// GET /v1/messages/:id: a message submitted by an unregistered sender (or
+// routed in from a foreign domain) has no registered agent key that matches
+// sender or recipient, so only the admin can read it.
+func TestHandleGetMessage_AdminAccess(t *testing.T) {
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	mockStorage := server.storage.(*MockStorage)
+
+	// Sender and recipient are both foreign — no registered agent key can
+	// reference this message.
+	message := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01234567-89ab-7def-8123-456789abcdef",
+		IdempotencyKey: "01234567-89ab-4def-8123-456789abcdef",
+		Timestamp:      time.Now().UTC(),
+		Sender:         "unregistered@example.com",
+		Recipients:     []string{"remote-peer@example.com"},
+		Subject:        "Foreign",
+		Payload:        json.RawMessage(`{"msg":"hi"}`),
+	}
+	mockStorage.messages[message.MessageID] = message
+
+	req, err := http.NewRequest("GET", "/v1/messages/"+message.MessageID, nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status %d with admin key, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	var response types.Message
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if response.MessageID != message.MessageID {
+		t.Errorf("Expected message ID %s, got %s", message.MessageID, response.MessageID)
+	}
+	if response.Sender != "unregistered@example.com" {
+		t.Errorf("Expected sender unregistered@example.com, got %s", response.Sender)
+	}
+}
+
+// TestHandleGetMessage_AdminInvalidKey verifies the admin fallback rejects
+// invalid admin keys and stays inactive when no admin key file is configured.
+func TestHandleGetMessage_AdminInvalidKey(t *testing.T) {
+	messageID := "01234567-89ab-7def-8123-456789abcdef"
+
+	// A wrong admin key must be rejected with 403.
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	req, err := http.NewRequest("GET", "/v1/messages/"+messageID, nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "wrong-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("Expected status %d for invalid admin key, got %d", http.StatusForbidden, rr.Code)
+	}
+
+	// Without a configured admin key file there is no admin identity, so an
+	// admin header alone does not grant access.
+	server = createTestServer()
+	req, err = http.NewRequest("GET", "/v1/messages/"+messageID, nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	rr = httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status %d without admin key file, got %d", http.StatusUnauthorized, rr.Code)
+	}
+}
+
 func TestHandleGetMessageStatus_Success(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
@@ -838,6 +936,61 @@ func TestHandleGetMessageStatus_NotFound(t *testing.T) {
 
 	if errorResponse.Error.Code != "MESSAGE_NOT_FOUND" {
 		t.Errorf("Expected error code 'MESSAGE_NOT_FOUND', got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleGetMessageStatus_AdminAccess verifies the admin key fallback on
+// GET /v1/messages/:id/status for a message whose sender and recipient are
+// both foreign (no registered agent key can reference it).
+func TestHandleGetMessageStatus_AdminAccess(t *testing.T) {
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	mockStorage := server.storage.(*MockStorage)
+
+	messageID := "01234567-89ab-7def-8123-456789abcdef"
+	mockStorage.messages[messageID] = &types.Message{
+		Version:        "1.0",
+		MessageID:      messageID,
+		IdempotencyKey: "01234567-89ab-4def-8123-456789abcdef",
+		Timestamp:      time.Now().UTC(),
+		Sender:         "unregistered@example.com",
+		Recipients:     []string{"remote-peer@example.com"},
+		Subject:        "Foreign",
+	}
+	mockStorage.statuses[messageID] = &types.MessageStatus{
+		MessageID: messageID,
+		Status:    types.StatusQueued,
+		Recipients: []types.RecipientStatus{
+			{
+				Address:   "remote-peer@example.com",
+				Status:    types.StatusQueued,
+				Timestamp: time.Now().UTC(),
+			},
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	req, err := http.NewRequest("GET", "/v1/messages/"+messageID+"/status", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status code %d with admin key, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	var response types.MessageStatus
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if response.MessageID != messageID {
+		t.Errorf("Expected message ID %s, got %s", messageID, response.MessageID)
+	}
+	if response.Status != types.StatusQueued {
+		t.Errorf("Expected status %s, got %s", types.StatusQueued, response.Status)
 	}
 }
 
@@ -1714,6 +1867,130 @@ func TestHandleListMessages_InvalidStatus(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("empty status: expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+// TestHandleListMessages_AdminAccess verifies the admin key fallback on
+// GET /v1/messages: the admin sees the full message set (including messages
+// whose sender and recipient are both foreign) and may filter by any
+// participant — bare local names are normalized, foreign addresses pass
+// through unchanged. A registered agent key stays scoped to that agent.
+func TestHandleListMessages_AdminAccess(t *testing.T) {
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	mockStorage := server.storage.(*MockStorage)
+	// A local agent whose key must NOT expose the foreign messages.
+	key := registerTestAgent(t, server, "viewer")
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := []*types.Message{
+		{
+			MessageID:  "019fbd30-0001-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now,
+			Sender:     "unregistered@example.com",
+			Recipients: []string{"remote-peer@example.com"},
+			Subject:    "foreign-1",
+		},
+		{
+			MessageID:  "019fbd30-0002-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now.Add(-time.Minute),
+			Sender:     "another@example.net",
+			Recipients: []string{"somewhere@example.org"},
+			Subject:    "foreign-2",
+		},
+	}
+	for _, msg := range seed {
+		if err := mockStorage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("seed %s: %v", msg.MessageID, err)
+		}
+	}
+
+	// 1. The admin sees both foreign messages with no direction filter, and
+	// the storage filter carries no agent scoping.
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin list: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	if filter := mockStorage.listFilters[0]; filter.Sender != "" || len(filter.Recipients) != 0 {
+		t.Errorf("admin list: expected unscoped storage filter, got sender=%q recipients=%v",
+			filter.Sender, filter.Recipients)
+	}
+	var listResp struct {
+		Messages []map[string]interface{} `json:"messages"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal admin list: %v", err)
+	}
+	if len(listResp.Messages) != len(seed) {
+		t.Errorf("admin list: expected %d messages, got %d", len(seed), len(listResp.Messages))
+	}
+
+	// 2. The admin can filter by a foreign sender address, which is passed
+	// through to the storage filter unchanged.
+	req = httptest.NewRequest("GET", "/v1/messages?sender=unregistered@example.com", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin sender filter: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) < 2 {
+		t.Fatal("Expected a second ListMessages call")
+	}
+	if got := mockStorage.listFilters[1].Sender; got != "unregistered@example.com" {
+		t.Errorf("admin sender filter: expected sender unregistered@example.com, got %q", got)
+	}
+
+	// 3. Bare-name filters are normalized for admins too.
+	req = httptest.NewRequest("GET", "/v1/messages?recipient=viewer", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin bare filter: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) < 3 {
+		t.Fatal("Expected a third ListMessages call")
+	}
+	recips := mockStorage.listFilters[2].Recipients
+	if len(recips) != 1 || recips[0] != "viewer@localhost" {
+		t.Errorf("admin bare filter: expected recipient [viewer@localhost], got %v", recips)
+	}
+
+	// 4. The registered agent's key stays scoped: the foreign messages are
+	// post-filtered out.
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("agent list: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal agent list: %v", err)
+	}
+	if len(listResp.Messages) != 0 {
+		t.Errorf("agent list: expected 0 messages for foreign traffic, got %d", len(listResp.Messages))
+	}
+
+	// 5. An invalid admin key is rejected with 403.
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("X-Admin-Key", "wrong-key")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("invalid admin key: expected status %d, got %d", http.StatusForbidden, w.Code)
 	}
 }
 

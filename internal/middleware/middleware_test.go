@@ -1024,7 +1024,7 @@ key4`
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := validateAdminKey(tt.key, adminKeysFile)
+			result := ValidateAdminKey(tt.key, adminKeysFile)
 			if result != tt.expected {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
@@ -1033,9 +1033,9 @@ key4`
 
 	// Test with non-existent file
 	t.Run("non-existent file", func(t *testing.T) {
-		result := validateAdminKey("any-key", "/non/existent/file")
+		result := ValidateAdminKey("any-key", "/non/existent/file")
 		if result {
-			t.Error("Expected validateAdminKey to return false for non-existent file")
+			t.Error("Expected ValidateAdminKey to return false for non-existent file")
 		}
 	})
 }

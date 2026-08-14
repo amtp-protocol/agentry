@@ -425,6 +425,155 @@ func TestIntegration_ListMessagesInvalidStatus(t *testing.T) {
 	}
 }
 
+// TestIntegration_AdminCanInspectUnregisteredSenderMessage is a functional
+// verification test for the admin key fallback on message query endpoints.
+// POST /v1/messages is public and accepts any sender, so a message submitted
+// by an unregistered sender (or routed in from a foreign domain) has no
+// registered agent key that matches sender or recipient. Without the admin
+// fallback such messages are permanently unreadable: unauthenticated polling
+// returns 401 and any registered agent key returns 404. The admin key must be
+// able to fetch the message, its status, and list it, so operators can
+// inspect traffic that no agent key can reach.
+func TestIntegration_AdminCanInspectUnregisteredSenderMessage(t *testing.T) {
+	// Route foreign-domain deliveries to a mock AMTP gateway so the send
+	// succeeds and the message is persisted with a status.
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	cfg := createTestConfig(t)
+	cfg.DNS.MockRecords = map[string]string{
+		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
+	defer testServer.Close()
+
+	// A registered agent whose key must NOT grant access to the foreign
+	// message below (neither sender nor recipient matches it).
+	agentKey := registerLocalAgent(t, testServer.URL)
+
+	// Submit a message from an unregistered sender to an unregistered
+	// recipient in a foreign domain.
+	msgID := sendTestMessage(t, testServer.URL,
+		"unregistered@example.com", "remote-peer@example.com",
+		"admin-inspect", time.Now().UTC().Format(time.RFC3339))
+
+	// 1. Unauthenticated polling is rejected.
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("status request: %v", err)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no auth: expected status %d, got %d: %s", http.StatusUnauthorized, resp.StatusCode, string(rb))
+	}
+
+	// 2. A registered agent key does not grant access (neither sender nor
+	// recipient is the registered agent).
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("status request: %v", err)
+	}
+	rb, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("agent key: expected status %d, got %d: %s", http.StatusNotFound, resp.StatusCode, string(rb))
+	}
+
+	// 3. The admin key can fetch the message.
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID, nil)
+	if err != nil {
+		t.Fatalf("build get request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("admin get: expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+	var got types.Message
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if got.MessageID != msgID {
+		t.Errorf("admin get: expected message %s, got %s", msgID, got.MessageID)
+	}
+	if got.Sender != "unregistered@example.com" {
+		t.Errorf("admin get: expected sender unregistered@example.com, got %s", got.Sender)
+	}
+
+	// 4. The admin key can fetch the status.
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("status request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("admin status: expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+	var status types.MessageStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if status.MessageID != msgID {
+		t.Errorf("admin status: expected message %s, got %s", msgID, status.MessageID)
+	}
+
+	// 5. The admin key can list messages, including one whose participants
+	// are both foreign, and filter by the foreign sender address.
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages?sender=unregistered@example.com", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("admin list: expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+	var listing listMessagesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	found := false
+	for _, m := range listing.Messages {
+		if m.MessageID == msgID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("admin list: expected message %s in filtered list of %d, got %v",
+			msgID, listing.Total, listing.Messages)
+	}
+}
+
 func TestIntegration_MessageLifecycle(t *testing.T) {
 	// Create mock AMTP server for deliveries
 	mockAMTPServer := createMockAMTPServer(t)
