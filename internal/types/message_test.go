@@ -135,6 +135,29 @@ func TestCoordinationValidation(t *testing.T) {
 	}
 }
 
+func TestDeliveryStatusValid(t *testing.T) {
+	// Every known delivery status must be accepted.
+	valid := []DeliveryStatus{
+		StatusPending, StatusQueued, StatusDelivering, StatusDelivered, StatusFailed, StatusRetrying,
+	}
+	for _, s := range valid {
+		if !s.Valid() {
+			t.Errorf("expected %q to be a valid delivery status", s)
+		}
+	}
+
+	// Anything else — including empty, case variants, and unknown values —
+	// must be rejected so API filters never reach storage unvalidated.
+	invalid := []DeliveryStatus{
+		"", "bogus", "PENDING", "pending ", "scheduled", "expired", "unknown",
+	}
+	for _, s := range invalid {
+		if s.Valid() {
+			t.Errorf("expected %q to be an invalid delivery status", s)
+		}
+	}
+}
+
 func TestMessageSize(t *testing.T) {
 	message := &Message{
 		Version:        "1.0",

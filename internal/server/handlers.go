@@ -450,6 +450,18 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	limitStr := c.DefaultQuery("limit", "100")
 	offsetStr := c.DefaultQuery("offset", "0")
 
+	// Validate the status filter against the known delivery statuses before
+	// it reaches storage. On the database backend the status is compared
+	// against the Postgres delivery_status enum column, so an arbitrary
+	// value would raise a 22P02 enum-cast error and surface as a 500; the
+	// memory backend would silently return an empty set. Rejecting unknown
+	// values here keeps behavior identical across backends.
+	if status != "" && !types.DeliveryStatus(status).Valid() {
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_STATUS",
+			"Status must be one of: pending, queued, delivering, delivered, failed, retrying", nil)
+		return
+	}
+
 	// Validate limit and offset
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil || limit < 1 || limit > 1000 {

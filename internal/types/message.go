@@ -115,6 +115,18 @@ const (
 	StatusRetrying   DeliveryStatus = "retrying"
 )
 
+// Valid reports whether the delivery status is one of the known values.
+// API handlers use it to reject unknown status filters before they reach
+// storage, where the database backend would fail with a Postgres enum-cast
+// error (22P02) while the memory backend silently matches nothing.
+func (s DeliveryStatus) Valid() bool {
+	switch s {
+	case StatusPending, StatusQueued, StatusDelivering, StatusDelivered, StatusFailed, StatusRetrying:
+		return true
+	}
+	return false
+}
+
 // SendMessageRequest represents the API request to send a message
 type SendMessageRequest struct {
 	MessageID      string                 `json:"message_id,omitempty" validate:"omitempty,uuidv7"`

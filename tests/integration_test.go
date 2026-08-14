@@ -365,6 +365,66 @@ func TestIntegration_ListMessagesPagination(t *testing.T) {
 	}
 }
 
+// TestIntegration_ListMessagesInvalidStatus is a functional verification
+// test for status query parameter validation on GET /v1/messages. An
+// unvalidated status flows into the storage filter where, on the database
+// backend, it is compared against the Postgres delivery_status enum column
+// and a bogus value raises a 22P02 enum-cast error (500 MESSAGE_LIST_FAILED);
+// the memory backend would silently return an empty list. The handler must
+// reject unknown values with 400 INVALID_STATUS instead, so behavior is
+// identical across backends, and must keep accepting every known status.
+func TestIntegration_ListMessagesInvalidStatus(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	agentKey := registerLocalAgent(t, testServer.URL)
+
+	// An unknown status must be rejected with 400 before it reaches storage.
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages?status=bogus", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages with invalid status: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("invalid status: expected status %d, got %d: %s",
+			http.StatusBadRequest, resp.StatusCode, string(rb))
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "INVALID_STATUS" {
+		t.Errorf("expected error code INVALID_STATUS, got %s", errorResponse.Error.Code)
+	}
+
+	// Every known delivery status must remain accepted.
+	for _, status := range []string{"pending", "queued", "delivering", "delivered", "failed", "retrying"} {
+		req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages?status="+status, nil)
+		if err != nil {
+			t.Fatalf("build list request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+agentKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("list messages with status %s: %v", status, err)
+		}
+		rb, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("valid status %q: expected status %d, got %d: %s",
+				status, http.StatusOK, resp.StatusCode, string(rb))
+		}
+	}
+}
+
 func TestIntegration_MessageLifecycle(t *testing.T) {
 	// Create mock AMTP server for deliveries
 	mockAMTPServer := createMockAMTPServer(t)

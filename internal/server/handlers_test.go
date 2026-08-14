@@ -1645,6 +1645,78 @@ func TestHandleListMessages_InvalidSince(t *testing.T) {
 	}
 }
 
+// TestHandleListMessages_InvalidStatus verifies the status query parameter is
+// validated against the known delivery statuses before it reaches storage. An
+// unvalidated value would raise a Postgres enum-cast error (22P02) on the
+// database backend and surface as a 500, while the memory backend would
+// silently return an empty list; rejecting unknown values with 400 keeps
+// behavior identical across backends.
+func TestHandleListMessages_InvalidStatus(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	// An unknown status must be rejected with 400 before it reaches storage.
+	req := httptest.NewRequest("GET", "/v1/messages?status=bogus", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+	if errorResponse.Error.Code != "INVALID_STATUS" {
+		t.Errorf("Expected error code 'INVALID_STATUS', got %s", errorResponse.Error.Code)
+	}
+
+	// Storage must never see the invalid value.
+	if len(mockStorage.listFilters) != 0 {
+		t.Errorf("Expected no storage queries for invalid status, got %d", len(mockStorage.listFilters))
+	}
+
+	// Every known status is accepted and forwarded to the storage filter.
+	known := []types.DeliveryStatus{
+		types.StatusPending, types.StatusQueued, types.StatusDelivering,
+		types.StatusDelivered, types.StatusFailed, types.StatusRetrying,
+	}
+	for _, status := range known {
+		req = httptest.NewRequest("GET", "/v1/messages?status="+string(status), nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		w = httptest.NewRecorder()
+		server.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("status %q: expected status %d, got %d: %s",
+				status, http.StatusOK, w.Code, w.Body.String())
+		}
+	}
+	if len(mockStorage.listFilters) != len(known) {
+		t.Errorf("Expected %d storage queries for valid statuses, got %d",
+			len(known), len(mockStorage.listFilters))
+	}
+	// The filter must carry the status through to storage unchanged.
+	for i, status := range known {
+		if mockStorage.listFilters[i].Status != status {
+			t.Errorf("filter %d: expected status %s, got %s", i, status, mockStorage.listFilters[i].Status)
+		}
+	}
+
+	// An empty status means "no filter" and must stay accepted.
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("empty status: expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
 // TestHandleListMessages_MergedQueryUsesOrFilter verifies that the default
 // "all traffic" path (no sender/recipient filter) issues exactly one
 // OR-mode storage query covering both directions, with limit/offset intact,
