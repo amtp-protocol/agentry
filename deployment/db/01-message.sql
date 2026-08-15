@@ -72,6 +72,11 @@ CREATE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp_desc ON messages(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_idempotency_key ON messages(idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+-- Participant lookups (GET /v1/messages) filter on "sender = $1 OR recipients
+-- @> $2". Without a GIN index on recipients the OR makes idx_messages_sender
+-- unusable and every listing scans the whole table; with it the planner can
+-- bitmap-OR the two indexes. jsonb_path_ops covers @> and stays compact.
+CREATE INDEX IF NOT EXISTS idx_messages_recipients ON messages USING GIN (recipients jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_in_reply_to ON messages(in_reply_to);
 

@@ -2468,7 +2468,9 @@ func TestHandleListMessages_MergedQueryUsesOrFilter(t *testing.T) {
 		t.Fatalf("seed received message: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/v1/messages?limit=5&offset=2", nil)
+	// limit=2 fills the page with the two seeded messages, so the handler
+	// still issues the separate CountMessages query this test inspects.
+	req := httptest.NewRequest("GET", "/v1/messages?limit=2&offset=2", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -2493,8 +2495,8 @@ func TestHandleListMessages_MergedQueryUsesOrFilter(t *testing.T) {
 	if len(filter.Recipients) != 1 || filter.Recipients[0] != "viewer@localhost" {
 		t.Errorf("Expected merged query recipients [viewer@localhost], got %v", filter.Recipients)
 	}
-	if filter.Limit != 5 {
-		t.Errorf("Expected limit 5 propagated to storage, got %d", filter.Limit)
+	if filter.Limit != 2 {
+		t.Errorf("Expected limit 2 propagated to storage, got %d", filter.Limit)
 	}
 	if filter.Offset != 2 {
 		t.Errorf("Expected offset 2 propagated to storage, got %d", filter.Offset)
@@ -2645,6 +2647,80 @@ func TestHandleListMessages_MergedQueryPagination(t *testing.T) {
 	}
 }
 
+// TestHandleListMessages_ShortPageSkipsCount verifies that a page shorter
+// than the limit reports the total from the page itself, without a second
+// full-set query.
+func TestHandleListMessages_ShortPageSkipsCount(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	now := time.Now().UTC()
+	for i := 0; i < 2; i++ {
+		if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+			MessageID:  fmt.Sprintf("019fbd30-0100-75aa-8cd4-de1f14e0110%d", i),
+			Timestamp:  now.Add(-time.Duration(i) * time.Minute),
+			Sender:     "viewer@localhost",
+			Recipients: []string{"peer@localhost"},
+		}); err != nil {
+			t.Fatalf("seed message: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=100", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.countFilters) != 0 {
+		t.Errorf("Expected no CountMessages query for a short page, got %d", len(mockStorage.countFilters))
+	}
+
+	var response struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Total != 2 {
+		t.Errorf("Expected total 2 from the page itself, got %d", response.Total)
+	}
+}
+
+// TestHandleListMessages_EmptyPagePastOffsetCounts verifies that an empty
+// page at a non-zero offset still asks storage for the total: the offset may
+// overshoot the filtered set, so it cannot be added to the page length.
+func TestHandleListMessages_EmptyPagePastOffsetCounts(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=100&offset=50", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.countFilters) != 1 {
+		t.Fatalf("Expected 1 CountMessages query for an empty page past the offset, got %d", len(mockStorage.countFilters))
+	}
+
+	var response struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Total != 0 {
+		t.Errorf("Expected total 0, got %d", response.Total)
+	}
+}
+
 // TestHandleListMessages_CountFailure verifies that a CountMessages failure
 // surfaces as an error response instead of being silently swallowed (the
 // previous total computation ignored storage errors and undercounted).
@@ -2655,7 +2731,18 @@ func TestHandleListMessages_CountFailure(t *testing.T) {
 
 	mockStorage.countError = fmt.Errorf("count exploded")
 
-	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+		MessageID:  "019fbd30-0004-75aa-8cd4-de1f14e011ab",
+		Timestamp:  time.Now().UTC(),
+		Sender:     "viewer@localhost",
+		Recipients: []string{"peer@localhost"},
+	}); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	// limit=1 fills the page, so the handler cannot infer the total from the
+	// page alone and must ask CountMessages.
+	req := httptest.NewRequest("GET", "/v1/messages?limit=1", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)

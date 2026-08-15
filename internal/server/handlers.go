@@ -669,16 +669,23 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	}
 
 	// total is the number of messages in the filtered set before pagination.
-	// CountMessages covers the full filtered set without materializing rows:
-	// Limit/Offset are ignored by the storage backends, and a count failure
-	// surfaces as an error instead of silently undercounting.
-	total, err := s.storage.CountMessages(c.Request.Context(), filter)
-	if err != nil {
-		s.respondWithError(c, http.StatusInternalServerError, "MESSAGE_LIST_FAILED",
-			"Failed to count messages", map[string]interface{}{
-				"error": err.Error(),
-			})
-		return
+	// A short page already answers that: storage returned every row left
+	// after the offset, so the set ends here and the total is offset plus
+	// this page. Only a full page — or an empty page past the first, where
+	// the offset may overshoot the set — needs CountMessages, which re-runs
+	// the same filter over the whole table. Skipping it keeps the common
+	// poll (an agent with less than one page of traffic) to a single query.
+	// A count failure surfaces as an error instead of silently undercounting.
+	total := int64(offset + len(page))
+	if len(page) >= limit || (len(page) == 0 && offset > 0) {
+		total, err = s.storage.CountMessages(c.Request.Context(), filter)
+		if err != nil {
+			s.respondWithError(c, http.StatusInternalServerError, "MESSAGE_LIST_FAILED",
+				"Failed to count messages", map[string]interface{}{
+					"error": err.Error(),
+				})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
