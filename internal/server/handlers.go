@@ -1283,6 +1283,13 @@ func (s *Server) isAdminRequest(c *gin.Context) bool {
 	if adminKey == "" {
 		return false
 	}
+	// Validate against the cached key set: the parsed file is reused across
+	// requests and re-read only when the file's mtime or size changes, so
+	// agent polling never blocks on a filesystem read per request. The
+	// one-shot fallback covers servers constructed without New() (tests).
+	if s.adminKeyValidator != nil {
+		return s.adminKeyValidator.Validate(adminKey)
+	}
 	return middleware.ValidateAdminKey(adminKey, auth.AdminKeyFile)
 }
 

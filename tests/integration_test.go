@@ -1531,6 +1531,63 @@ func rotateAgentKey(t *testing.T, baseURL, name string) (int, []byte) {
 	return resp.StatusCode, rb
 }
 
+// TestIntegration_AdminKeyRotatesWithoutRestart is a functional verification
+// test for the cached admin-key validator on the message query read path.
+// The validator must keep honoring the configured key file across requests
+// (no per-request filesystem read) and pick up a rotated key file without a
+// server restart, so operators can rotate the admin key out-of-band while
+// agents are actively polling.
+func TestIntegration_AdminKeyRotatesWithoutRestart(t *testing.T) {
+	cfg := createTestConfig(t)
+	keyFile := cfg.Auth.AdminKeyFile
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
+	defer testServer.Close()
+
+	adminGet := func(key string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages", nil)
+		if err != nil {
+			t.Fatalf("build admin request: %v", err)
+		}
+		req.Header.Set("X-Admin-Key", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("admin request: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// The initial key works (this primes the cache).
+	if code := adminGet(adminKeyValue); code != http.StatusOK {
+		t.Fatalf("expected initial admin key to work, got %d", code)
+	}
+
+	// Rotate the key file out-of-band. Bump the mtime so the change is
+	// observable even on coarse-granularity filesystems.
+	newKey := "rotated-admin-key"
+	if err := os.WriteFile(keyFile, []byte(newKey), 0o600); err != nil {
+		t.Fatalf("rewrite admin key file: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(keyFile, future, future); err != nil {
+		t.Fatalf("bump admin key file mtime: %v", err)
+	}
+
+	// The old key is rejected and the new one accepted without restart.
+	if code := adminGet(adminKeyValue); code != http.StatusForbidden {
+		t.Errorf("expected old admin key to be rejected after rotation, got %d", code)
+	}
+	if code := adminGet(newKey); code != http.StatusOK {
+		t.Errorf("expected rotated admin key to work, got %d", code)
+	}
+}
+
 // TestIntegration_RotateAgentKeyValidation is a functional verification test
 // for POST /v1/admin/agents/:address/rotate-key. The endpoint must validate
 // the address like its sibling PATCH/DELETE endpoints:

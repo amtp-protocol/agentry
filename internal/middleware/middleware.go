@@ -17,12 +17,12 @@
 package middleware
 
 import (
-	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -192,6 +192,9 @@ func Auth(cfg config.AuthConfig) gin.HandlerFunc {
 
 // AdminAuth provides admin authentication middleware for administrative operations
 func AdminAuth(cfg config.AuthConfig) gin.HandlerFunc {
+	// Parse the key file once and cache it: the admin control plane is
+	// low-traffic, but each request still skips the filesystem read.
+	validator := NewAdminKeyValidator(cfg.AdminKeyFile)
 	return func(c *gin.Context) {
 		// If no admin key file is configured, allow access (backward compatibility)
 		if cfg.AdminKeyFile == "" {
@@ -217,7 +220,7 @@ func AdminAuth(cfg config.AuthConfig) gin.HandlerFunc {
 		}
 
 		// Validate admin key against file
-		if !ValidateAdminKey(adminKey, cfg.AdminKeyFile) {
+		if !validator.Validate(adminKey) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"error": gin.H{
 					"code":    "ADMIN_ACCESS_DENIED",
@@ -320,26 +323,113 @@ func isRateLimited(clientIP string) bool {
 // It is exported so the server layer can grant the same admin identity on
 // message query endpoints (get/status/list), where the admin middleware is
 // not installed, keeping admin-key semantics consistent across the API.
+//
+// This one-shot form reads the file on every call; long-lived callers on the
+// request path should use NewAdminKeyValidator, which caches the parsed key
+// set and re-reads only when the file changes.
 func ValidateAdminKey(providedKey, keyFile string) bool {
-	// Read admin keys from file
-	data, err := os.ReadFile(filepath.Clean(keyFile))
+	return NewAdminKeyValidator(keyFile).Validate(providedKey)
+}
+
+// AdminKeyValidator validates admin keys against a key file, caching the
+// parsed key set and re-reading the file only when its mtime or size
+// changes. The admin key check sits on the message query read path
+// (GET /v1/messages, GET /v1/messages/:id, GET /v1/messages/:id/status),
+// so a naive read-per-request turns agent polling into a blocking
+// filesystem read per request — including for requests that fail agent-key
+// auth. The cache makes the hot path a map lookup. Removing the file
+// invalidates the cache: validation fails rather than serving stale keys.
+type AdminKeyValidator struct {
+	keyFile string
+
+	mu      sync.RWMutex
+	cached  map[string]struct{}
+	modTime time.Time
+	size    int64
+}
+
+// NewAdminKeyValidator returns a validator for the given key file. The file
+// is read lazily on first use and re-read only when it changes.
+func NewAdminKeyValidator(keyFile string) *AdminKeyValidator {
+	return &AdminKeyValidator{keyFile: filepath.Clean(keyFile)}
+}
+
+// Validate reports whether the provided key is present in the key file,
+// re-reading the file only when its mtime or size changed since the last
+// read. A missing or unreadable file yields false.
+func (v *AdminKeyValidator) Validate(providedKey string) bool {
+	if providedKey == "" {
+		return false
+	}
+	keys, err := v.keys()
 	if err != nil {
 		return false
 	}
+	_, ok := keys[providedKey]
+	return ok
+}
 
-	// Parse keys from file (one key per line, ignore empty lines and comments)
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
+// keys returns the parsed key set, refreshing the cache when the file
+// changed since the previous read.
+func (v *AdminKeyValidator) keys() (map[string]struct{}, error) {
+	// Fast path: cache hit with an unchanged file — no filesystem read.
+	v.mu.RLock()
+	if v.cached != nil && v.fileUnchanged() {
+		keys := v.cached
+		v.mu.RUnlock()
+		return keys, nil
+	}
+	v.mu.RUnlock()
+
+	// Slow path: (re)load under the write lock. Re-check after acquiring the
+	// lock so concurrent validators do not re-read a file another goroutine
+	// just refreshed.
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.cached != nil && v.fileUnchanged() {
+		return v.cached, nil
+	}
+
+	data, err := os.ReadFile(v.keyFile)
+	if err != nil {
+		return nil, err
+	}
+	v.cached = parseAdminKeys(data)
+	v.recordFileState()
+	return v.cached, nil
+}
+
+// fileUnchanged reports whether the key file's mtime and size still match
+// the cached state. A stat failure (file removed/unreadable) is treated as
+// changed so the next load attempt surfaces the error.
+func (v *AdminKeyValidator) fileUnchanged() bool {
+	st, err := os.Stat(v.keyFile)
+	if err != nil {
+		return false
+	}
+	return st.Size() == v.size && st.ModTime().Equal(v.modTime)
+}
+
+// recordFileState snapshots the file's mtime and size after a successful
+// read. Stat is taken after the read so a change landing mid-read is
+// reflected in the snapshot and triggers a reload on the next call.
+func (v *AdminKeyValidator) recordFileState() {
+	if st, err := os.Stat(v.keyFile); err == nil {
+		v.size = st.Size()
+		v.modTime = st.ModTime()
+	}
+}
+
+// parseAdminKeys extracts the keys from a key file: one key per line,
+// ignoring empty lines and comments.
+func parseAdminKeys(data []byte) map[string]struct{} {
+	keys := make(map[string]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-
-		// Use constant-time comparison to prevent timing attacks
-		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(line)) == 1 {
-			return true
-		}
+		keys[line] = struct{}{}
 	}
-
-	return false
+	return keys
 }

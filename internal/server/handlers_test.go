@@ -36,6 +36,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/discovery"
 	"github.com/amtp-protocol/agentry/internal/logging"
 	"github.com/amtp-protocol/agentry/internal/metrics"
+	"github.com/amtp-protocol/agentry/internal/middleware"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
@@ -439,6 +440,9 @@ func createTestServerWithAdminKey(t *testing.T, adminKey string) *Server {
 	}
 	server.config.Auth.AdminKeyFile = keyFile
 	server.config.Auth.AdminAPIKeyHeader = "X-Admin-Key"
+	// Mirror New(): attach the cached validator so tests exercise the same
+	// read path as production.
+	server.adminKeyValidator = middleware.NewAdminKeyValidator(keyFile)
 	return server
 }
 

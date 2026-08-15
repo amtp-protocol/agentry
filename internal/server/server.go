@@ -72,6 +72,12 @@ type Server struct {
 	logger        *logging.Logger
 	metrics       metrics.MetricsProvider
 	workflow      workflow.Manager
+
+	// adminKeyValidator caches the parsed admin key set so the message query
+	// read path (GET /v1/messages, GET /v1/messages/:id, /status) never
+	// blocks on a filesystem read per request; it re-reads only when the key
+	// file's mtime or size changes.
+	adminKeyValidator *middleware.AdminKeyValidator
 }
 
 // New creates a new AMTP server
@@ -140,6 +146,13 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	agentRegistry := agents.NewRegistry(agentRegistryConfig, storage)
 
+	// Cache the admin key file so the message query read path never performs
+	// a blocking filesystem read per request (see isAdminRequest).
+	var adminKeyValidator *middleware.AdminKeyValidator
+	if cfg.Auth.AdminKeyFile != "" {
+		adminKeyValidator = middleware.NewAdminKeyValidator(cfg.Auth.AdminKeyFile)
+	}
+
 	// Create delivery engine with agent registry
 	deliveryConfig := processing.DeliveryConfig{
 		Timeout:        30 * time.Second,
@@ -181,17 +194,18 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Create server
 	server := &Server{
-		config:        cfg,
-		router:        router,
-		discovery:     discoveryService,
-		validator:     validator,
-		processor:     processor,
-		storage:       storage,
-		agentRegistry: agentRegistry,
-		schemaManager: schemaManager,
-		logger:        logger,
-		metrics:       metricsInstance,
-		workflow:      workflowManager,
+		config:            cfg,
+		router:            router,
+		discovery:         discoveryService,
+		validator:         validator,
+		processor:         processor,
+		storage:           storage,
+		agentRegistry:     agentRegistry,
+		schemaManager:     schemaManager,
+		logger:            logger,
+		metrics:           metricsInstance,
+		workflow:          workflowManager,
+		adminKeyValidator: adminKeyValidator,
 	}
 
 	// Setup middleware
