@@ -340,37 +340,46 @@ func isRateLimited(clientIP string) bool {
 //
 // This one-shot form reads the file on every call; long-lived callers on the
 // request path should use NewAdminKeyValidator, which caches the parsed key
-// set and re-reads only when the file changes.
+// set and re-reads it when the file changes or the cache ages out.
 func ValidateAdminKey(providedKey, keyFile string) bool {
 	return NewAdminKeyValidator(keyFile).Validate(providedKey)
 }
 
+// adminKeyCacheTTL bounds how long a parsed key file may be served from
+// cache. mtime and size alone cannot detect every rewrite — a restore from
+// backup, cp -p or rsync --times can reproduce both — so the entry ages out
+// and forces a re-read, capping how long a revoked key keeps working.
+const adminKeyCacheTTL = 5 * time.Second
+
 // AdminKeyValidator validates admin keys against a key file, caching the
-// parsed key set and re-reading the file only when its mtime or size
-// changes. The admin key check sits on the message query read path
-// (GET /v1/messages, GET /v1/messages/:id, GET /v1/messages/:id/status),
-// so a naive read-per-request turns agent polling into a blocking
-// filesystem read per request — including for requests that fail agent-key
-// auth. The cache makes the hot path a map lookup. Removing the file
-// invalidates the cache: validation fails rather than serving stale keys.
+// parsed key set and re-reading the file when its mtime or size changes or
+// the cache entry ages out. The admin key check sits on the message query
+// read path (GET /v1/messages, GET /v1/messages/:id,
+// GET /v1/messages/:id/status), so a naive read-per-request turns agent
+// polling into a blocking filesystem read per request — including for
+// requests that fail agent-key auth. The cache makes the hot path a map
+// lookup. Removing the file invalidates the cache: validation fails rather
+// than serving stale keys.
 type AdminKeyValidator struct {
 	keyFile string
+	ttl     time.Duration
 
-	mu      sync.RWMutex
-	cached  map[string]struct{}
-	modTime time.Time
-	size    int64
+	mu       sync.RWMutex
+	cached   map[string]struct{}
+	modTime  time.Time
+	size     int64
+	loadedAt time.Time
 }
 
 // NewAdminKeyValidator returns a validator for the given key file. The file
-// is read lazily on first use and re-read only when it changes.
+// is read lazily on first use and re-read when it changes or the cached key
+// set ages out.
 func NewAdminKeyValidator(keyFile string) *AdminKeyValidator {
-	return &AdminKeyValidator{keyFile: filepath.Clean(keyFile)}
+	return &AdminKeyValidator{keyFile: filepath.Clean(keyFile), ttl: adminKeyCacheTTL}
 }
 
-// Validate reports whether the provided key is present in the key file,
-// re-reading the file only when its mtime or size changed since the last
-// read. A missing or unreadable file yields false.
+// Validate reports whether the provided key is present in the key file. A
+// missing or unreadable file yields false.
 func (v *AdminKeyValidator) Validate(providedKey string) bool {
 	if providedKey == "" {
 		return false
@@ -384,11 +393,11 @@ func (v *AdminKeyValidator) Validate(providedKey string) bool {
 }
 
 // keys returns the parsed key set, refreshing the cache when the file
-// changed since the previous read.
+// changed since the previous read or the cached set aged out.
 func (v *AdminKeyValidator) keys() (map[string]struct{}, error) {
-	// Fast path: cache hit with an unchanged file — no filesystem read.
+	// Fast path: fresh cache entry over an unchanged file — no read.
 	v.mu.RLock()
-	if v.cached != nil && v.fileUnchanged() {
+	if v.cacheUsable() {
 		keys := v.cached
 		v.mu.RUnlock()
 		return keys, nil
@@ -400,38 +409,42 @@ func (v *AdminKeyValidator) keys() (map[string]struct{}, error) {
 	// just refreshed.
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.cached != nil && v.fileUnchanged() {
+	if v.cacheUsable() {
 		return v.cached, nil
 	}
 
+	// Stat before reading, never after: a rewrite landing between the two
+	// would otherwise pair the pre-write content with the post-write mtime
+	// and size, and the resulting cache entry would look valid forever. With
+	// this order the worst case is one redundant reload.
+	st, err := os.Stat(v.keyFile)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(v.keyFile)
 	if err != nil {
 		return nil, err
 	}
 	v.cached = parseAdminKeys(data)
-	v.recordFileState()
+	v.size = st.Size()
+	v.modTime = st.ModTime()
+	v.loadedAt = time.Now()
 	return v.cached, nil
 }
 
-// fileUnchanged reports whether the key file's mtime and size still match
-// the cached state. A stat failure (file removed/unreadable) is treated as
-// changed so the next load attempt surfaces the error.
-func (v *AdminKeyValidator) fileUnchanged() bool {
+// cacheUsable reports whether the cached key set may still be served: it
+// must be loaded, within its TTL, and backed by a file whose mtime and size
+// still match. A stat failure (file removed/unreadable) counts as changed so
+// the next load attempt surfaces the error.
+func (v *AdminKeyValidator) cacheUsable() bool {
+	if v.cached == nil || time.Since(v.loadedAt) >= v.ttl {
+		return false
+	}
 	st, err := os.Stat(v.keyFile)
 	if err != nil {
 		return false
 	}
 	return st.Size() == v.size && st.ModTime().Equal(v.modTime)
-}
-
-// recordFileState snapshots the file's mtime and size after a successful
-// read. Stat is taken after the read so a change landing mid-read is
-// reflected in the snapshot and triggers a reload on the next call.
-func (v *AdminKeyValidator) recordFileState() {
-	if st, err := os.Stat(v.keyFile); err == nil {
-		v.size = st.Size()
-		v.modTime = st.ModTime()
-	}
 }
 
 // parseAdminKeys extracts the keys from a key file: one key per line,

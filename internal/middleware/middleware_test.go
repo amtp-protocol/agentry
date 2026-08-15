@@ -1057,8 +1057,10 @@ func TestAdminKeyValidator_MissingFile(t *testing.T) {
 
 // TestAdminKeyValidator_CachesUnchangedFile verifies that once a file is
 // parsed, a validator does not re-read it while the mtime and size are
-// unchanged — even if the content is swapped underneath it. This is what
-// keeps the request path off the filesystem once the file is cached.
+// unchanged and the entry is within its TTL — even if the content is swapped
+// underneath it. This is what keeps the request path off the filesystem once
+// the file is cached; TestAdminKeyValidator_ReloadsAfterTTL covers the
+// expiry that bounds how long such a swap stays invisible.
 func TestAdminKeyValidator_CachesUnchangedFile(t *testing.T) {
 	path := writeAdminKeysFile(t, "key1")
 	v := NewAdminKeyValidator(path)
@@ -1148,6 +1150,45 @@ func TestAdminKeyValidator_ReloadsOnSizeChange(t *testing.T) {
 	}
 	if !v.Validate("key1-longer") {
 		t.Error("expected new key to validate after the file size changed")
+	}
+}
+
+// TestAdminKeyValidator_ReloadsAfterTTL verifies that the cache expires:
+// a replacement that preserves both mtime and size (cp -p, rsync --times,
+// restore-from-backup) is picked up once the cache entry ages out, instead
+// of being served stale for the lifetime of the process.
+func TestAdminKeyValidator_ReloadsAfterTTL(t *testing.T) {
+	path := writeAdminKeysFile(t, "key1")
+	v := NewAdminKeyValidator(path)
+	v.ttl = 10 * time.Millisecond
+
+	if !v.Validate("key1") {
+		t.Fatal("expected key1 to validate after initial load")
+	}
+
+	orig, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat key file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("key2"), 0o600); err != nil {
+		t.Fatalf("rewrite key file: %v", err)
+	}
+	if err := os.Chtimes(path, orig.ModTime(), orig.ModTime()); err != nil {
+		t.Fatalf("reset mtime: %v", err)
+	}
+
+	// Still cached: the stat is identical and the entry has not aged out.
+	if !v.Validate("key1") {
+		t.Error("expected key1 to stay valid while the cache entry is fresh")
+	}
+
+	time.Sleep(2 * v.ttl)
+
+	if v.Validate("key1") {
+		t.Error("expected the revoked key1 to be rejected once the cache expired")
+	}
+	if !v.Validate("key2") {
+		t.Error("expected key2 to validate once the cache expired")
 	}
 }
 
