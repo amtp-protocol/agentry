@@ -306,7 +306,12 @@ func (s *Server) setupRoutes() {
 	// AMTP API v1
 	v1 := server.router.Group("/v1")
 	{
-		// Message endpoints (public)
+		// Message endpoints. POST is intentionally public — AMTP is a
+		// federated protocol where remote senders have no local key. The
+		// three GET routes require an agent API key or the gateway admin
+		// key (see handleListMessages / handleGetMessage /
+		// handleGetMessageStatus): agents are scoped to their own traffic,
+		// and the admin may inspect any message.
 		v1.POST("/messages", server.withRequestMetrics(func(c *gin.Context) { server.handleSendMessage(c) }))
 		v1.GET("/messages/:id", server.withRequestMetrics(func(c *gin.Context) { server.handleGetMessage(c) }))
 		v1.GET("/messages/:id/status", server.withRequestMetrics(func(c *gin.Context) { server.handleGetMessageStatus(c) }))

@@ -109,6 +109,40 @@ export AMTP_DNS_MOCK_RECORDS='{
 }'
 ```
 
+## Message Query Authentication
+
+`POST /v1/messages` is **public** by design (AMTP is a federated protocol
+where remote senders have no local key). The message **query** endpoints —
+`GET /v1/messages`, `GET /v1/messages/{id}` and `GET /v1/messages/{id}/status`
+— require one of:
+
+- an **agent API key** (`Authorization: Bearer <agent-api-key>`): the caller
+  is scoped to messages the agent sent or received; or
+- the **gateway admin key** (`X-Admin-Key` header, requires
+  `auth.admin_key_file` to be configured): the admin may inspect any message,
+  including ones submitted by unregistered or foreign senders.
+
+```bash
+# Register an agent (returns its api_key)
+curl -H "X-Admin-Key: <admin-key>" -X POST http://localhost:8080/v1/admin/agents \
+  -H "Content-Type: application/json" \
+  -d '{"address":"viewer","delivery_mode":"pull"}'
+
+# Poll delivery status of a message you sent
+curl -H "Authorization: Bearer <agent-api-key>" \
+     http://localhost:8080/v1/messages/MESSAGE_ID/status
+
+# Or inspect it with the admin key
+curl -H "X-Admin-Key: <admin-key>" \
+     http://localhost:8080/v1/messages/MESSAGE_ID/status
+```
+
+**Practical consequence**: a client that submits a message but holds no
+registered local agent key can no longer poll the delivery status of its own
+message (an unauthenticated request returns `401 MISSING_AUTHORIZATION`).
+To keep a send-then-poll flow working, register an agent for the sender and
+use its API key for the poll, or use the admin key.
+
 ## Testing Scenarios
 
 ### Scenario 1: Default Security (HTTP Disabled)
