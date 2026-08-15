@@ -243,8 +243,11 @@ func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilte
 		return nil, err
 	}
 
-	// Apply ordering and pagination
-	query = query.Order("created_at DESC")
+	// Apply ordering and pagination. The messages table has no created_at
+	// column — only timestamp — and the column is qualified so the ordering
+	// stays unambiguous when the status filter joins message_statuses (which
+	// does have created_at). This matches MemoryStorage's newest-first order.
+	query = query.Order("messages.timestamp DESC")
 
 	if filter.Offset > 0 {
 		query = query.Offset(filter.Offset)

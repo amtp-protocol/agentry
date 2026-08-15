@@ -126,9 +126,9 @@ func (ms *MemoryStorage) ListMessages(ctx context.Context, filter MessageFilter)
 		}
 	}
 
-	// Order newest-first to mirror the database backend (ORDER BY created_at
-	// DESC) and to make pagination deterministic. Ties are broken by message
-	// ID so the ordering is total.
+	// Order newest-first to mirror the database backend (ORDER BY
+	// messages.timestamp DESC) and to make pagination deterministic. Ties
+	// are broken by message ID so the ordering is total.
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].Timestamp.Equal(matched[j].Timestamp) {
 			return matched[i].MessageID > matched[j].MessageID
