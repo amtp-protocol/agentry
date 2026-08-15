@@ -35,6 +35,11 @@ type AgentStore interface {
 	// a concurrent key rotation. When SupportedSchemas is provided,
 	// RequiresSchema is derived as len(SupportedSchemas) > 0.
 	UpdateAgentFields(ctx context.Context, agentAddress string, fields AgentFields) error
+	// GetAgentByAPIKeyHash returns the agent whose stored API key hash equals
+	// the given one, or ErrAgentNotFound. The hash is what the registry
+	// stores, so this is an indexed equality lookup rather than a scan of
+	// every agent.
+	GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*LocalAgent, error)
 	ListAgents(ctx context.Context) ([]*LocalAgent, error)
 	GetSupportedSchemas(ctx context.Context) ([]string, error)
 }
@@ -70,8 +75,8 @@ type AgentRegistry interface {
 	VerifyAPIKey(ctx context.Context, agentAddress, apiKey string) bool
 	// AuthenticateAgent returns the address of the registered agent that owns
 	// the given API key (ok=false if none does). It hashes the key once and
-	// compares against a single listing, avoiding a per-agent storage read
-	// for every attempt.
+	// looks the hash up directly, so a failed attempt costs one indexed
+	// lookup rather than a scan of every agent.
 	AuthenticateAgent(ctx context.Context, apiKey string) (string, bool)
 	UpdateLastAccess(ctx context.Context, agentAddress string)
 	RotateAPIKey(ctx context.Context, agentAddress string) (string, error)

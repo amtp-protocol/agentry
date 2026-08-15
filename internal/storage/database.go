@@ -690,6 +690,32 @@ func (ds *DatabaseStorage) GetAgent(ctx context.Context, agentAddress string) (*
 	return agent, nil
 }
 
+// GetAgentByAPIKeyHash returns the agent whose stored API key hash matches,
+// backed by idx_agents_api_key so agent authentication does not have to load
+// every agent.
+func (ds *DatabaseStorage) GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*agents.LocalAgent, error) {
+	if apiKeyHash == "" {
+		return nil, fmt.Errorf("api key hash cannot be empty")
+	}
+
+	var dbAgent Agent
+	if err := ds.db.WithContext(ctx).
+		Where("api_key = ?", apiKeyHash).
+		First(&dbAgent).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrAgentNotFound
+		}
+		return nil, fmt.Errorf("failed to get agent by api key: %w", err)
+	}
+
+	agent, err := ds.convertToLocalAgent(&dbAgent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert agent: %w", err)
+	}
+
+	return agent, nil
+}
+
 // UpdateAgent updates an existing agent in the database
 func (ds *DatabaseStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
 	if agent == nil {

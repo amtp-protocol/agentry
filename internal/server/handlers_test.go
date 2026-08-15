@@ -71,10 +71,12 @@ type MockStorage struct {
 	// statusesError, when set, makes GetStatuses fail so handler tests can
 	// verify status failures surface as errors.
 	statusesError error
-	// agentGetCalls counts GetAgent calls so tests can assert the message
-	// query auth path matches keys against a single listing instead of
-	// reading each agent individually.
-	agentGetCalls int
+	// agentGetCalls, agentListCalls and agentKeyLookups count agent reads so
+	// tests can assert the message query auth path resolves a key with a
+	// single keyed lookup instead of loading every agent.
+	agentGetCalls   int
+	agentListCalls  int
+	agentKeyLookups int
 	// getMessageError, when set, makes GetMessage fail with a transient
 	// (non-not-found) storage error so handler tests can verify storage
 	// failures surface as 5xx instead of being flattened to 404.
@@ -212,6 +214,17 @@ func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agent
 	return &agentCopy, nil
 }
 
+func (m *MockStorage) GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*agents.LocalAgent, error) {
+	m.agentKeyLookups++
+	for _, agent := range m.agents {
+		if agent.APIKey == apiKeyHash {
+			agentCopy := *agent
+			return &agentCopy, nil
+		}
+	}
+	return nil, storage.ErrAgentNotFound
+}
+
 func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
 	if agent == nil {
 		return fmt.Errorf("agent cannot be nil")
@@ -265,6 +278,7 @@ func (m *MockStorage) DeleteAgent(ctx context.Context, agentAddress string) erro
 }
 
 func (m *MockStorage) ListAgents(ctx context.Context) ([]*agents.LocalAgent, error) {
+	m.agentListCalls++
 	var list []*agents.LocalAgent
 	for _, agent := range m.agents {
 		agentCopy := *agent
@@ -1648,14 +1662,19 @@ func TestHandleListMessages_NoAuth(t *testing.T) {
 	}
 }
 
-// TestHandleListMessages_AuthUsesSingleListing verifies that authenticating
-// an agent key on a message query endpoint hashes the key once and matches it
-// against a single agent listing, never reading individual agents (the old
-// scan-and-verify loop issued one GetAgent per registered agent).
-func TestHandleListMessages_AuthUsesSingleListing(t *testing.T) {
+// TestHandleListMessages_AuthUsesKeyedLookup verifies that authenticating an
+// agent key on a message query endpoint hashes the key once and resolves it
+// with a single keyed lookup, never listing or reading individual agents.
+// Authentication runs before the credential is known good, so a listing here
+// would let an unauthenticated caller scan the agents table at will.
+func TestHandleListMessages_AuthUsesKeyedLookup(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
 	key := registerTestAgent(t, server, "viewer")
+
+	mockStorage.agentGetCalls = 0
+	mockStorage.agentListCalls = 0
+	mockStorage.agentKeyLookups = 0
 
 	req := httptest.NewRequest("GET", "/v1/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
@@ -1665,8 +1684,31 @@ func TestHandleListMessages_AuthUsesSingleListing(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
+	if mockStorage.agentKeyLookups != 1 {
+		t.Errorf("Expected exactly 1 keyed agent lookup, got %d", mockStorage.agentKeyLookups)
+	}
+	if mockStorage.agentListCalls != 0 {
+		t.Errorf("auth must not list agents, got %d ListAgents calls", mockStorage.agentListCalls)
+	}
 	if mockStorage.agentGetCalls != 0 {
 		t.Errorf("auth must not read individual agents, got %d GetAgent calls", mockStorage.agentGetCalls)
+	}
+
+	// A junk Bearer token must cost the same single lookup, not a listing.
+	mockStorage.agentKeyLookups = 0
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer not-a-real-key")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("Expected status %d for an unknown key, got %d: %s", http.StatusForbidden, w.Code, w.Body.String())
+	}
+	if mockStorage.agentKeyLookups != 1 {
+		t.Errorf("Expected exactly 1 keyed lookup for a failed attempt, got %d", mockStorage.agentKeyLookups)
+	}
+	if mockStorage.agentListCalls != 0 {
+		t.Errorf("A failed attempt must not list agents, got %d ListAgents calls", mockStorage.agentListCalls)
 	}
 }
 

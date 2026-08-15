@@ -15,3 +15,8 @@ CREATE TABLE IF NOT EXISTS agents (
 -- Create index on agents address
 CREATE INDEX IF NOT EXISTS idx_agents_address ON agents(address);
 
+-- Agent authentication resolves a presented key by its stored hash, on every
+-- request carrying a Bearer token — including ones that turn out to be
+-- invalid. Without this index each of those attempts scans the table.
+CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key);
+

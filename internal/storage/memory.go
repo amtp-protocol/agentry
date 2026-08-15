@@ -478,6 +478,25 @@ func (ms *MemoryStorage) GetAgent(ctx context.Context, agentAddress string) (*ag
 	return cloneAgent(agent), nil
 }
 
+// GetAgentByAPIKeyHash returns the agent whose stored API key hash matches.
+// The scan is over an in-memory map, so unlike the database backend there is
+// no per-agent I/O or decoding to avoid.
+func (ms *MemoryStorage) GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*agents.LocalAgent, error) {
+	if apiKeyHash == "" {
+		return nil, fmt.Errorf("api key hash cannot be empty")
+	}
+
+	ms.agentsMux.RLock()
+	defer ms.agentsMux.RUnlock()
+
+	for _, agent := range ms.agents {
+		if agent.APIKey == apiKeyHash {
+			return cloneAgent(agent), nil
+		}
+	}
+	return nil, ErrAgentNotFound
+}
+
 // UpdateAgent updates an existing local agent
 func (ms *MemoryStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
 	if agent == nil {

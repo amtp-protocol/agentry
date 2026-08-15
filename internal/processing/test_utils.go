@@ -332,6 +332,15 @@ func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agent
 	return agent, nil
 }
 
+func (m *MockStorage) GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*agents.LocalAgent, error) {
+	for _, agent := range m.agents {
+		if agent.APIKey == apiKeyHash {
+			return agent, nil
+		}
+	}
+	return nil, fmt.Errorf("agent not found for api key")
+}
+
 func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
 	if agent == nil {
 		return fmt.Errorf("agent cannot be nil")

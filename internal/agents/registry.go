@@ -350,31 +350,27 @@ func (r *Registry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string
 
 // AuthenticateAgent returns the full address of the registered agent that
 // owns the given API key, or ok=false if none does. The presented key is
-// hashed once and compared against a single listing of agents — the stored
-// API key is already the salted hash — so authentication costs one listing
-// plus a constant-time comparison per agent instead of a per-agent storage
-// read and a redundant hash per iteration.
+// hashed once — the stored API key is already the salted hash — and looked
+// up directly, so a wrong key costs one indexed lookup instead of loading
+// and decoding every registered agent. That matters because this runs
+// before any credential is known good: without it, unauthenticated requests
+// carrying a junk Bearer token would each scan the agents table.
 func (r *Registry) AuthenticateAgent(ctx context.Context, apiKey string) (string, bool) {
 	if apiKey == "" {
 		return "", false
 	}
 
 	hashed := r.hashAPIKey(apiKey)
-	agents, err := r.storage.ListAgents(ctx)
-	if err != nil {
+	agent, err := r.storage.GetAgentByAPIKeyHash(ctx, hashed)
+	if err != nil || agent == nil {
 		return "", false
 	}
 
-	for _, agent := range agents {
-		if agent == nil {
-			continue
-		}
-		// Use constant-time comparison to prevent timing attacks.
-		if subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashed)) == 1 {
-			return agent.Address, true
-		}
+	// Use constant-time comparison to prevent timing attacks.
+	if subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashed)) != 1 {
+		return "", false
 	}
-	return "", false
+	return agent.Address, true
 }
 
 // UpdateLastAccess updates the last access timestamp for an agent using a
