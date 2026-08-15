@@ -312,6 +312,9 @@ func TestIntegration_EnvToSchemaRegistration(t *testing.T) {
 		},
 		Auth: config.AuthConfig{
 			RequireAuth: false,
+			// Admin routes fail closed without a key file.
+			AdminKeyFile:      testAdminKeyFile,
+			AdminAPIKeyHeader: "X-Admin-Key",
 		},
 	}
 
@@ -385,7 +388,7 @@ func TestIntegration_EnvToSchemaRegistration(t *testing.T) {
 		}
 	}`
 
-	req := httptest.NewRequest("POST", "/v1/admin/schemas", strings.NewReader(schemaJSON))
+	req := adminReq("POST", "/v1/admin/schemas", strings.NewReader(schemaJSON))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 

@@ -196,9 +196,23 @@ func AdminAuth(cfg config.AuthConfig) gin.HandlerFunc {
 	// low-traffic, but each request still skips the filesystem read.
 	validator := NewAdminKeyValidator(cfg.AdminKeyFile)
 	return func(c *gin.Context) {
-		// If no admin key file is configured, allow access (backward compatibility)
+		// Fail closed when no admin key file is configured. The admin plane
+		// registers agents, rotates their keys and hands the plaintext back,
+		// so an unconfigured gateway must not serve it to anonymous callers.
+		// This matches the server's own admin-identity check, which likewise
+		// grants nothing without a configured key file.
 		if cfg.AdminKeyFile == "" {
-			c.Next()
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": gin.H{
+					"code":    "ADMIN_AUTH_NOT_CONFIGURED",
+					"message": "Administrative operations are unavailable: no admin key file is configured",
+					"details": gin.H{
+						"required_config": "auth.admin_key_file (AMTP_ADMIN_KEY_FILE)",
+						"endpoint":        c.Request.URL.Path,
+					},
+				},
+			})
+			c.Abort()
 			return
 		}
 

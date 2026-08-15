@@ -31,7 +31,7 @@ import (
 
 // Test schema management handlers when schema manager is not configured
 func TestSchemaHandlers_NoSchemaManager(t *testing.T) {
-	server := createTestServer() // This creates server without schema manager
+	server := createAdminTestServer(t) // This creates server without schema manager
 
 	endpoints := []struct {
 		method string
@@ -51,10 +51,10 @@ func TestSchemaHandlers_NoSchemaManager(t *testing.T) {
 		t.Run(endpoint.method+"_"+endpoint.path, func(t *testing.T) {
 			var req *http.Request
 			if endpoint.body != "" {
-				req = httptest.NewRequest(endpoint.method, endpoint.path, bytes.NewBufferString(endpoint.body))
+				req = adminReq(endpoint.method, endpoint.path, bytes.NewBufferString(endpoint.body))
 				req.Header.Set("Content-Type", "application/json")
 			} else {
-				req = httptest.NewRequest(endpoint.method, endpoint.path, nil)
+				req = adminReq(endpoint.method, endpoint.path, nil)
 			}
 
 			w := httptest.NewRecorder()
@@ -98,12 +98,12 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 		t.Fatalf("failed to create schema manager: %v", err)
 	}
 
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	server.schemaManager = sm
 
 	t.Run("POST /v1/admin/schemas - Valid Schema", func(t *testing.T) {
 		body := `{"id":"agntcy:test.domain.v1","definition":{"type":"object"}}`
-		req := httptest.NewRequest("POST", "/v1/admin/schemas", bytes.NewBufferString(body))
+		req := adminReq("POST", "/v1/admin/schemas", bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
@@ -114,7 +114,7 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 	})
 
 	t.Run("GET /v1/admin/schemas - List Schemas", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/v1/admin/schemas?domain=test.domain", nil)
+		req := adminReq("GET", "/v1/admin/schemas?domain=test.domain", nil)
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
 
@@ -124,7 +124,7 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 	})
 
 	t.Run("GET /v1/admin/schemas/:id - Get Schema", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/v1/admin/schemas/agntcy:test.domain.v1", nil)
+		req := adminReq("GET", "/v1/admin/schemas/agntcy:test.domain.v1", nil)
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
 
@@ -135,7 +135,7 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 
 	t.Run("PUT /v1/admin/schemas/:id - Update Schema", func(t *testing.T) {
 		body := `{"id":"agntcy:test.domain.v1","definition":{"type":"object", "properties": {}}}`
-		req := httptest.NewRequest("PUT", "/v1/admin/schemas/agntcy:test.domain.v1", bytes.NewBufferString(body))
+		req := adminReq("PUT", "/v1/admin/schemas/agntcy:test.domain.v1", bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
@@ -147,7 +147,7 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 
 	t.Run("POST /v1/admin/schemas/:id/validate - Validate Payload", func(t *testing.T) {
 		body := `{"payload":{}}`
-		req := httptest.NewRequest("POST", "/v1/admin/schemas/agntcy:test.domain.v1/validate", bytes.NewBufferString(body))
+		req := adminReq("POST", "/v1/admin/schemas/agntcy:test.domain.v1/validate", bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
@@ -158,7 +158,7 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 	})
 
 	t.Run("GET /v1/admin/schemas/stats - Stats", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/v1/admin/schemas/stats", nil)
+		req := adminReq("GET", "/v1/admin/schemas/stats", nil)
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
 
@@ -168,7 +168,7 @@ func TestSchemaHandlers_WithSchemaManager(t *testing.T) {
 	})
 
 	t.Run("DELETE /v1/admin/schemas/:id - Delete Schema", func(t *testing.T) {
-		req := httptest.NewRequest("DELETE", "/v1/admin/schemas/agntcy:test.domain.v1", nil)
+		req := adminReq("DELETE", "/v1/admin/schemas/agntcy:test.domain.v1", nil)
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
 

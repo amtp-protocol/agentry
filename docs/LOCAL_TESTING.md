@@ -122,6 +122,11 @@ where remote senders have no local key). The message **query** endpoints —
   `auth.admin_key_file` to be configured): the admin may inspect any message,
   including ones submitted by unregistered or foreign senders.
 
+The `/v1/admin` endpoints require the same admin key. Without
+`auth.admin_key_file` the gateway rejects them with `401
+ADMIN_AUTH_NOT_CONFIGURED` — they register agents and return plaintext API
+keys, so they are never open to anonymous callers.
+
 ```bash
 # Register an agent (returns its api_key)
 curl -H "X-Admin-Key: <admin-key>" -X POST http://localhost:8080/v1/admin/agents \

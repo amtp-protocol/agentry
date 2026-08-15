@@ -33,71 +33,34 @@ import (
 	"github.com/amtp-protocol/agentry/internal/config"
 )
 
-func TestAdminAuth_Disabled(t *testing.T) {
+func TestAdminAuth_NoKeyFile_FailsClosed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	// Create config with admin auth disabled
+	// No admin key file configured: there is no credential that could
+	// authorize an admin request, so every request must be rejected.
 	cfg := config.AuthConfig{
-		RequireAuth:       false, // Admin auth disabled
+		RequireAuth:       false,
 		AdminKeyFile:      "",
 		AdminAPIKeyHeader: "X-Admin-Key",
 	}
 
-	// Create test router
 	router := gin.New()
 	router.Use(AdminAuth(cfg))
-	router.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "success"})
-	})
-
-	// Test request without any auth header
-	req := httptest.NewRequest("GET", "/test", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Should pass when auth is disabled
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status %d when auth disabled, got %d", http.StatusOK, w.Code)
-	}
-}
-
-func TestAdminAuth_NoKeyFile_BackwardCompatibility(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	// Create config with no admin key file (backward compatibility mode)
-	cfg := config.AuthConfig{
-		RequireAuth:       true, // This doesn't matter for admin auth
-		AdminKeyFile:      "",   // No key file - should allow access
-		AdminAPIKeyHeader: "X-Admin-Key",
-	}
-
-	// Create test router
-	router := gin.New()
-	router.Use(AdminAuth(cfg))
-	router.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "success"})
+	router.POST("/admin/agents/alice/rotate-key", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"api_key": "leaked"})
 	})
 
 	tests := []struct {
-		name           string
-		adminKey       string
-		expectedStatus int
+		name     string
+		adminKey string
 	}{
-		{
-			name:           "no admin key - should pass (backward compatibility)",
-			adminKey:       "",
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "any admin key - should pass (backward compatibility)",
-			adminKey:       "any-key",
-			expectedStatus: http.StatusOK,
-		},
+		{name: "no admin key", adminKey: ""},
+		{name: "arbitrary admin key", adminKey: "any-key"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "/test", nil)
+			req := httptest.NewRequest("POST", "/admin/agents/alice/rotate-key", nil)
 			if tt.adminKey != "" {
 				req.Header.Set("X-Admin-Key", tt.adminKey)
 			}
@@ -105,8 +68,14 @@ func TestAdminAuth_NoKeyFile_BackwardCompatibility(t *testing.T) {
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
 
-			if w.Code != tt.expectedStatus {
-				t.Errorf("Expected status %d, got %d", tt.expectedStatus, w.Code)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, w.Code)
+			}
+			if strings.Contains(w.Body.String(), "leaked") {
+				t.Errorf("Handler ran without admin authentication: %s", w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "ADMIN_AUTH_NOT_CONFIGURED") {
+				t.Errorf("Expected ADMIN_AUTH_NOT_CONFIGURED error code, got %s", w.Body.String())
 			}
 		})
 	}
