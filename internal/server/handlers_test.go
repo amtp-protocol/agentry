@@ -889,6 +889,33 @@ func TestHandleGetMessage_AdminInvalidKey(t *testing.T) {
 	}
 }
 
+// TestHandleGetMessage_AdminKeyFallbackWithoutValidator verifies that a
+// server constructed without the cached admin-key validator (i.e. built
+// directly, not via New()) still honors a configured admin key file through
+// the one-shot ValidateAdminKey fallback in isAdminRequest.
+func TestHandleGetMessage_AdminKeyFallbackWithoutValidator(t *testing.T) {
+	server := createTestServer()
+	keyFile := filepath.Join(t.TempDir(), "admin.key")
+	if err := os.WriteFile(keyFile, []byte("fallback-admin-key"), 0o600); err != nil {
+		t.Fatalf("write admin key file: %v", err)
+	}
+	server.config.Auth.AdminKeyFile = keyFile
+	server.config.Auth.AdminAPIKeyHeader = "X-Admin-Key"
+	// Intentionally leave adminKeyValidator nil to exercise the fallback.
+
+	req, err := http.NewRequest("GET", "/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "fallback-admin-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status %d with admin key via fallback, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleGetMessageStatus_Success(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
@@ -3351,6 +3378,59 @@ func TestHandleUpdateAgent_StorageError(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleUpdateAgent_InvalidSchema verifies that a schema declaration that
+// fails the registry's own validation is a client error (400), not a storage
+// failure (5xx) — the "invalid supported schemas" classification branch.
+func TestHandleUpdateAgent_InvalidSchema(t *testing.T) {
+	server := createTestServer()
+
+	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	body := []byte(`{"supported_schemas":["not-a-schema"]}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleUpdateAgent_ForeignDomain verifies that an address with a foreign
+// domain is rejected by the registry's resolution layer as a client error
+// (400), not reported as a missing agent (404) or a storage failure (500).
+func TestHandleUpdateAgent_ForeignDomain(t *testing.T) {
+	server := createTestServer()
+
+	body := []byte(`{"delivery_mode":"pull"}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/foo@evil.com", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
 	}
 	var errorResponse types.ErrorResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {

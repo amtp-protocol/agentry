@@ -241,6 +241,51 @@ func TestListMessages_EmptyResult(t *testing.T) {
 	}
 }
 
+// TestListMessages_StorageError verifies that a transient database failure
+// during the listing query surfaces as an error instead of being swallowed.
+func TestListMessages_StorageError(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "messages" ORDER BY messages.timestamp DESC`)).WillReturnError(fmt.Errorf("connection refused"))
+
+	_, err := storage.ListMessages(context.Background(), MessageFilter{})
+	if err == nil || !strings.Contains(err.Error(), "failed to list messages") {
+		t.Fatalf("expected failed to list messages error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("expected underlying error propagated, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestListMessages_ConversionError verifies that a row that cannot be
+// converted (e.g. malformed recipients JSON) surfaces as an error rather
+// than being silently dropped from the page.
+func TestListMessages_ConversionError(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "messages" ORDER BY messages.timestamp DESC`)).WillReturnRows(
+		sqlmock.NewRows([]string{"id", "message_id", "recipients"}).
+			AddRow(1, "019fbd30-9f27-75aa-8cd4-de1f14e011ab", `{"broken":"json`),
+	)
+
+	_, err := storage.ListMessages(context.Background(), MessageFilter{})
+	if err == nil || !strings.Contains(err.Error(), "failed to convert message") {
+		t.Fatalf("expected failed to convert message error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
 func TestListMessages_WithFilters(t *testing.T) {
 	gormDB, mock := newMockDB(t)
 	sqlDB, _ := gormDB.DB()
@@ -374,6 +419,26 @@ func TestCountMessages_EmptyResult(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unfulfilled expectations: %v", err)
+	}
+}
+
+// TestCountMessages_StorageError verifies that a transient database failure
+// during the COUNT query surfaces as an error instead of undercounting.
+func TestCountMessages_StorageError(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "messages"`)).
+		WillReturnError(fmt.Errorf("connection refused"))
+
+	_, err := storage.CountMessages(context.Background(), MessageFilter{})
+	if err == nil || !strings.Contains(err.Error(), "failed to count messages") {
+		t.Fatalf("expected failed to count messages error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
 	}
 }
 
