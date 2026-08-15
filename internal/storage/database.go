@@ -225,8 +225,10 @@ func (ds *DatabaseStorage) applyMessageFilters(query *gorm.DB, filter MessageFil
 			Where("message_statuses.status = ?", filter.Status)
 	}
 
+	// Since is an inclusive lower bound on the message timestamp, bound at
+	// full precision so a sub-second cursor is not floored to whole seconds.
 	if filter.Since != nil {
-		query = query.Where("timestamp >= ?", time.Unix(*filter.Since, 0))
+		query = query.Where("timestamp >= ?", *filter.Since)
 	}
 
 	return query, nil

@@ -1396,6 +1396,66 @@ func TestIntegration_ListMessagesCounterpartFilters(t *testing.T) {
 	}
 }
 
+// TestIntegration_ListMessagesSinceSubSecond is a functional verification
+// test for the ?since= cursor on GET /v1/messages. The bound must be kept at
+// full timestamp precision end to end and applied inclusively: a cursor of
+// 12:00:00.9Z must not be floored to 12:00:00, which would re-return
+// messages stamped earlier in the same second on every incremental poll and
+// cause duplicate processing.
+func TestIntegration_ListMessagesSinceSubSecond(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	agentKey := registerLocalAgent(t, testServer.URL)
+	registerLocalAgentWithAddress(t, testServer.URL, "peer")
+
+	// Seed three messages whose timestamps fall within and around the same
+	// second, so a whole-second cutoff would wrongly re-return the first.
+	base := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	stamps := []time.Time{
+		base.Add(100 * time.Millisecond),  // 12:00:00.1
+		base.Add(900 * time.Millisecond),  // 12:00:00.9
+		base.Add(1100 * time.Millisecond), // 12:00:01.1
+	}
+	subjectByID := make(map[string]string, len(stamps))
+	for i, ts := range stamps {
+		subject := fmt.Sprintf("subsecond-%d", i)
+		msgID := sendTestMessage(t, testServer.URL, "test@localhost", "peer@localhost",
+			subject, ts.Format(time.RFC3339Nano))
+		subjectByID[msgID] = subject
+	}
+
+	subjectsOf := func(resp listMessagesResponse) map[string]bool {
+		set := make(map[string]bool, len(resp.Messages))
+		for _, m := range resp.Messages {
+			set[subjectByID[m.MessageID]] = true
+		}
+		return set
+	}
+
+	// Cursor at 12:00:00.9 (inclusive, full precision): only the message
+	// stamped at exactly 12:00:00.9 and the one after it qualify. The
+	// message at 12:00:00.1 must NOT be returned.
+	cursor := base.Add(900 * time.Millisecond).Format(time.RFC3339Nano)
+	resp := listMessagesQuery(t, testServer.URL, agentKey, "since="+cursor)
+	got := subjectsOf(resp)
+	if resp.Total != 2 || !got["subsecond-1"] || !got["subsecond-2"] {
+		t.Errorf("since=%s: expected messages subsecond-1 and subsecond-2 (total 2), got %v (total %d)",
+			cursor, got, resp.Total)
+	}
+	if got["subsecond-0"] {
+		t.Errorf("since=%s: message subsecond-0 (12:00:00.1) must not be re-returned", cursor)
+	}
+
+	// Advancing the cursor past everything returns an empty page, so a
+	// cursor-style poller converges instead of re-receiving messages.
+	cursor = base.Add(1200 * time.Millisecond).Format(time.RFC3339Nano)
+	resp = listMessagesQuery(t, testServer.URL, agentKey, "since="+cursor)
+	if resp.Total != 0 {
+		t.Errorf("since=%s: expected empty page, got %d messages: %v", cursor, resp.Total, subjectsOf(resp))
+	}
+}
+
 func TestIntegration_InvalidMessageID(t *testing.T) {
 	testServer := createTestServer(t)
 	defer testServer.Close()

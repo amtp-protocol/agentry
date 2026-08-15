@@ -72,7 +72,7 @@ func TestStorageStats(t *testing.T) {
 
 // TestMessageFilter verifies MessageFilter structure and functionality
 func TestMessageFilter(t *testing.T) {
-	since := time.Now().Unix() - 3600 // 1 hour ago
+	since := time.Now().Add(-time.Hour) // 1 hour ago
 
 	filter := MessageFilter{
 		Sender:     "sender@example.com",
@@ -102,8 +102,8 @@ func TestMessageFilter(t *testing.T) {
 
 	if filter.Since == nil {
 		t.Error("Expected Since to be set")
-	} else if *filter.Since != since {
-		t.Errorf("Expected Since to be %d, got %d", since, *filter.Since)
+	} else if !filter.Since.Equal(since) {
+		t.Errorf("Expected Since to be %v, got %v", since, *filter.Since)
 	}
 
 	if filter.Limit != 10 {

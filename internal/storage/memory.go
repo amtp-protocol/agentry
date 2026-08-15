@@ -431,9 +431,12 @@ func (ms *MemoryStorage) matchesFilter(message *types.Message, messageID string,
 		}
 	}
 
-	// Check since filter
+	// Check since filter. The bound is inclusive and compared at full
+	// timestamp precision: messages stamped exactly at the cursor qualify,
+	// and messages earlier in the same second do not, so a cursor-style
+	// poller does not re-receive them on the next page.
 	if filter.Since != nil {
-		if message.Timestamp.Unix() < *filter.Since {
+		if message.Timestamp.Before(*filter.Since) {
 			return false
 		}
 	}

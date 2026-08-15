@@ -19,6 +19,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
@@ -85,10 +86,15 @@ type MessageFilter struct {
 	Sender     string
 	Recipients []string
 	Status     types.DeliveryStatus
-	Since      *int64 // Unix timestamp
-	Limit      int
-	Offset     int
-	Or         bool
+	// Since is an inclusive lower bound on the message timestamp: messages
+	// with Timestamp >= Since are returned. It is kept as a full-precision
+	// time.Time end to end so cursor-style polling with sub-second cursors
+	// (e.g. ?since=2026-08-09T12:00:00.999Z) does not re-receive messages
+	// stamped within the same second.
+	Since  *time.Time
+	Limit  int
+	Offset int
+	Or     bool
 }
 
 // StatusUpdater is a function that updates message status

@@ -389,16 +389,15 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 // (no direction) uses OR semantics via MessageFilter.Or so a single query
 // covers sent + received and pagination applies to the merged, newest-first
 // result set. An empty agentAddr (the admin caller) leaves the result
-// unrestricted when no direction filter is given.
+// unrestricted when no direction filter is given. Since is passed through at
+// full timestamp precision as an inclusive lower bound on the message
+// timestamp.
 func buildListMessagesFilter(status, sender, recipient, agentAddr string, since *time.Time, limit, offset int) storage.MessageFilter {
 	filter := storage.MessageFilter{
 		Status: types.DeliveryStatus(status),
+		Since:  since,
 		Limit:  limit,
 		Offset: offset,
-	}
-	if since != nil {
-		unix := since.Unix()
-		filter.Since = &unix
 	}
 
 	switch {
@@ -524,7 +523,11 @@ func (s *Server) handleListMessages(c *gin.Context) {
 		return
 	}
 
-	// Parse since timestamp if provided
+	// Parse since timestamp if provided. The parsed value is kept at full
+	// timestamp precision and applied as an INCLUSIVE lower bound on the
+	// message timestamp: ?since=2026-08-09T12:00:00.999Z returns messages
+	// stamped at or after 12:00:00.999Z, so cursor-style pollers do not
+	// re-receive messages from the same second on every page.
 	var sinceTime *time.Time
 	if since != "" {
 		parsed, err := time.Parse(time.RFC3339, since)

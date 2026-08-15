@@ -216,11 +216,12 @@ func TestListMessages_WithFilters(t *testing.T) {
 	sqlDB, _ := gormDB.DB()
 	defer sqlDB.Close()
 	storage := &DatabaseStorage{db: gormDB}
+	since := time.Date(2026, 8, 9, 12, 0, 0, 999_000_000, time.UTC)
 	filter := MessageFilter{
 		Sender:     "sender@example.com",
 		Recipients: []string{"recipient@example.com"},
 		Status:     "pending",
-		Since:      func() *int64 { ts := time.Now().Unix(); return &ts }(),
+		Since:      &since,
 		Offset:     1,
 		Limit:      1,
 	}
@@ -230,7 +231,9 @@ func TestListMessages_WithFilters(t *testing.T) {
 		filter.Sender,
 		recipientsJSON,
 		filter.Status,
-		sqlmock.AnyArg(),
+		// The since bound must reach the database at full timestamp
+		// precision (inclusive), not floored to whole seconds.
+		filter.Since,
 		filter.Limit,
 		filter.Offset,
 	).WillReturnRows(sqlmock.NewRows([]string{"id"}))
@@ -353,7 +356,7 @@ func TestCountMessages_WithFilters(t *testing.T) {
 	defer sqlDB.Close()
 	storage := &DatabaseStorage{db: gormDB}
 
-	since := time.Now().Add(-time.Hour).Unix()
+	since := time.Date(2026, 8, 9, 12, 0, 0, 999_000_000, time.UTC)
 	filter := MessageFilter{
 		Sender:     "agent@localhost",
 		Recipients: []string{"agent@localhost"},
@@ -367,7 +370,7 @@ func TestCountMessages_WithFilters(t *testing.T) {
 		filter.Sender,
 		`["agent@localhost"]`,
 		string(filter.Status),
-		sqlmock.AnyArg(),
+		filter.Since,
 	).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(4))
 
 	count, err := storage.CountMessages(context.Background(), filter)

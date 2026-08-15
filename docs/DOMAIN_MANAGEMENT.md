@@ -213,6 +213,11 @@ _amtp.partner.com.      IN TXT "v=amtp1;gateway=https://partner.com:443"
   `?sender=bob@remote.com` lists messages bob sent to the agent. The agent
   is always pinned as one side of the query; filters where neither side is
   the agent are rejected.
+- **Cursor polling**: the `since` parameter on `GET /v1/messages` is an
+  **inclusive** lower bound on the message timestamp, kept at full timestamp
+  precision. `?since=2026-08-09T12:00:00.999Z` returns messages stamped at
+  or after 12:00:00.999Z, so cursor-style pollers do not re-receive messages
+  from the same second on the next page.
 
 ## 📊 **Monitoring and Observability**
 

@@ -971,7 +971,7 @@ func TestMemoryStorage_CountMessages(t *testing.T) {
 		t.Fatalf("store status recv-1: %v", err)
 	}
 
-	basePlus4 := base.Add(4 * time.Minute).Unix()
+	basePlus4 := base.Add(4 * time.Minute)
 	tests := []struct {
 		name   string
 		filter MessageFilter
@@ -1121,17 +1121,32 @@ func TestMemoryStorage_matchesFilter(t *testing.T) {
 	}
 
 	// Test since filter
-	since := message.Timestamp.Unix() - 3600 // 1 hour before
+	since := message.Timestamp.Add(-time.Hour) // 1 hour before
 	filter = MessageFilter{Since: &since}
 	if !storage.matchesFilter(message, "test-msg", filter) {
 		t.Error("Expected message to match since filter")
 	}
 
 	// Test since filter no match
-	since = message.Timestamp.Unix() + 3600 // 1 hour after
+	since = message.Timestamp.Add(time.Hour) // 1 hour after
 	filter = MessageFilter{Since: &since}
 	if storage.matchesFilter(message, "test-msg", filter) {
 		t.Error("Expected message to not match since filter")
+	}
+
+	// The since bound is inclusive and compared at full timestamp precision:
+	// a message stamped exactly at the bound matches, one a microsecond
+	// earlier does not. Flooring to whole seconds (as the old Unix()
+	// comparison did) would wrongly re-include the earlier message.
+	since = time.Date(2026, 8, 9, 12, 0, 0, 999_000_000, time.UTC)
+	message.Timestamp = time.Date(2026, 8, 9, 12, 0, 0, 999_000_000, time.UTC)
+	filter = MessageFilter{Since: &since}
+	if !storage.matchesFilter(message, "test-msg", filter) {
+		t.Error("Expected message stamped exactly at the bound to match (inclusive)")
+	}
+	message.Timestamp = time.Date(2026, 8, 9, 12, 0, 0, 998_000_000, time.UTC)
+	if storage.matchesFilter(message, "test-msg", filter) {
+		t.Error("Expected message before the bound to not match (full precision)")
 	}
 }
 
