@@ -59,6 +59,11 @@ type inMemoryAgentStore struct {
 	// fieldUpdateError, when set, makes UpdateAgentFields fail so tests can
 	// verify the registry propagates the underlying storage error.
 	fieldUpdateError error
+	// getAgentCalls and listAgentsCalls count storage reads so tests can
+	// assert the auth path matches a key against a single listing instead of
+	// reading each agent individually.
+	getAgentCalls   int
+	listAgentsCalls int
 }
 
 func newInMemoryAgentStore() *inMemoryAgentStore {
@@ -95,6 +100,7 @@ func (s *inMemoryAgentStore) DeleteAgent(ctx context.Context, agentAddress strin
 func (s *inMemoryAgentStore) GetAgent(ctx context.Context, agentAddress string) (*LocalAgent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.getAgentCalls++
 	agent, exists := s.agents[agentAddress]
 	if !exists {
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
@@ -174,6 +180,7 @@ func (s *inMemoryAgentStore) UpdateAgentFields(ctx context.Context, agentAddress
 func (s *inMemoryAgentStore) ListAgents(ctx context.Context) ([]*LocalAgent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.listAgentsCalls++
 	var list []*LocalAgent
 	for _, agent := range s.agents {
 		agentCopy := *agent
@@ -399,6 +406,106 @@ func TestRotateAPIKey_PropagatesStorageError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "storage outage: connection refused") {
 		t.Errorf("expected underlying storage error to be propagated, got: %v", err)
+	}
+}
+
+// TestAuthenticateAgent verifies that AuthenticateAgent finds the registered
+// agent that owns a presented key and rejects unknown or empty keys.
+func TestAuthenticateAgent(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	alice := &LocalAgent{Address: "alice", DeliveryMode: "pull"}
+	bob := &LocalAgent{Address: "bob", DeliveryMode: "pull"}
+	if err := registry.RegisterAgent(ctx, alice); err != nil {
+		t.Fatalf("register alice: %v", err)
+	}
+	if err := registry.RegisterAgent(ctx, bob); err != nil {
+		t.Fatalf("register bob: %v", err)
+	}
+
+	// Each agent's plaintext key maps to its full address.
+	addr, ok := registry.AuthenticateAgent(ctx, alice.APIKey)
+	if !ok || addr != "alice@localhost" {
+		t.Errorf("expected alice@localhost for alice's key, got ok=%v addr=%q", ok, addr)
+	}
+	addr, ok = registry.AuthenticateAgent(ctx, bob.APIKey)
+	if !ok || addr != "bob@localhost" {
+		t.Errorf("expected bob@localhost for bob's key, got ok=%v addr=%q", ok, addr)
+	}
+
+	// Unknown and empty keys match nothing.
+	if addr, ok := registry.AuthenticateAgent(ctx, "not-a-real-key"); ok {
+		t.Errorf("expected no match for unknown key, got %q", addr)
+	}
+	if addr, ok := registry.AuthenticateAgent(ctx, ""); ok {
+		t.Errorf("expected no match for empty key, got %q", addr)
+	}
+}
+
+// TestAuthenticateAgent_SingleListing verifies that AuthenticateAgent hashes
+// the presented key once and matches against a single agent listing, never
+// reading individual agents (the old scan-and-verify loop issued one
+// GetAgent per agent plus a redundant hash per iteration).
+func TestAuthenticateAgent_SingleListing(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	// Register several agents; keep the first one's key for the lookup.
+	first := &LocalAgent{Address: "agent-0", DeliveryMode: "pull"}
+	if err := registry.RegisterAgent(ctx, first); err != nil {
+		t.Fatalf("register agent-0: %v", err)
+	}
+	key := first.APIKey
+	for i := 1; i < 10; i++ {
+		agent := &LocalAgent{Address: fmt.Sprintf("agent-%d", i), DeliveryMode: "pull"}
+		if err := registry.RegisterAgent(ctx, agent); err != nil {
+			t.Fatalf("register agent-%d: %v", i, err)
+		}
+	}
+	store := registry.storage.(*inMemoryAgentStore)
+
+	addr, ok := registry.AuthenticateAgent(ctx, key)
+	if !ok || addr != "agent-0@localhost" {
+		t.Fatalf("expected agent-0@localhost, got ok=%v addr=%q", ok, addr)
+	}
+	if store.listAgentsCalls != 1 {
+		t.Errorf("expected exactly 1 agent listing, got %d", store.listAgentsCalls)
+	}
+	if store.getAgentCalls != 0 {
+		t.Errorf("expected 0 per-agent reads, got %d", store.getAgentCalls)
+	}
+}
+
+// TestUpdateLastAccess_Debounced verifies that UpdateLastAccess writes at
+// most once per debounce window per agent, so a burst of read requests does
+// not issue one UPDATE each, and that the next write happens after the window
+// elapses.
+func TestUpdateLastAccess_Debounced(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	agent := &LocalAgent{Address: "test", DeliveryMode: "pull"}
+	if err := registry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	store := registry.storage.(*inMemoryAgentStore)
+
+	// A burst of updates inside the debounce window writes only once.
+	registry.UpdateLastAccess(ctx, agent.Address)
+	registry.UpdateLastAccess(ctx, agent.Address)
+	registry.UpdateLastAccess(ctx, agent.Address)
+	if store.fieldUpdates != 1 {
+		t.Fatalf("expected 1 debounced write for the burst, got %d", store.fieldUpdates)
+	}
+
+	// After the window elapses, the next update writes again.
+	registry.lastAccessMu.Lock()
+	registry.lastAccessAt[agent.Address] = time.Now().UTC().Add(-2 * lastAccessWriteDebounce)
+	registry.lastAccessMu.Unlock()
+	registry.UpdateLastAccess(ctx, agent.Address)
+	if store.fieldUpdates != 2 {
+		t.Errorf("expected a write after the window elapses, got %d writes", store.fieldUpdates)
 	}
 }
 

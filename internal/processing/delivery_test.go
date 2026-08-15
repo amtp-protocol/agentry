@@ -114,6 +114,15 @@ func (m *MockAgentRegistry) VerifyAPIKey(ctx context.Context, agentAddress, apiK
 	return exists && agent.APIKey == apiKey
 }
 
+func (m *MockAgentRegistry) AuthenticateAgent(ctx context.Context, apiKey string) (string, bool) {
+	for addr, agent := range m.agents {
+		if agent != nil && agent.APIKey == apiKey {
+			return addr, true
+		}
+	}
+	return "", false
+}
+
 func (m *MockAgentRegistry) UpdateLastAccess(ctx context.Context, agentAddress string) {
 	if agent, exists := m.agents[agentAddress]; exists {
 		agent.LastAccess = time.Now().UTC()

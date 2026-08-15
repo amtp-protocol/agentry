@@ -68,6 +68,11 @@ type AgentRegistry interface {
 	// API key management
 	GenerateAPIKey() (string, error)
 	VerifyAPIKey(ctx context.Context, agentAddress, apiKey string) bool
+	// AuthenticateAgent returns the address of the registered agent that owns
+	// the given API key (ok=false if none does). It hashes the key once and
+	// compares against a single listing, avoiding a per-agent storage read
+	// for every attempt.
+	AuthenticateAgent(ctx context.Context, apiKey string) (string, bool)
 	UpdateLastAccess(ctx context.Context, agentAddress string)
 	RotateAPIKey(ctx context.Context, agentAddress string) (string, error)
 

@@ -69,6 +69,10 @@ type MockStorage struct {
 	// statusesError, when set, makes GetStatuses fail so handler tests can
 	// verify status failures surface as errors.
 	statusesError error
+	// agentGetCalls counts GetAgent calls so tests can assert the message
+	// query auth path matches keys against a single listing instead of
+	// reading each agent individually.
+	agentGetCalls int
 }
 
 func NewMockMessageProcessor() *MockMessageProcessor {
@@ -179,6 +183,7 @@ func (m *MockStorage) CreateAgent(ctx context.Context, agent *agents.LocalAgent)
 }
 
 func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agents.LocalAgent, error) {
+	m.agentGetCalls++
 	agent, exists := m.agents[agentAddress]
 	if !exists {
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
@@ -1435,6 +1440,28 @@ func TestHandleListMessages_NoAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("Expected status %d without auth, got %d", http.StatusUnauthorized, w.Code)
+	}
+}
+
+// TestHandleListMessages_AuthUsesSingleListing verifies that authenticating
+// an agent key on a message query endpoint hashes the key once and matches it
+// against a single agent listing, never reading individual agents (the old
+// scan-and-verify loop issued one GetAgent per registered agent).
+func TestHandleListMessages_AuthUsesSingleListing(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if mockStorage.agentGetCalls != 0 {
+		t.Errorf("auth must not read individual agents, got %d GetAgent calls", mockStorage.agentGetCalls)
 	}
 }
 

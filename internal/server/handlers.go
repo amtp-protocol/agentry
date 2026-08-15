@@ -1223,18 +1223,14 @@ func (s *Server) authenticateAgent(c *gin.Context) (agentAddr string, isAdmin bo
 			return "", false, false
 		}
 
-		// Find the agent that owns this key by scanning the registry. This is
-		// acceptable for the control-plane scale of a gateway; keys are opaque
-		// and salted, so there is no way to look up by key directly.
-		for address, agent := range s.agentRegistry.GetAllAgents(c.Request.Context()) {
-			if agent == nil {
-				continue
-			}
-			// Reuse the inbox verification path which hashes with the same salt.
-			if s.agentRegistry.VerifyAPIKey(c.Request.Context(), address, apiKey) {
-				s.agentRegistry.UpdateLastAccess(c.Request.Context(), address)
-				return address, false, true
-			}
+		// Hash the presented key once and match it against a single listing
+		// of agents (the stored API key is already the salted hash), instead
+		// of verifying per agent — which reads each agent from storage and
+		// re-hashes the same key on every iteration.
+		address, ok := s.agentRegistry.AuthenticateAgent(c.Request.Context(), apiKey)
+		if ok {
+			s.agentRegistry.UpdateLastAccess(c.Request.Context(), address)
+			return address, false, true
 		}
 	}
 

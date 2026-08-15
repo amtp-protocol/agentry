@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/amtp-protocol/agentry/internal/schema"
@@ -51,7 +52,18 @@ type Registry struct {
 	schemaManager SchemaManager
 	storage       AgentStore
 	apiKeySalt    string
+
+	// lastAccessMu guards lastAccessAt, which debounces last_access writes
+	// so a burst of read requests does not issue one storage UPDATE each.
+	lastAccessMu sync.Mutex
+	lastAccessAt map[string]time.Time
 }
+
+// lastAccessWriteDebounce is the minimum interval between two last_access
+// writes for the same agent. The timestamp only feeds the discovery
+// "active_only" filter (which uses day-scale thresholds), so sub-minute
+// staleness is immaterial.
+const lastAccessWriteDebounce = time.Minute
 
 // SchemaManager interface for schema validation
 type SchemaManager interface {
@@ -73,6 +85,7 @@ func NewRegistry(config RegistryConfig, storage AgentStore) *Registry {
 		schemaManager: config.SchemaManager,
 		storage:       storage,
 		apiKeySalt:    config.APIKeySalt,
+		lastAccessAt:  make(map[string]time.Time),
 	}
 }
 
@@ -327,10 +340,50 @@ func (r *Registry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string
 	return subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashedInput)) == 1
 }
 
+// AuthenticateAgent returns the full address of the registered agent that
+// owns the given API key, or ok=false if none does. The presented key is
+// hashed once and compared against a single listing of agents — the stored
+// API key is already the salted hash — so authentication costs one listing
+// plus a constant-time comparison per agent instead of a per-agent storage
+// read and a redundant hash per iteration.
+func (r *Registry) AuthenticateAgent(ctx context.Context, apiKey string) (string, bool) {
+	if apiKey == "" {
+		return "", false
+	}
+
+	hashed := r.hashAPIKey(apiKey)
+	agents, err := r.storage.ListAgents(ctx)
+	if err != nil {
+		return "", false
+	}
+
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		// Use constant-time comparison to prevent timing attacks.
+		if subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashed)) == 1 {
+			return agent.Address, true
+		}
+	}
+	return "", false
+}
+
 // UpdateLastAccess updates the last access timestamp for an agent using a
-// field-level write so it cannot clobber a concurrent key rotation.
+// field-level write so it cannot clobber a concurrent key rotation. Writes
+// are debounced to at most one per debounce window per agent, so a burst of
+// read requests does not issue one storage UPDATE each.
 func (r *Registry) UpdateLastAccess(ctx context.Context, agentAddress string) {
 	now := time.Now().UTC()
+
+	r.lastAccessMu.Lock()
+	if last, ok := r.lastAccessAt[agentAddress]; ok && now.Sub(last) < lastAccessWriteDebounce {
+		r.lastAccessMu.Unlock()
+		return
+	}
+	r.lastAccessAt[agentAddress] = now
+	r.lastAccessMu.Unlock()
+
 	if err := r.storage.UpdateAgentFields(ctx, agentAddress, AgentFields{LastAccess: &now}); err != nil {
 		return
 	}

@@ -1545,6 +1545,41 @@ func TestIntegration_RotateAgentKeyValidation(t *testing.T) {
 	}
 }
 
+// TestIntegration_AgentAuthRepeatedReads is a functional verification test
+// for the message query auth path after it was refactored to hash the
+// presented key once, match it against a single agent listing, and debounce
+// last_access writes. A burst of authenticated reads with the same key must
+// all succeed (each prior request used to trigger one last_access UPDATE; the
+// debounce collapses them without changing behavior), and several agents'
+// keys must all keep authenticating.
+func TestIntegration_AgentAuthRepeatedReads(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	keys := []string{
+		registerLocalAgent(t, testServer.URL),
+		registerLocalAgentWithAddress(t, testServer.URL, "reader-1"),
+		registerLocalAgentWithAddress(t, testServer.URL, "reader-2"),
+	}
+
+	// A burst of reads with the same key exercises the debounced
+	// last_access write; every request must still authenticate.
+	for i := 0; i < 20; i++ {
+		resp := listMessages(t, testServer.URL, keys[0], 10, 0)
+		if resp.Total != 0 {
+			t.Fatalf("iteration %d: expected 0 messages, got %d", i, resp.Total)
+		}
+	}
+
+	// Every registered key still authenticates.
+	for _, key := range keys {
+		resp := listMessages(t, testServer.URL, key, 10, 0)
+		if resp.Total != 0 {
+			t.Fatalf("key %q: expected 0 messages, got %d", key, resp.Total)
+		}
+	}
+}
+
 func TestIntegration_Idempotency(t *testing.T) {
 	// Create mock AMTP server for deliveries
 	mockAMTPServer := createMockAMTPServer(t)
