@@ -17,6 +17,8 @@
 package middleware
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
@@ -357,15 +359,18 @@ const adminKeyCacheTTL = 5 * time.Second
 // read path (GET /v1/messages, GET /v1/messages/:id,
 // GET /v1/messages/:id/status), so a naive read-per-request turns agent
 // polling into a blocking filesystem read per request — including for
-// requests that fail agent-key auth. The cache makes the hot path a map
-// lookup. Removing the file invalidates the cache: validation fails rather
-// than serving stale keys.
+// requests that fail agent-key auth. The cache keeps the hot path off the
+// filesystem. Removing the file invalidates the cache: validation fails
+// rather than serving stale keys.
+//
+// Keys are cached as SHA-256 digests, not as the key strings, so comparison
+// is constant-time over a fixed width (see Validate).
 type AdminKeyValidator struct {
 	keyFile string
 	ttl     time.Duration
 
 	mu       sync.RWMutex
-	cached   map[string]struct{}
+	cached   [][sha256.Size]byte
 	modTime  time.Time
 	size     int64
 	loadedAt time.Time
@@ -380,6 +385,12 @@ func NewAdminKeyValidator(keyFile string) *AdminKeyValidator {
 
 // Validate reports whether the provided key is present in the key file. A
 // missing or unreadable file yields false.
+//
+// The comparison is deliberately not a map lookup: hashing the caller's key
+// into a bucket and memcmp-ing on a tophash hit leaks information about the
+// key through timing. Every configured key is compared, digest against
+// digest, with no early exit, so the work depends only on how many admin
+// keys are configured.
 func (v *AdminKeyValidator) Validate(providedKey string) bool {
 	if providedKey == "" {
 		return false
@@ -388,13 +399,18 @@ func (v *AdminKeyValidator) Validate(providedKey string) bool {
 	if err != nil {
 		return false
 	}
-	_, ok := keys[providedKey]
-	return ok
+
+	provided := sha256.Sum256([]byte(providedKey))
+	match := 0
+	for i := range keys {
+		match |= subtle.ConstantTimeCompare(keys[i][:], provided[:])
+	}
+	return match == 1
 }
 
-// keys returns the parsed key set, refreshing the cache when the file
-// changed since the previous read or the cached set aged out.
-func (v *AdminKeyValidator) keys() (map[string]struct{}, error) {
+// keys returns the cached key digests, refreshing them when the file changed
+// since the previous read or the cached set aged out.
+func (v *AdminKeyValidator) keys() ([][sha256.Size]byte, error) {
 	// Fast path: fresh cache entry over an unchanged file — no read.
 	v.mu.RLock()
 	if v.cacheUsable() {
@@ -448,15 +464,18 @@ func (v *AdminKeyValidator) cacheUsable() bool {
 }
 
 // parseAdminKeys extracts the keys from a key file: one key per line,
-// ignoring empty lines and comments.
-func parseAdminKeys(data []byte) map[string]struct{} {
-	keys := make(map[string]struct{})
+// ignoring empty lines and comments. Keys are returned as digests so that
+// Validate never has to compare variable-length secrets.
+func parseAdminKeys(data []byte) [][sha256.Size]byte {
+	// Non-nil even when empty: a nil result would read as "never loaded" and
+	// make an empty key file re-read on every request.
+	keys := make([][sha256.Size]byte, 0)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		keys[line] = struct{}{}
+		keys = append(keys, sha256.Sum256([]byte(line)))
 	}
 	return keys
 }

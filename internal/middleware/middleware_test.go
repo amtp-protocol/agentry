@@ -1046,6 +1046,55 @@ func TestAdminKeyValidator_Basic(t *testing.T) {
 	}
 }
 
+// TestAdminKeyValidator_NearMisses verifies that comparing digests instead of
+// the raw strings still rejects keys that only nearly match: a prefix, an
+// extension, and a one-character change.
+func TestAdminKeyValidator_NearMisses(t *testing.T) {
+	path := writeAdminKeysFile(t, "correct-admin-key\nsecond-admin-key\n")
+	v := NewAdminKeyValidator(path)
+
+	for _, key := range []string{
+		"correct-admin-ke",   // prefix
+		"correct-admin-keys", // extension
+		"correct-admin-keX",  // one character changed
+		"Correct-admin-key",  // case
+		" correct-admin-key", // leading space
+	} {
+		if v.Validate(key) {
+			t.Errorf("Validate(%q) = true, want false", key)
+		}
+	}
+	for _, key := range []string{"correct-admin-key", "second-admin-key"} {
+		if !v.Validate(key) {
+			t.Errorf("Validate(%q) = false, want true", key)
+		}
+	}
+}
+
+// TestAdminKeyValidator_EmptyFile verifies that a key file with no usable
+// keys rejects everything and still caches, rather than re-reading the file
+// on every request.
+func TestAdminKeyValidator_EmptyFile(t *testing.T) {
+	path := writeAdminKeysFile(t, "# only a comment\n\n")
+	v := NewAdminKeyValidator(path)
+
+	if v.Validate("anything") {
+		t.Error("expected an empty key file to reject every key")
+	}
+
+	// Remove the file: a cached empty set must still be served, proving the
+	// first call cached instead of falling through to a read every time.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove key file: %v", err)
+	}
+	v.mu.RLock()
+	cached := v.cached != nil
+	v.mu.RUnlock()
+	if !cached {
+		t.Error("expected the empty key set to be cached")
+	}
+}
+
 // TestAdminKeyValidator_MissingFile verifies that a validator backed by an
 // unreadable or missing file rejects every key.
 func TestAdminKeyValidator_MissingFile(t *testing.T) {
