@@ -810,7 +810,17 @@ func (ds *DatabaseStorage) UpdateAgentFields(ctx context.Context, agentAddress s
 		if fields.PushTarget != nil {
 			mergedTarget = *fields.PushTarget
 		}
-		return agents.ValidateDeliveryConfig(mergedMode, mergedTarget)
+		if err := agents.ValidateDeliveryConfig(mergedMode, mergedTarget); err != nil {
+			return err
+		}
+		// The row exists and its merged configuration is valid, yet the
+		// UPDATE matched nothing: the row changed between the UPDATE and the
+		// re-read (e.g. it was deleted and re-created concurrently, or the
+		// invariant predicate missed a state that has since been fixed). The
+		// write did not land, so report failure rather than silently
+		// returning success — the caller would otherwise confirm a stale
+		// record as updated.
+		return fmt.Errorf("agent update did not apply for %s: the row changed concurrently", agentAddress)
 	}
 
 	return nil

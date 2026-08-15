@@ -1357,6 +1357,50 @@ func TestUpdateAgentFields_NotFound(t *testing.T) {
 	}
 }
 
+// TestUpdateAgentFields_UpdateDidNotApply verifies that when the UPDATE
+// matches no rows but the re-read finds a valid record — e.g. a PATCH racing
+// with a DELETE + re-POST of the same address, or an invariant-predicate
+// miss on a row that was concurrently fixed — the call reports an explicit
+// failure instead of silently returning success for a write that never
+// landed. Otherwise the handler would confirm a stale record as updated.
+func TestUpdateAgentFields_UpdateDidNotApply(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	storage := &DatabaseStorage{db: gormDB}
+
+	deliveryMode := "pull"
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "agents" SET "delivery_mode"=$1 WHERE address = $2 AND (NOT (COALESCE($3, delivery_mode) NOT IN ('push','pull') OR (COALESCE($4, delivery_mode) = 'push' AND COALESCE($5, push_target) = '')))`)).WithArgs(
+		deliveryMode,
+		"agent1@localhost",
+		deliveryMode,
+		deliveryMode,
+		nil,
+	).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+	// The row now exists with a valid configuration (it was deleted and
+	// re-created concurrently), so the re-read succeeds and validation
+	// passes — the caller must still see an error.
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs(
+		"agent1@localhost",
+		1,
+	).WillReturnRows(sqlmock.NewRows([]string{"id", "address", "delivery_mode", "push_target"}).AddRow(1, "agent1@localhost", "pull", nil))
+
+	err := storage.UpdateAgentFields(context.Background(), "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the UPDATE applied to no row")
+	}
+	if !strings.Contains(err.Error(), "did not apply") {
+		t.Errorf("expected an explicit update-did-not-apply error, got: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unfulfilled expectations: %v", err)
+	}
+}
+
 // TestUpdateAgentFields_PushInvariantRejected verifies that a field-level
 // update whose merged state violates the push-mode invariant (push mode with
 // an empty push target) is rejected atomically: the UPDATE matches no rows and
