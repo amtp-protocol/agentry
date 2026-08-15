@@ -323,8 +323,7 @@ func (s *Server) handleGetMessage(c *gin.Context) {
 	// Retrieve message from storage
 	message, err := s.storage.GetMessage(c.Request.Context(), messageID)
 	if err != nil {
-		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
-			"Message not found", nil)
+		s.respondToMessageLookupError(c, err)
 		return
 	}
 
@@ -362,8 +361,7 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 	// Verify the caller has access to the message before returning status.
 	message, err := s.storage.GetMessage(c.Request.Context(), messageID)
 	if err != nil {
-		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
-			"Message not found", nil)
+		s.respondToMessageLookupError(c, err)
 		return
 	}
 	if !isAdmin && !s.messageBelongsToAgent(message, agentAddr) {
@@ -375,12 +373,28 @@ func (s *Server) handleGetMessageStatus(c *gin.Context) {
 	// Retrieve message status from storage
 	status, err := s.storage.GetStatus(c.Request.Context(), messageID)
 	if err != nil {
-		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
-			"Message status not found", nil)
+		s.respondToMessageLookupError(c, err)
 		return
 	}
 
 	s.respondWithSuccess(c, http.StatusOK, status)
+}
+
+// respondToMessageLookupError maps a storage lookup error to an HTTP
+// response. A genuine not-found (storage.ErrMessageNotFound) is a 404; any
+// other error is a transient storage failure and must surface as a 5xx so
+// clients retry instead of concluding the message is lost and re-sending it,
+// which would produce duplicate delivery.
+func (s *Server) respondToMessageLookupError(c *gin.Context, err error) {
+	if errors.Is(err, storage.ErrMessageNotFound) {
+		s.respondWithError(c, http.StatusNotFound, "MESSAGE_NOT_FOUND",
+			"Message not found", nil)
+		return
+	}
+	s.respondWithError(c, http.StatusInternalServerError, "MESSAGE_READ_FAILED",
+		"Failed to read message", map[string]interface{}{
+			"error": err.Error(),
+		})
 }
 
 // buildListMessagesFilter returns the storage filter for the message list

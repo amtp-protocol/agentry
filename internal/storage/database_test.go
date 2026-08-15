@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,8 +148,36 @@ func TestGetMessage_NotFound(t *testing.T) {
 	defer sqlDB.Close()
 	ds := &DatabaseStorage{db: gormDB}
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "messages" WHERE message_id = $1 ORDER BY "messages"."id" LIMIT $2`)).WithArgs("not-exist", 1).WillReturnError(gorm.ErrRecordNotFound)
-	if _, err := ds.GetMessage(context.Background(), "not-exist"); err == nil {
+	_, err := ds.GetMessage(context.Background(), "not-exist")
+	if err == nil {
 		t.Fatalf("expected not found error")
+	}
+	// The sentinel must be checkable so handlers map this to 404 rather than
+	// flattening every storage failure.
+	if !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("expected ErrMessageNotFound sentinel, got: %v", err)
+	}
+}
+
+// TestGetMessage_TransientError verifies that a non-not-found database
+// failure (e.g. a connection error) does NOT carry the ErrMessageNotFound
+// sentinel, so handlers surface it as 5xx and clients retry instead of
+// concluding the message is lost and re-sending it.
+func TestGetMessage_TransientError(t *testing.T) {
+	gormDB, mock := newMockDB(t)
+	sqlDB, _ := gormDB.DB()
+	defer sqlDB.Close()
+	ds := &DatabaseStorage{db: gormDB}
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "messages" WHERE message_id = $1 ORDER BY "messages"."id" LIMIT $2`)).WithArgs("id", 1).WillReturnError(fmt.Errorf("connection refused"))
+	_, err := ds.GetMessage(context.Background(), "id")
+	if err == nil {
+		t.Fatalf("expected error for transient failure")
+	}
+	if errors.Is(err, ErrMessageNotFound) {
+		t.Error("transient failure must not carry the not-found sentinel")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("expected underlying error propagated, got: %v", err)
 	}
 }
 
@@ -475,8 +505,12 @@ func TestGetStatus_NotFound(t *testing.T) {
 	defer sqlDB.Close()
 	ds := &DatabaseStorage{db: gormDB}
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "message_statuses" WHERE message_id = $1 ORDER BY "message_statuses"."id" LIMIT $2`)).WithArgs("not-exist", 1).WillReturnError(gorm.ErrRecordNotFound)
-	if _, err := ds.GetStatus(context.Background(), "not-exist"); err == nil {
+	_, err := ds.GetStatus(context.Background(), "not-exist")
+	if err == nil {
 		t.Fatalf("expected not found error")
+	}
+	if !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("expected ErrMessageNotFound sentinel, got: %v", err)
 	}
 }
 

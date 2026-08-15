@@ -141,7 +141,7 @@ func (ds *DatabaseStorage) GetMessage(ctx context.Context, messageID string) (*t
 		Where("message_id = ?", messageID).
 		First(&dbMessage).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil, fmt.Errorf("message not found: %s", messageID)
+			return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 		}
 		return nil, fmt.Errorf("failed to get message: %w", err)
 	}
@@ -356,7 +356,7 @@ func (ds *DatabaseStorage) GetStatus(ctx context.Context, messageID string) (*ty
 		Where("message_id = ?", messageID).
 		First(&messageStatus).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil, fmt.Errorf("message status not found: %s", messageID)
+			return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 		}
 		return nil, fmt.Errorf("failed to get message status: %w", err)
 	}

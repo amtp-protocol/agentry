@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -200,11 +201,16 @@ func TestMemoryStorage_GetMessage_NotFound(t *testing.T) {
 
 	_, err := storage.GetMessage(ctx, "non-existent-message")
 	if err == nil {
-		t.Error("Expected error for non-existent message")
+		t.Fatal("Expected error for non-existent message")
 	}
 
-	if err.Error() != "message not found: non-existent-message" {
-		t.Errorf("Expected 'message not found' error, got %s", err.Error())
+	// The error must carry the ErrMessageNotFound sentinel so handlers can
+	// map a genuine not-found to 404 instead of a transient storage failure.
+	if !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("Expected ErrMessageNotFound sentinel, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "non-existent-message") {
+		t.Errorf("Expected message ID in error, got %s", err.Error())
 	}
 }
 
@@ -367,6 +373,25 @@ func TestMemoryStorage_UpdateStatus_NotFound(t *testing.T) {
 
 	if err.Error() != "message status not found: non-existent-message" {
 		t.Errorf("Expected 'message status not found' error, got %s", err.Error())
+	}
+}
+
+// TestMemoryStorage_GetStatus_NotFound verifies that GetStatus returns the
+// ErrMessageNotFound sentinel for a missing status so handlers map it to 404
+// instead of a transient storage failure.
+func TestMemoryStorage_GetStatus_NotFound(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	_, err := storage.GetStatus(ctx, "non-existent-message")
+	if err == nil {
+		t.Fatal("Expected error for non-existent status")
+	}
+	if !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("Expected ErrMessageNotFound sentinel, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "non-existent-message") {
+		t.Errorf("Expected message ID in error, got %s", err.Error())
 	}
 }
 

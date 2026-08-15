@@ -35,6 +35,14 @@ var ErrVersionConflict = errors.New("version conflict: workflow was modified con
 // "this replica does not own the workflow" (benign) from other failures.
 var ErrWorkflowNotFound = errors.New("workflow not found")
 
+// ErrMessageNotFound is returned (wrapped with the message ID for context) by
+// GetMessage and GetStatus when the requested message or its status does not
+// exist. Callers use errors.Is to distinguish a genuine not-found (404) from
+// transient storage failures (5xx), which must not be flattened to 404 — a
+// sender polling status would otherwise conclude the message is lost and
+// re-send it, producing duplicate delivery.
+var ErrMessageNotFound = errors.New("message not found")
+
 // Storage defines the interface for message storage operations
 type Storage interface {
 	agents.AgentStore

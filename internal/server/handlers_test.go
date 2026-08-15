@@ -73,6 +73,13 @@ type MockStorage struct {
 	// query auth path matches keys against a single listing instead of
 	// reading each agent individually.
 	agentGetCalls int
+	// getMessageError, when set, makes GetMessage fail with a transient
+	// (non-not-found) storage error so handler tests can verify storage
+	// failures surface as 5xx instead of being flattened to 404.
+	getMessageError error
+	// getStatusError, when set, makes GetStatus fail with a transient
+	// storage error for the same reason.
+	getStatusError error
 }
 
 func NewMockMessageProcessor() *MockMessageProcessor {
@@ -97,10 +104,13 @@ func (m *MockStorage) StoreMessage(ctx context.Context, message *types.Message) 
 }
 
 func (m *MockStorage) GetMessage(ctx context.Context, messageID string) (*types.Message, error) {
+	if m.getMessageError != nil {
+		return nil, m.getMessageError
+	}
 	if message, exists := m.messages[messageID]; exists {
 		return message, nil
 	}
-	return nil, fmt.Errorf("message not found: %s", messageID)
+	return nil, fmt.Errorf("%w: %s", storage.ErrMessageNotFound, messageID)
 }
 
 func (m *MockStorage) DeleteMessage(ctx context.Context, messageID string) error {
@@ -131,10 +141,13 @@ func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status 
 }
 
 func (m *MockStorage) GetStatus(ctx context.Context, messageID string) (*types.MessageStatus, error) {
+	if m.getStatusError != nil {
+		return nil, m.getStatusError
+	}
 	if status, exists := m.statuses[messageID]; exists {
 		return status, nil
 	}
-	return nil, fmt.Errorf("message status not found: %s", messageID)
+	return nil, fmt.Errorf("%w: %s", storage.ErrMessageNotFound, messageID)
 }
 
 func (m *MockStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
@@ -699,6 +712,43 @@ func TestHandleGetMessage_NotFound(t *testing.T) {
 	}
 }
 
+// TestHandleGetMessage_StorageError verifies that a transient storage failure
+// during message retrieval surfaces as a 5xx so clients retry, instead of
+// being flattened to 404 which would make a polling sender conclude the
+// message is lost and re-send it (duplicate delivery).
+func TestHandleGetMessage_StorageError(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "sender")
+
+	mockStorage.getMessageError = fmt.Errorf("storage outage: connection refused")
+
+	req, err := http.NewRequest("GET", "/v1/messages/01234567-89ab-7def-8123-456789abcdef", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d for storage error, got %d: %s",
+			http.StatusInternalServerError, rr.Code, rr.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+	if errorResponse.Error.Code != "MESSAGE_READ_FAILED" {
+		t.Errorf("Expected error code 'MESSAGE_READ_FAILED', got %s", errorResponse.Error.Code)
+	}
+	detail, _ := errorResponse.Error.Details["error"].(string)
+	if !strings.Contains(detail, "storage outage") {
+		t.Errorf("Expected storage error detail, got %q", detail)
+	}
+}
+
 func TestHandleGetMessage_ForbiddenOtherAgent(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
@@ -942,6 +992,79 @@ func TestHandleGetMessageStatus_NotFound(t *testing.T) {
 
 	if errorResponse.Error.Code != "MESSAGE_NOT_FOUND" {
 		t.Errorf("Expected error code 'MESSAGE_NOT_FOUND', got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleGetMessageStatus_StorageError verifies that a transient storage
+// failure on either the access-check read or the status read surfaces as a
+// 5xx so clients retry, instead of being flattened to 404 which would make a
+// sender polling status conclude the message is lost and re-send it.
+func TestHandleGetMessageStatus_StorageError(t *testing.T) {
+	messageID := "01234567-89ab-7def-8123-456789abcdef"
+
+	tests := []struct {
+		name        string
+		seedMessage bool
+		seedStatus  bool
+		messageErr  error
+		statusErr   error
+	}{
+		{
+			name:        "message read fails",
+			seedMessage: true,
+			seedStatus:  true,
+			messageErr:  fmt.Errorf("storage outage: connection refused"),
+		},
+		{
+			name:        "status read fails",
+			seedMessage: true,
+			seedStatus:  true,
+			statusErr:   fmt.Errorf("storage outage: status table unavailable"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := createTestServer()
+			mockStorage := server.storage.(*MockStorage)
+			key := registerTestAgent(t, server, "sender")
+
+			if tt.seedMessage {
+				mockStorage.messages[messageID] = &types.Message{
+					MessageID:  messageID,
+					Sender:     "sender@localhost",
+					Recipients: []string{"recipient@test.com"},
+				}
+			}
+			if tt.seedStatus {
+				mockStorage.statuses[messageID] = &types.MessageStatus{
+					MessageID: messageID,
+					Status:    types.StatusQueued,
+				}
+			}
+			mockStorage.getMessageError = tt.messageErr
+			mockStorage.getStatusError = tt.statusErr
+
+			req, err := http.NewRequest("GET", "/v1/messages/"+messageID+"/status", nil)
+			if err != nil {
+				t.Fatalf("Failed to create request: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+key)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("Expected status %d, got %d: %s",
+					http.StatusInternalServerError, rr.Code, rr.Body.String())
+			}
+
+			var errorResponse types.ErrorResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &errorResponse); err != nil {
+				t.Fatalf("Failed to unmarshal error response: %v", err)
+			}
+			if errorResponse.Error.Code != "MESSAGE_READ_FAILED" {
+				t.Errorf("Expected error code 'MESSAGE_READ_FAILED', got %s", errorResponse.Error.Code)
+			}
+		})
 	}
 }
 

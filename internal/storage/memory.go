@@ -85,7 +85,7 @@ func (ms *MemoryStorage) GetMessage(ctx context.Context, messageID string) (*typ
 
 	message, exists := ms.messages[messageID]
 	if !exists {
-		return nil, fmt.Errorf("message not found: %s", messageID)
+		return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 	}
 
 	return cloneMessage(message), nil
@@ -197,7 +197,7 @@ func (ms *MemoryStorage) GetStatus(ctx context.Context, messageID string) (*type
 
 	status, exists := ms.statuses[messageID]
 	if !exists {
-		return nil, fmt.Errorf("message status not found: %s", messageID)
+		return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 	}
 
 	return cloneStatus(status), nil
