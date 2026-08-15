@@ -18,7 +18,9 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -199,11 +201,16 @@ func TestMemoryStorage_GetMessage_NotFound(t *testing.T) {
 
 	_, err := storage.GetMessage(ctx, "non-existent-message")
 	if err == nil {
-		t.Error("Expected error for non-existent message")
+		t.Fatal("Expected error for non-existent message")
 	}
 
-	if err.Error() != "message not found: non-existent-message" {
-		t.Errorf("Expected 'message not found' error, got %s", err.Error())
+	// The error must carry the ErrMessageNotFound sentinel so handlers can
+	// map a genuine not-found to 404 instead of a transient storage failure.
+	if !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("Expected ErrMessageNotFound sentinel, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "non-existent-message") {
+		t.Errorf("Expected message ID in error, got %s", err.Error())
 	}
 }
 
@@ -366,6 +373,104 @@ func TestMemoryStorage_UpdateStatus_NotFound(t *testing.T) {
 
 	if err.Error() != "message status not found: non-existent-message" {
 		t.Errorf("Expected 'message status not found' error, got %s", err.Error())
+	}
+}
+
+// TestMemoryStorage_GetStatus_NotFound verifies that GetStatus returns the
+// ErrMessageNotFound sentinel for a missing status so handlers map it to 404
+// instead of a transient storage failure.
+func TestMemoryStorage_GetStatus_NotFound(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	_, err := storage.GetStatus(ctx, "non-existent-message")
+	if err == nil {
+		t.Fatal("Expected error for non-existent status")
+	}
+	if !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("Expected ErrMessageNotFound sentinel, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "non-existent-message") {
+		t.Errorf("Expected message ID in error, got %s", err.Error())
+	}
+}
+
+// TestMemoryStorage_GetStatuses verifies that GetStatuses returns the statuses
+// for the requested message IDs in one batch, omits IDs without a stored
+// status, and returns clones so callers cannot mutate the store.
+func TestMemoryStorage_GetStatuses(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	if err := storage.StoreStatus(ctx, "msg-1", &types.MessageStatus{
+		MessageID: "msg-1",
+		Status:    types.StatusDelivered,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("store status msg-1: %v", err)
+	}
+	if err := storage.StoreStatus(ctx, "msg-2", &types.MessageStatus{
+		MessageID: "msg-2",
+		Status:    types.StatusQueued,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("store status msg-2: %v", err)
+	}
+	// msg-3 has no stored status.
+
+	statuses, err := storage.GetStatuses(ctx, []string{"msg-1", "msg-2", "msg-3"})
+	if err != nil {
+		t.Fatalf("GetStatuses failed: %v", err)
+	}
+
+	// Only statuses that exist are returned; msg-3 is omitted.
+	if len(statuses) != 2 {
+		t.Fatalf("Expected 2 statuses, got %d", len(statuses))
+	}
+	if statuses["msg-1"] == nil || statuses["msg-1"].Status != types.StatusDelivered {
+		t.Errorf("Expected delivered status for msg-1, got %+v", statuses["msg-1"])
+	}
+	if statuses["msg-2"] == nil || statuses["msg-2"].Status != types.StatusQueued {
+		t.Errorf("Expected queued status for msg-2, got %+v", statuses["msg-2"])
+	}
+	if _, exists := statuses["msg-3"]; exists {
+		t.Error("Expected msg-3 to be omitted (no stored status)")
+	}
+
+	// Returned statuses must be clones: mutating one must not affect the store.
+	statuses["msg-1"].Status = types.StatusFailed
+	got, err := storage.GetStatus(ctx, "msg-1")
+	if err != nil {
+		t.Fatalf("GetStatus failed: %v", err)
+	}
+	if got.Status != types.StatusDelivered {
+		t.Errorf("Expected stored status to remain delivered, got %s (returned statuses must be clones)", got.Status)
+	}
+}
+
+// TestMemoryStorage_GetStatuses_Empty verifies that an empty request returns
+// an empty result without error.
+func TestMemoryStorage_GetStatuses_Empty(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	statuses, err := storage.GetStatuses(ctx, nil)
+	if err != nil {
+		t.Fatalf("GetStatuses with nil input failed: %v", err)
+	}
+	if len(statuses) != 0 {
+		t.Errorf("Expected empty result, got %d entries", len(statuses))
+	}
+
+	statuses, err = storage.GetStatuses(ctx, []string{})
+	if err != nil {
+		t.Fatalf("GetStatuses with empty input failed: %v", err)
+	}
+	if len(statuses) != 0 {
+		t.Errorf("Expected empty result for empty input, got %d entries", len(statuses))
 	}
 }
 
@@ -655,6 +760,278 @@ func TestMemoryStorage_ListMessages_FilterWithPagination(t *testing.T) {
 	}
 }
 
+// TestMemoryStorage_ListMessages_OrFilter verifies that a filter with Or set
+// matches messages sent by Sender OR received by any Recipient, and that the
+// merged result is sorted newest-first (mirroring the database backend).
+func TestMemoryStorage_ListMessages_OrFilter(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := "agent@localhost"
+	peer := "peer@localhost"
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	// Interleave sent and received messages with strictly decreasing
+	// timestamps; message 0 is the newest. An unrelated message between the
+	// peer and a third party must be excluded.
+	seed := []*types.Message{
+		{MessageID: "sent-0", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(7 * time.Minute)},
+		{MessageID: "recv-1", Sender: peer, Recipients: []string{agent}, Timestamp: base.Add(6 * time.Minute)},
+		{MessageID: "sent-2", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(5 * time.Minute)},
+		{MessageID: "recv-3", Sender: peer, Recipients: []string{agent}, Timestamp: base.Add(4 * time.Minute)},
+		{MessageID: "sent-4", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(3 * time.Minute)},
+		{MessageID: "recv-5", Sender: peer, Recipients: []string{agent}, Timestamp: base.Add(2 * time.Minute)},
+		{MessageID: "sent-6", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(1 * time.Minute)},
+		{MessageID: "recv-7", Sender: peer, Recipients: []string{agent}, Timestamp: base},
+		{MessageID: "other-8", Sender: peer, Recipients: []string{"third@example.com"}, Timestamp: base.Add(8 * time.Minute)},
+	}
+	for _, msg := range seed {
+		if err := storage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("store %s: %v", msg.MessageID, err)
+		}
+	}
+
+	// The OR filter must return every message the agent sent or received,
+	// newest-first, and exclude the unrelated message.
+	filter := MessageFilter{Sender: agent, Recipients: []string{agent}, Or: true}
+	result, err := storage.ListMessages(ctx, filter)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	want := []string{"sent-0", "recv-1", "sent-2", "recv-3", "sent-4", "recv-5", "sent-6", "recv-7"}
+	if len(result) != len(want) {
+		t.Fatalf("Expected %d messages, got %d", len(want), len(result))
+	}
+	for i, id := range want {
+		if result[i].MessageID != id {
+			t.Errorf("Position %d: expected %s, got %s", i, id, result[i].MessageID)
+		}
+	}
+
+	// A self-message (sent by the agent to itself) must be matched exactly
+	// once under OR semantics.
+	if err := storage.StoreMessage(ctx, &types.Message{
+		MessageID:  "self-9",
+		Sender:     agent,
+		Recipients: []string{agent},
+		Timestamp:  base.Add(9 * time.Minute),
+	}); err != nil {
+		t.Fatalf("store self-9: %v", err)
+	}
+	result, err = storage.ListMessages(ctx, filter)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if len(result) != len(want)+1 {
+		t.Fatalf("Expected %d messages with self-message, got %d", len(want)+1, len(result))
+	}
+	if result[0].MessageID != "self-9" {
+		t.Errorf("Expected newest message self-9, got %s", result[0].MessageID)
+	}
+}
+
+// TestMemoryStorage_ListMessages_OrFilterPagination verifies that offset and
+// limit apply to the merged OR result set (not to each direction
+// independently), which is the fix for the merged-query pagination bug.
+func TestMemoryStorage_ListMessages_OrFilterPagination(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := "agent@localhost"
+	peer := "peer@localhost"
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	// Newest-first order: sent-0 .. recv-7.
+	for i := 0; i < 8; i++ {
+		msg := &types.Message{
+			MessageID:  fmt.Sprintf("m-%d", i),
+			Timestamp:  base.Add(time.Duration(7-i) * time.Minute),
+			Recipients: []string{peer},
+		}
+		if i%2 == 0 {
+			msg.Sender = agent
+		} else {
+			msg.Sender = peer
+			msg.Recipients = []string{agent}
+		}
+		if err := storage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("store m-%d: %v", i, err)
+		}
+	}
+
+	// offset=1 limit=3 must return the merged rows [m-1, m-2, m-3], proving
+	// that neither direction's rows were skipped independently.
+	filter := MessageFilter{Sender: agent, Recipients: []string{agent}, Or: true, Offset: 1, Limit: 3}
+	result, err := storage.ListMessages(ctx, filter)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	want := []string{"m-1", "m-2", "m-3"}
+	if len(result) != len(want) {
+		t.Fatalf("Expected %d messages, got %d", len(want), len(result))
+	}
+	for i, id := range want {
+		if result[i].MessageID != id {
+			t.Errorf("Position %d: expected %s, got %s", i, id, result[i].MessageID)
+		}
+	}
+
+	// offset=6 limit=3 returns the final two rows; the total across pages
+	// must be exactly 8 unique messages.
+	filter = MessageFilter{Sender: agent, Recipients: []string{agent}, Or: true, Offset: 6, Limit: 3}
+	result, err = storage.ListMessages(ctx, filter)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	want = []string{"m-6", "m-7"}
+	if len(result) != len(want) {
+		t.Fatalf("Expected %d messages, got %d", len(want), len(result))
+	}
+	for i, id := range want {
+		if result[i].MessageID != id {
+			t.Errorf("Position %d: expected %s, got %s", i, id, result[i].MessageID)
+		}
+	}
+
+	// Offset beyond the merged set returns an empty page.
+	filter = MessageFilter{Sender: agent, Recipients: []string{agent}, Or: true, Offset: 8, Limit: 3}
+	result, err = storage.ListMessages(ctx, filter)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("Expected empty page past the end, got %d messages", len(result))
+	}
+}
+
+// TestMemoryStorage_ListMessages_OrFilterSingleSide verifies that an OR-mode
+// filter with only one side set behaves like the corresponding AND-mode
+// single-predicate query.
+func TestMemoryStorage_ListMessages_OrFilterSingleSide(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := "agent@localhost"
+	peer := "peer@localhost"
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 3; i++ {
+		if err := storage.StoreMessage(ctx, &types.Message{
+			MessageID:  fmt.Sprintf("sent-%d", i),
+			Sender:     agent,
+			Recipients: []string{peer},
+			Timestamp:  base.Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("store sent-%d: %v", i, err)
+		}
+		if err := storage.StoreMessage(ctx, &types.Message{
+			MessageID:  fmt.Sprintf("recv-%d", i),
+			Sender:     peer,
+			Recipients: []string{agent},
+			Timestamp:  base.Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("store recv-%d: %v", i, err)
+		}
+	}
+
+	// OR with only a sender must behave like a plain sender query.
+	result, err := storage.ListMessages(ctx, MessageFilter{Sender: agent, Or: true})
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if len(result) != 3 {
+		t.Fatalf("Expected 3 sent messages, got %d", len(result))
+	}
+	for _, msg := range result {
+		if msg.Sender != agent {
+			t.Errorf("Expected only sender %s, got %s", agent, msg.Sender)
+		}
+	}
+
+	// OR with only recipients must behave like a plain recipients query.
+	result, err = storage.ListMessages(ctx, MessageFilter{Recipients: []string{agent}, Or: true})
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	if len(result) != 3 {
+		t.Fatalf("Expected 3 received messages, got %d", len(result))
+	}
+	for _, msg := range result {
+		if msg.Sender == agent {
+			t.Errorf("Expected only received messages, got sent message %s", msg.MessageID)
+		}
+	}
+}
+
+// TestMemoryStorage_CountMessages verifies that CountMessages returns the
+// number of messages matching the filter without materializing the result
+// set, and that Limit/Offset are ignored (the count covers the full
+// filtered set).
+func TestMemoryStorage_CountMessages(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := "agent@localhost"
+	peer := "peer@localhost"
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	seed := []*types.Message{
+		{MessageID: "sent-0", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(7 * time.Minute)},
+		{MessageID: "recv-1", Sender: peer, Recipients: []string{agent}, Timestamp: base.Add(6 * time.Minute)},
+		{MessageID: "sent-2", Sender: agent, Recipients: []string{peer}, Timestamp: base.Add(5 * time.Minute)},
+		{MessageID: "recv-3", Sender: peer, Recipients: []string{agent}, Timestamp: base.Add(4 * time.Minute)},
+		{MessageID: "other-4", Sender: peer, Recipients: []string{"third@example.com"}, Timestamp: base.Add(3 * time.Minute)},
+	}
+	for _, msg := range seed {
+		if err := storage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("store %s: %v", msg.MessageID, err)
+		}
+	}
+	// Give two of the agent's messages a delivered status.
+	if err := storage.StoreStatus(ctx, "sent-0", &types.MessageStatus{MessageID: "sent-0", Status: types.StatusDelivered}); err != nil {
+		t.Fatalf("store status sent-0: %v", err)
+	}
+	if err := storage.StoreStatus(ctx, "recv-1", &types.MessageStatus{MessageID: "recv-1", Status: types.StatusDelivered}); err != nil {
+		t.Fatalf("store status recv-1: %v", err)
+	}
+
+	basePlus4 := base.Add(4 * time.Minute)
+	tests := []struct {
+		name   string
+		filter MessageFilter
+		want   int64
+	}{
+		{"all", MessageFilter{}, 5},
+		{"sender", MessageFilter{Sender: agent}, 2},
+		{"recipients", MessageFilter{Recipients: []string{agent}}, 2},
+		{"or both directions", MessageFilter{Sender: agent, Recipients: []string{agent}, Or: true}, 4},
+		{"status", MessageFilter{Status: types.StatusDelivered}, 2},
+		{"status with sender", MessageFilter{Sender: agent, Status: types.StatusDelivered}, 1},
+		{"since", MessageFilter{Since: &basePlus4}, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := storage.CountMessages(ctx, tt.filter)
+			if err != nil {
+				t.Fatalf("CountMessages failed: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Expected count %d, got %d", tt.want, got)
+			}
+		})
+	}
+
+	// Limit and Offset must be ignored: the count covers the full filtered set.
+	got, err := storage.CountMessages(ctx, MessageFilter{Limit: 1, Offset: 3})
+	if err != nil {
+		t.Fatalf("CountMessages with pagination failed: %v", err)
+	}
+	if got != 5 {
+		t.Errorf("Expected count 5 with limit/offset set (ignored), got %d", got)
+	}
+}
+
 func TestMemoryStorage_GetStats(t *testing.T) {
 	storage := NewMemoryStorage(MemoryStorageConfig{})
 	ctx := context.Background()
@@ -769,17 +1146,32 @@ func TestMemoryStorage_matchesFilter(t *testing.T) {
 	}
 
 	// Test since filter
-	since := message.Timestamp.Unix() - 3600 // 1 hour before
+	since := message.Timestamp.Add(-time.Hour) // 1 hour before
 	filter = MessageFilter{Since: &since}
 	if !storage.matchesFilter(message, "test-msg", filter) {
 		t.Error("Expected message to match since filter")
 	}
 
 	// Test since filter no match
-	since = message.Timestamp.Unix() + 3600 // 1 hour after
+	since = message.Timestamp.Add(time.Hour) // 1 hour after
 	filter = MessageFilter{Since: &since}
 	if storage.matchesFilter(message, "test-msg", filter) {
 		t.Error("Expected message to not match since filter")
+	}
+
+	// The since bound is inclusive and compared at full timestamp precision:
+	// a message stamped exactly at the bound matches, one a microsecond
+	// earlier does not. Flooring to whole seconds (as the old Unix()
+	// comparison did) would wrongly re-include the earlier message.
+	since = time.Date(2026, 8, 9, 12, 0, 0, 999_000_000, time.UTC)
+	message.Timestamp = time.Date(2026, 8, 9, 12, 0, 0, 999_000_000, time.UTC)
+	filter = MessageFilter{Since: &since}
+	if !storage.matchesFilter(message, "test-msg", filter) {
+		t.Error("Expected message stamped exactly at the bound to match (inclusive)")
+	}
+	message.Timestamp = time.Date(2026, 8, 9, 12, 0, 0, 998_000_000, time.UTC)
+	if storage.matchesFilter(message, "test-msg", filter) {
+		t.Error("Expected message before the bound to not match (full precision)")
 	}
 }
 
@@ -868,6 +1260,9 @@ func TestMemoryStorage_GetAgent_NotFound(t *testing.T) {
 
 	if err.Error() != "agent not found: non-existent-agent" {
 		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("Expected ErrAgentNotFound sentinel, got: %v", err)
 	}
 }
 
@@ -960,6 +1355,289 @@ func TestMemoryStorage_UpdateAgent_NilAgent(t *testing.T) {
 	}
 }
 
+// TestMemoryStorage_UpdateAgentFields verifies that a field-level update
+// touches only the specified fields: the API key hash is preserved even when
+// other fields change, so a concurrent key rotation cannot be clobbered.
+func TestMemoryStorage_UpdateAgentFields(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	deliveryMode := "push"
+	pushTarget := "http://localhost:8080/hook"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+		PushTarget:   &pushTarget,
+	}); err != nil {
+		t.Fatalf("UpdateAgentFields failed: %v", err)
+	}
+
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if got.DeliveryMode != "push" || got.PushTarget != "http://localhost:8080/hook" {
+		t.Errorf("Expected updated delivery fields, got mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+	// The API key hash must be untouched by a field-level update.
+	if got.APIKey != "hash-A" {
+		t.Errorf("Expected API key hash preserved, got %q", got.APIKey)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_SchemasAndLastAccess verifies that
+// supported schemas, the derived RequiresSchema flag, last access, and the
+// API key can each be updated in isolation.
+func TestMemoryStorage_UpdateAgentFields_SchemasAndLastAccess(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	lastAccess := time.Now().UTC()
+	apiKey := "hash-B"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		SupportedSchemas: []string{"agntcy:test.hello.v1"},
+		LastAccess:       &lastAccess,
+		APIKey:           &apiKey,
+	}); err != nil {
+		t.Fatalf("UpdateAgentFields failed: %v", err)
+	}
+
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if len(got.SupportedSchemas) != 1 || got.SupportedSchemas[0] != "agntcy:test.hello.v1" {
+		t.Errorf("Expected updated supported schemas, got %v", got.SupportedSchemas)
+	}
+	if !got.RequiresSchema {
+		t.Error("Expected RequiresSchema to be derived true when schemas are set")
+	}
+	if !got.LastAccess.Equal(lastAccess) {
+		t.Errorf("Expected last access %v, got %v", lastAccess, got.LastAccess)
+	}
+	if got.APIKey != "hash-B" {
+		t.Errorf("Expected API key hash updated to hash-B, got %q", got.APIKey)
+	}
+	// Delivery mode must be untouched by the field-level update.
+	if got.DeliveryMode != "pull" {
+		t.Errorf("Expected delivery mode untouched, got %q", got.DeliveryMode)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_NotFound verifies the error for an
+// unknown agent address.
+func TestMemoryStorage_UpdateAgentFields_NotFound(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	deliveryMode := "push"
+	err := storage.UpdateAgentFields(ctx, "non-existent@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+	})
+	if err == nil {
+		t.Fatal("Expected error updating non-existent agent")
+	}
+	if err.Error() != "agent not found: non-existent@localhost" {
+		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("Expected ErrAgentNotFound sentinel, got: %v", err)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_Empty verifies that a field-level update
+// with no fields is a no-op that preserves the stored agent.
+func TestMemoryStorage_UpdateAgentFields_Empty(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("Expected no error creating agent, got %v", err)
+	}
+
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{}); err != nil {
+		t.Fatalf("UpdateAgentFields with no fields failed: %v", err)
+	}
+
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if got.DeliveryMode != "pull" || got.APIKey != "hash-A" {
+		t.Errorf("Expected agent unchanged, got mode=%q key=%q", got.DeliveryMode, got.APIKey)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_PushInvariant verifies that a field-level
+// update is validated against the merged state: switching to push mode without
+// a target, or clearing the target while in push mode, is rejected and the
+// stored record stays unchanged. Non-delivery updates are never blocked.
+func TestMemoryStorage_UpdateAgentFields_PushInvariant(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "agent1@localhost",
+		DeliveryMode: "pull",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	// Switch to push without a target: rejected.
+	deliveryMode := "push"
+	err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+	})
+	if err == nil || !strings.Contains(err.Error(), "push target URL is required") {
+		t.Fatalf("expected push target required error, got: %v", err)
+	}
+	// The record must be unchanged.
+	got, err := storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode != "pull" || got.PushTarget != "" {
+		t.Errorf("agent mutated by rejected update: mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+
+	// Push mode with a target succeeds.
+	target := "http://localhost:8080/hook"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &deliveryMode,
+		PushTarget:   &target,
+	}); err != nil {
+		t.Fatalf("set push mode with target: %v", err)
+	}
+
+	// Clearing the target while in push mode: rejected.
+	emptyTarget := ""
+	err = storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		PushTarget: &emptyTarget,
+	})
+	if err == nil || !strings.Contains(err.Error(), "push target URL is required") {
+		t.Fatalf("expected push target required error, got: %v", err)
+	}
+	got, err = storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode != "push" || got.PushTarget != "http://localhost:8080/hook" {
+		t.Errorf("agent mutated by rejected update: mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+
+	// A non-delivery update (last access) is never blocked by the invariant.
+	lastAccess := time.Now().UTC()
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		LastAccess: &lastAccess,
+	}); err != nil {
+		t.Fatalf("last access update failed: %v", err)
+	}
+
+	// Pull mode with a cleared target is fine (pull needs no target).
+	pullMode := "pull"
+	if err := storage.UpdateAgentFields(ctx, "agent1@localhost", agents.AgentFields{
+		DeliveryMode: &pullMode,
+		PushTarget:   &emptyTarget,
+	}); err != nil {
+		t.Fatalf("switch to pull and clear target: %v", err)
+	}
+	got, err = storage.GetAgent(ctx, "agent1@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode != "pull" || got.PushTarget != "" {
+		t.Errorf("expected pull mode with empty target, got mode=%q target=%q", got.DeliveryMode, got.PushTarget)
+	}
+}
+
+// TestMemoryStorage_UpdateAgentFields_ConcurrentInvariant verifies that two
+// concurrent field-level updates cannot jointly store push mode with an empty
+// push target. Both requests validate against the state committed by the
+// other (the store lock serializes the read-modify-write), so exactly one
+// fails and the final state stays valid.
+func TestMemoryStorage_UpdateAgentFields_ConcurrentInvariant(t *testing.T) {
+	storage := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	// Start from pull mode with a non-empty target.
+	agent := &agents.LocalAgent{
+		Address:      "race@localhost",
+		DeliveryMode: "pull",
+		PushTarget:   "http://localhost:8080/hook",
+		APIKey:       "hash-A",
+	}
+	if err := storage.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	emptyTarget := ""
+	deliveryMode := "push"
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		errs <- storage.UpdateAgentFields(ctx, "race@localhost", agents.AgentFields{PushTarget: &emptyTarget})
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		errs <- storage.UpdateAgentFields(ctx, "race@localhost", agents.AgentFields{DeliveryMode: &deliveryMode})
+	}()
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	okCount, errCount := 0, 0
+	for err := range errs {
+		if err == nil {
+			okCount++
+		} else {
+			errCount++
+			if !strings.Contains(err.Error(), "push target URL is required") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}
+	}
+	if okCount != 1 || errCount != 1 {
+		t.Fatalf("expected exactly one success and one failure, got %d success and %d failures", okCount, errCount)
+	}
+
+	got, err := storage.GetAgent(ctx, "race@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if got.DeliveryMode == "push" && got.PushTarget == "" {
+		t.Error("concurrent updates stored invalid state: push mode with empty push target")
+	}
+}
+
 func TestMemoryStorage_DeleteAgent(t *testing.T) {
 	storage := NewMemoryStorage(MemoryStorageConfig{})
 	ctx := context.Background()
@@ -1003,6 +1681,9 @@ func TestMemoryStorage_DeleteAgent_NotFound(t *testing.T) {
 
 	if err.Error() != "agent not found: non-existent-agent" {
 		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("Expected ErrAgentNotFound sentinel, got: %v", err)
 	}
 }
 

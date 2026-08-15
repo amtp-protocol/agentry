@@ -23,10 +23,11 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/amtp-protocol/agentry/internal/schema"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+
+	"github.com/amtp-protocol/agentry/internal/schema"
 )
 
 func TestDatabaseStorage_StoreSchema(t *testing.T) {

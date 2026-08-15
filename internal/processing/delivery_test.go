@@ -114,6 +114,15 @@ func (m *MockAgentRegistry) VerifyAPIKey(ctx context.Context, agentAddress, apiK
 	return exists && agent.APIKey == apiKey
 }
 
+func (m *MockAgentRegistry) AuthenticateAgent(ctx context.Context, apiKey string) (string, bool) {
+	for addr, agent := range m.agents {
+		if agent != nil && agent.APIKey == apiKey {
+			return addr, true
+		}
+	}
+	return "", false
+}
+
 func (m *MockAgentRegistry) UpdateLastAccess(ctx context.Context, agentAddress string) {
 	if agent, exists := m.agents[agentAddress]; exists {
 		agent.LastAccess = time.Now().UTC()
@@ -128,6 +137,37 @@ func (m *MockAgentRegistry) RotateAPIKey(ctx context.Context, agentAddress strin
 	newKey := "rotated-api-key"
 	agent.APIKey = newKey
 	return newKey, nil
+}
+
+func (m *MockAgentRegistry) UpdateAgent(ctx context.Context, agentNameOrAddress string, updates *agents.AgentUpdate) (*agents.LocalAgent, error) {
+	agent, exists := m.agents[agentNameOrAddress]
+	if !exists {
+		return nil, fmt.Errorf("agent not found: %s", agentNameOrAddress)
+	}
+	if updates.DeliveryMode != nil {
+		agent.DeliveryMode = *updates.DeliveryMode
+	}
+	if updates.PushTarget != nil {
+		agent.PushTarget = *updates.PushTarget
+	}
+	if updates.PushHeaders != nil {
+		agent.Headers = updates.PushHeaders
+	}
+	if updates.SupportedSchemas != nil {
+		agent.SupportedSchemas = updates.SupportedSchemas
+	}
+	agentCopy := *agent
+	agentCopy.APIKey = ""
+	return &agentCopy, nil
+}
+
+func (m *MockAgentRegistry) ResolveAgentAddress(nameOrAddress string) (string, error) {
+	for i := 0; i < len(nameOrAddress); i++ {
+		if nameOrAddress[i] == '@' {
+			return nameOrAddress, nil
+		}
+	}
+	return nameOrAddress + "@localhost", nil
 }
 
 func (m *MockAgentRegistry) StoreMessage(recipient string, message *types.Message) error {

@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/amtp-protocol/agentry/internal/types"
 	"gorm.io/datatypes"
+
+	"github.com/amtp-protocol/agentry/internal/types"
 )
 
 // Workflow represents the database model for workflow tracking
@@ -83,9 +84,9 @@ func (w *Workflow) toDomainModel() *types.Workflow {
 
 	// Deserialize original recipients
 	if len(w.OriginalRecipients) > 0 {
-		if err := json.Unmarshal(w.OriginalRecipients, &state.OriginalRecipients); err != nil {
-			// ignore unmarshal errors for backward compat
-		}
+		// Ignore unmarshal errors for backward compatibility: rows written
+		// by older versions may not round-trip into the current shape.
+		_ = json.Unmarshal(w.OriginalRecipients, &state.OriginalRecipients)
 	}
 
 	for _, p := range w.Participants {

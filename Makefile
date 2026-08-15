@@ -19,7 +19,7 @@ COVERAGE_DIR=coverage
 COVERAGE_PROFILE=$(COVERAGE_DIR)/coverage.out
 COVERAGE_HTML=$(COVERAGE_DIR)/coverage.html
 
-.PHONY: help build clean test test-coverage lint fmt vet deps docker docker-build docker-run dev run install
+.PHONY: help build clean test test-coverage lint fmt vet deps docker docker-build docker-run dev run install ut fvt
 
 # Default target
 help: ## Show this help message
@@ -81,6 +81,14 @@ install: ## Install the binary to GOPATH/bin
 test: ## Run tests
 	@echo "Running tests..."
 	@go test -v ./...
+
+ut: ## Run unit tests
+	@echo "Running unit tests..."
+	@go test ./...
+
+fvt: ## Run functional verification (integration) tests
+	@echo "Running functional verification tests..."
+	@go test -v ./tests
 
 test-short: ## Run short tests
 	@echo "Running short tests..."

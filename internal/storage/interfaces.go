@@ -19,6 +19,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/types"
@@ -34,6 +35,22 @@ var ErrVersionConflict = errors.New("version conflict: workflow was modified con
 // "this replica does not own the workflow" (benign) from other failures.
 var ErrWorkflowNotFound = errors.New("workflow not found")
 
+// ErrMessageNotFound is returned (wrapped with the message ID for context) by
+// GetMessage and GetStatus when the requested message or its status does not
+// exist. Callers use errors.Is to distinguish a genuine not-found (404) from
+// transient storage failures (5xx), which must not be flattened to 404 — a
+// sender polling status would otherwise conclude the message is lost and
+// re-send it, producing duplicate delivery.
+var ErrMessageNotFound = errors.New("message not found")
+
+// ErrAgentNotFound is returned (wrapped with the address for context) by
+// agent lookups and updates when the addressed agent does not exist. Callers
+// use errors.Is to distinguish a genuine not-found (404) from transient
+// storage failures (5xx), so an operator's retry script can tell "you asked
+// for an agent that does not exist" (do not retry) from "the gateway's DB is
+// down" (retry).
+var ErrAgentNotFound = errors.New("agent not found")
+
 // Storage defines the interface for message storage operations
 type Storage interface {
 	agents.AgentStore
@@ -43,10 +60,18 @@ type Storage interface {
 	GetMessage(ctx context.Context, messageID string) (*types.Message, error)
 	DeleteMessage(ctx context.Context, messageID string) error
 	ListMessages(ctx context.Context, filter MessageFilter) ([]*types.Message, error)
+	// CountMessages returns the number of messages matching the filter
+	// criteria without materializing the result set. Limit and Offset are
+	// ignored: the count always covers the full filtered set.
+	CountMessages(ctx context.Context, filter MessageFilter) (int64, error)
 
 	// Status operations
 	StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error
 	GetStatus(ctx context.Context, messageID string) (*types.MessageStatus, error)
+	// GetStatuses returns the delivery statuses for the given message IDs in
+	// one batch operation. IDs without a stored status are omitted from the
+	// result, keyed by message ID.
+	GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error)
 	UpdateStatus(ctx context.Context, messageID string, updater StatusUpdater) error
 	DeleteStatus(ctx context.Context, messageID string) error
 
@@ -77,9 +102,15 @@ type MessageFilter struct {
 	Sender     string
 	Recipients []string
 	Status     types.DeliveryStatus
-	Since      *int64 // Unix timestamp
-	Limit      int
-	Offset     int
+	// Since is an inclusive lower bound on the message timestamp: messages
+	// with Timestamp >= Since are returned. It is kept as a full-precision
+	// time.Time end to end so cursor-style polling with sub-second cursors
+	// (e.g. ?since=2026-08-09T12:00:00.999Z) does not re-receive messages
+	// stamped within the same second.
+	Since  *time.Time
+	Limit  int
+	Offset int
+	Or     bool
 }
 
 // StatusUpdater is a function that updates message status

@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/amtp-protocol/agentry/internal/types"
 )
 
 func TestMemoryStorage_Workflow(t *testing.T) {

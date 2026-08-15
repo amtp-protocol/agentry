@@ -85,7 +85,7 @@ func (ms *MemoryStorage) GetMessage(ctx context.Context, messageID string) (*typ
 
 	message, exists := ms.messages[messageID]
 	if !exists {
-		return nil, fmt.Errorf("message not found: %s", messageID)
+		return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 	}
 
 	return cloneMessage(message), nil
@@ -126,9 +126,9 @@ func (ms *MemoryStorage) ListMessages(ctx context.Context, filter MessageFilter)
 		}
 	}
 
-	// Order newest-first to mirror the database backend (ORDER BY created_at
-	// DESC) and to make pagination deterministic. Ties are broken by message
-	// ID so the ordering is total.
+	// Order newest-first to mirror the database backend (ORDER BY
+	// messages.timestamp DESC) and to make pagination deterministic. Ties
+	// are broken by message ID so the ordering is total.
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].Timestamp.Equal(matched[j].Timestamp) {
 			return matched[i].MessageID > matched[j].MessageID
@@ -150,6 +150,24 @@ func (ms *MemoryStorage) ListMessages(ctx context.Context, filter MessageFilter)
 	}
 
 	return matched, nil
+}
+
+// CountMessages returns the number of messages matching the filter criteria
+// without materializing the result set. Limit and Offset are ignored: the
+// count always covers the full filtered set.
+func (ms *MemoryStorage) CountMessages(ctx context.Context, filter MessageFilter) (int64, error) {
+	ms.messagesMux.RLock()
+	ms.statusesMux.RLock()
+	defer ms.messagesMux.RUnlock()
+	defer ms.statusesMux.RUnlock()
+
+	var count int64
+	for messageID, message := range ms.messages {
+		if ms.matchesFilter(message, messageID, filter) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // StoreStatus stores message status
@@ -179,10 +197,30 @@ func (ms *MemoryStorage) GetStatus(ctx context.Context, messageID string) (*type
 
 	status, exists := ms.statuses[messageID]
 	if !exists {
-		return nil, fmt.Errorf("message status not found: %s", messageID)
+		return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 	}
 
 	return cloneStatus(status), nil
+}
+
+// GetStatuses retrieves the message statuses for the given IDs in one batch
+// under a single lock. IDs without a stored status are omitted from the
+// result. Returned statuses are clones so callers cannot mutate the store.
+func (ms *MemoryStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	if len(messageIDs) == 0 {
+		return map[string]*types.MessageStatus{}, nil
+	}
+
+	ms.statusesMux.RLock()
+	defer ms.statusesMux.RUnlock()
+
+	result := make(map[string]*types.MessageStatus, len(messageIDs))
+	for _, messageID := range messageIDs {
+		if status, exists := ms.statuses[messageID]; exists {
+			result[messageID] = cloneStatus(status)
+		}
+	}
+	return result, nil
 }
 
 // UpdateStatus updates message status using the provided updater function
@@ -349,28 +387,40 @@ func (ms *MemoryStorage) GetStats(ctx context.Context) (StorageStats, error) {
 
 // matchesFilter checks if a message matches the given filter criteria
 func (ms *MemoryStorage) matchesFilter(message *types.Message, messageID string, filter MessageFilter) bool {
-	// Check sender filter
-	if filter.Sender != "" && message.Sender != filter.Sender {
-		return false
-	}
+	senderSpecified := filter.Sender != ""
+	senderMatches := message.Sender == filter.Sender
 
-	// Check recipients filter
-	if len(filter.Recipients) > 0 {
-		found := false
+	recipientsSpecified := len(filter.Recipients) > 0
+	recipientsMatch := false
+	if recipientsSpecified {
 		for _, filterRecipient := range filter.Recipients {
 			for _, messageRecipient := range message.Recipients {
 				if messageRecipient == filterRecipient {
-					found = true
+					recipientsMatch = true
 					break
 				}
 			}
-			if found {
+			if recipientsMatch {
 				break
 			}
 		}
-		if !found {
-			return false
+	}
+
+	var senderRecipientsMatch bool
+	if filter.Or {
+		// OR semantics: at least one specified side must match; with no
+		// sides specified the filter is unrestricted.
+		if !senderSpecified && !recipientsSpecified {
+			senderRecipientsMatch = true
+		} else {
+			senderRecipientsMatch = (senderSpecified && senderMatches) || (recipientsSpecified && recipientsMatch)
 		}
+	} else {
+		// AND semantics (default): unspecified sides are unrestricted.
+		senderRecipientsMatch = (!senderSpecified || senderMatches) && (!recipientsSpecified || recipientsMatch)
+	}
+	if !senderRecipientsMatch {
+		return false
 	}
 
 	// Check status filter
@@ -381,9 +431,12 @@ func (ms *MemoryStorage) matchesFilter(message *types.Message, messageID string,
 		}
 	}
 
-	// Check since filter
+	// Check since filter. The bound is inclusive and compared at full
+	// timestamp precision: messages stamped exactly at the cursor qualify,
+	// and messages earlier in the same second do not, so a cursor-style
+	// poller does not re-receive them on the next page.
 	if filter.Since != nil {
-		if message.Timestamp.Unix() < *filter.Since {
+		if message.Timestamp.Before(*filter.Since) {
 			return false
 		}
 	}
@@ -419,7 +472,7 @@ func (ms *MemoryStorage) GetAgent(ctx context.Context, agentAddress string) (*ag
 
 	agent, exists := ms.agents[agentAddress]
 	if !exists {
-		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 	}
 
 	return cloneAgent(agent), nil
@@ -434,11 +487,65 @@ func (ms *MemoryStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAge
 	defer ms.agentsMux.Unlock()
 
 	if _, exists := ms.agents[agent.Address]; !exists {
-		return fmt.Errorf("agent not found: %s", agent.Address)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agent.Address)
 	}
 
 	// Store a copy to prevent external modifications from affecting storage
 	ms.agents[agent.Address] = cloneAgent(agent)
+	return nil
+}
+
+// UpdateAgentFields updates only the specified fields of an existing local
+// agent. The API key hash and any other unmentioned fields are preserved, so
+// a concurrent key rotation cannot be clobbered by a full-record update.
+func (ms *MemoryStorage) UpdateAgentFields(ctx context.Context, agentAddress string, fields agents.AgentFields) error {
+	if agentAddress == "" {
+		return fmt.Errorf("agent address cannot be empty")
+	}
+	ms.agentsMux.Lock()
+	defer ms.agentsMux.Unlock()
+
+	agent, exists := ms.agents[agentAddress]
+	if !exists {
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
+	}
+
+	if fields.DeliveryMode != nil || fields.PushTarget != nil {
+		mergedMode := agent.DeliveryMode
+		if fields.DeliveryMode != nil {
+			mergedMode = *fields.DeliveryMode
+		}
+		mergedTarget := agent.PushTarget
+		if fields.PushTarget != nil {
+			mergedTarget = *fields.PushTarget
+		}
+		if err := agents.ValidateDeliveryConfig(mergedMode, mergedTarget); err != nil {
+			return err
+		}
+	}
+
+	if fields.DeliveryMode != nil {
+		agent.DeliveryMode = *fields.DeliveryMode
+	}
+	if fields.PushTarget != nil {
+		agent.PushTarget = *fields.PushTarget
+	}
+	if fields.PushHeaders != nil {
+		agent.Headers = make(map[string]string, len(fields.PushHeaders))
+		for k, v := range fields.PushHeaders {
+			agent.Headers[k] = v
+		}
+	}
+	if fields.SupportedSchemas != nil {
+		agent.SupportedSchemas = append([]string(nil), fields.SupportedSchemas...)
+		agent.RequiresSchema = len(fields.SupportedSchemas) > 0
+	}
+	if fields.LastAccess != nil {
+		agent.LastAccess = *fields.LastAccess
+	}
+	if fields.APIKey != nil {
+		agent.APIKey = *fields.APIKey
+	}
 	return nil
 }
 
@@ -452,7 +559,7 @@ func (ms *MemoryStorage) DeleteAgent(ctx context.Context, agentAddress string) e
 	defer ms.agentsMux.Unlock()
 
 	if _, exists := ms.agents[agentAddress]; !exists {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 	}
 
 	delete(ms.agents, agentAddress)

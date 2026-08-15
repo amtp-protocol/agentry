@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -1024,7 +1025,7 @@ key4`
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := validateAdminKey(tt.key, adminKeysFile)
+			result := ValidateAdminKey(tt.key, adminKeysFile)
 			if result != tt.expected {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
@@ -1033,9 +1034,168 @@ key4`
 
 	// Test with non-existent file
 	t.Run("non-existent file", func(t *testing.T) {
-		result := validateAdminKey("any-key", "/non/existent/file")
+		result := ValidateAdminKey("any-key", "/non/existent/file")
 		if result {
-			t.Error("Expected validateAdminKey to return false for non-existent file")
+			t.Error("Expected ValidateAdminKey to return false for non-existent file")
 		}
 	})
+}
+
+// writeAdminKeysFile writes the given content to a fresh temp file and
+// returns its path.
+func writeAdminKeysFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "admin.keys")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write admin keys file: %v", err)
+	}
+	return path
+}
+
+// TestAdminKeyValidator_Basic verifies that a fresh validator loads the key
+// file on first use and accepts only keys present in it, skipping comments
+// and empty lines.
+func TestAdminKeyValidator_Basic(t *testing.T) {
+	path := writeAdminKeysFile(t, "# comment\nkey1\n\nkey2\n")
+	v := NewAdminKeyValidator(path)
+
+	tests := []struct {
+		key      string
+		expected bool
+	}{
+		{"key1", true},
+		{"key2", true},
+		{"key3", false},
+		{"", false},
+		{"# comment", false},
+		{"Key1", false}, // case sensitive
+	}
+	for _, tt := range tests {
+		if got := v.Validate(tt.key); got != tt.expected {
+			t.Errorf("Validate(%q) = %v, want %v", tt.key, got, tt.expected)
+		}
+	}
+}
+
+// TestAdminKeyValidator_MissingFile verifies that a validator backed by an
+// unreadable or missing file rejects every key.
+func TestAdminKeyValidator_MissingFile(t *testing.T) {
+	v := NewAdminKeyValidator(filepath.Join(t.TempDir(), "does-not-exist"))
+	if v.Validate("any-key") {
+		t.Error("expected false for missing key file")
+	}
+}
+
+// TestAdminKeyValidator_CachesUnchangedFile verifies that once a file is
+// parsed, a validator does not re-read it while the mtime and size are
+// unchanged — even if the content is swapped underneath it. This is what
+// keeps the request path off the filesystem once the file is cached.
+func TestAdminKeyValidator_CachesUnchangedFile(t *testing.T) {
+	path := writeAdminKeysFile(t, "key1")
+	v := NewAdminKeyValidator(path)
+
+	if !v.Validate("key1") {
+		t.Fatal("expected key1 to validate after initial load")
+	}
+
+	// Swap the content but preserve both size and mtime so the cache
+	// considers the file unchanged. The cached key set must keep winning.
+	orig, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat key file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("key2"), 0o600); err != nil {
+		t.Fatalf("rewrite key file: %v", err)
+	}
+	if err := os.Chtimes(path, orig.ModTime(), orig.ModTime()); err != nil {
+		t.Fatalf("reset mtime: %v", err)
+	}
+
+	if !v.Validate("key1") {
+		t.Error("expected cached key1 to stay valid while mtime and size are unchanged")
+	}
+	if v.Validate("key2") {
+		t.Error("expected key2 to stay invalid while the file is cached")
+	}
+}
+
+// TestAdminKeyValidator_ReloadsOnMtimeChange verifies that editing the key
+// file (a new mtime) invalidates the cache and the new keys take effect.
+func TestAdminKeyValidator_ReloadsOnMtimeChange(t *testing.T) {
+	path := writeAdminKeysFile(t, "old-key")
+	v := NewAdminKeyValidator(path)
+
+	if !v.Validate("old-key") {
+		t.Fatal("expected old-key to validate")
+	}
+	if v.Validate("new-key") {
+		t.Fatal("expected new-key to be rejected before the file changes")
+	}
+
+	// Rewrite with a distinctly newer mtime so the change is observable even
+	// on coarse-granularity filesystems.
+	if err := os.WriteFile(path, []byte("new-key"), 0o600); err != nil {
+		t.Fatalf("rewrite key file: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("bump mtime: %v", err)
+	}
+
+	if v.Validate("old-key") {
+		t.Error("expected old-key to be rejected after the file changed")
+	}
+	if !v.Validate("new-key") {
+		t.Error("expected new-key to validate after the file changed")
+	}
+}
+
+// TestAdminKeyValidator_ReloadsOnSizeChange verifies that a size change with
+// an unchanged mtime still triggers a reload (covers editors that rewrite
+// the file with the same mtime).
+func TestAdminKeyValidator_ReloadsOnSizeChange(t *testing.T) {
+	path := writeAdminKeysFile(t, "key1")
+	v := NewAdminKeyValidator(path)
+
+	if !v.Validate("key1") {
+		t.Fatal("expected key1 to validate")
+	}
+
+	// Replace with a key of a different length and pin the mtime back to the
+	// original so only the size differs.
+	orig, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat key file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("key1-longer"), 0o600); err != nil {
+		t.Fatalf("rewrite key file: %v", err)
+	}
+	if err := os.Chtimes(path, orig.ModTime(), orig.ModTime()); err != nil {
+		t.Fatalf("reset mtime: %v", err)
+	}
+
+	if v.Validate("key1") {
+		t.Error("expected old key to be rejected after the file size changed")
+	}
+	if !v.Validate("key1-longer") {
+		t.Error("expected new key to validate after the file size changed")
+	}
+}
+
+// TestAdminKeyValidator_RemovedFile verifies that removing the key file
+// invalidates the cache: the validator stops accepting keys instead of
+// serving the stale set forever.
+func TestAdminKeyValidator_RemovedFile(t *testing.T) {
+	path := writeAdminKeysFile(t, "key1")
+	v := NewAdminKeyValidator(path)
+
+	if !v.Validate("key1") {
+		t.Fatal("expected key1 to validate")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove key file: %v", err)
+	}
+	if v.Validate("key1") {
+		t.Error("expected validation to fail once the key file is removed")
+	}
 }

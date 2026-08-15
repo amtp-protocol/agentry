@@ -23,6 +23,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,7 +38,28 @@ import (
 // Integration tests for the AMTP Gateway
 // These tests verify the complete flow from HTTP request to response
 
-func createTestConfig() *config.Config {
+// adminKeyValue is the shared admin key used by the integration tests.
+const adminKeyValue = "integration-admin-key"
+
+// testConfigTB is the subset of testing.TB used by createTestConfig, so the
+// helper works for both tests and benchmarks.
+type testConfigTB interface {
+	Helper()
+	TempDir() string
+	Fatalf(format string, args ...interface{})
+}
+
+// createTestConfig returns a test configuration with a dynamically generated
+// admin key file so the tests work without committing a key to the repo
+// (agentry's .gitignore excludes *.key).
+func createTestConfig(t testConfigTB) *config.Config {
+	t.Helper()
+
+	keyFile := filepath.Join(t.TempDir(), "admin.key")
+	if err := os.WriteFile(keyFile, []byte(adminKeyValue), 0o600); err != nil {
+		t.Fatalf("write admin key file: %v", err)
+	}
+
 	return &config.Config{
 		Server: config.ServerConfig{
 			Address:      ":8080",
@@ -63,9 +88,14 @@ func createTestConfig() *config.Config {
 			ValidationEnabled: true,
 		},
 		Auth: config.AuthConfig{
-			RequireAuth:  false,
-			Methods:      []string{"domain"},
-			APIKeyHeader: "X-API-Key",
+			RequireAuth:       false,
+			Methods:           []string{"domain"},
+			APIKeyHeader:      "X-API-Key",
+			AdminAPIKeyHeader: "X-Admin-Key",
+			// Admin key file used by the message lifecycle test to register
+			// an agent and authenticate message queries.
+			AdminKeyFile: keyFile,
+			APIKeySalt:   "integration-test-salt",
 		},
 		Logging: config.LoggingConfig{
 			Level:  "info",
@@ -75,7 +105,7 @@ func createTestConfig() *config.Config {
 }
 
 func createTestServer(t *testing.T) *httptest.Server {
-	cfg := createTestConfig()
+	cfg := createTestConfig(t)
 
 	srv, err := server.New(cfg)
 	if err != nil {
@@ -99,13 +129,320 @@ func createMockAMTPServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func TestIntegration_MessageLifecycle(t *testing.T) {
-	// Create mock AMTP server for deliveries
+// registerLocalAgentWithAddress registers a local agent with the given
+// address via the admin API and returns its plaintext API key for
+// authenticating message queries.
+func registerLocalAgentWithAddress(t *testing.T, baseURL, address string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"address": address, "delivery_mode": "pull"})
+	if err != nil {
+		t.Fatalf("marshal register request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/admin/agents", bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatalf("build register request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("register agent status %d: %s", resp.StatusCode, string(rb))
+	}
+
+	var out struct {
+		Agent struct {
+			APIKey string `json:"api_key"`
+		} `json:"agent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode register response: %v", err)
+	}
+	if out.Agent.APIKey == "" {
+		t.Fatal("agent API key is empty")
+	}
+	return out.Agent.APIKey
+}
+
+// registerLocalAgent registers a local agent named "test" via the admin API
+// and returns its plaintext API key for authenticating message queries.
+func registerLocalAgent(t *testing.T, baseURL string) string {
+	t.Helper()
+	return registerLocalAgentWithAddress(t, baseURL, "test")
+}
+
+// sendTestMessage posts a message via the send endpoint and returns the
+// assigned message ID. An explicit timestamp makes the newest-first ordering
+// of the message store deterministic for pagination assertions.
+func sendTestMessage(t *testing.T, baseURL, sender, recipient, subject, timestamp string) string {
+	t.Helper()
+	sendRequest := types.SendMessageRequest{
+		Sender:     sender,
+		Recipients: []string{recipient},
+		Subject:    subject,
+		Timestamp:  timestamp,
+		Payload:    json.RawMessage(`{"hello":"world"}`),
+	}
+	body, err := json.Marshal(sendRequest)
+	if err != nil {
+		t.Fatalf("marshal send request: %v", err)
+	}
+	resp, err := http.Post(baseURL+"/v1/messages", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("send message status %d: %s", resp.StatusCode, string(rb))
+	}
+
+	var sendResponse types.SendMessageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sendResponse); err != nil {
+		t.Fatalf("decode send response: %v", err)
+	}
+	if sendResponse.MessageID == "" {
+		t.Fatal("send response has empty message ID")
+	}
+	return sendResponse.MessageID
+}
+
+// listMessageItem is the per-message shape returned by GET /v1/messages.
+type listMessageItem struct {
+	MessageID string `json:"message_id"`
+	Timestamp string `json:"timestamp"`
+}
+
+// listMessagesResponse is the envelope returned by GET /v1/messages.
+type listMessagesResponse struct {
+	Messages []listMessageItem `json:"messages"`
+	Total    int               `json:"total"`
+	Limit    int               `json:"limit"`
+	Offset   int               `json:"offset"`
+}
+
+// listMessages queries GET /v1/messages as the given agent and returns the
+// parsed response.
+func listMessages(t *testing.T, baseURL, apiKey string, limit, offset int) listMessagesResponse {
+	t.Helper()
+	url := fmt.Sprintf("%s/v1/messages?limit=%d&offset=%d", baseURL, limit, offset)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("list messages status %d: %s", resp.StatusCode, string(rb))
+	}
+
+	var out listMessagesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	return out
+}
+
+// TestIntegration_ListMessagesPagination is a functional verification test
+// for the merged "all traffic" message query (GET /v1/messages without a
+// sender/recipient filter). It seeds a mix of messages the listing agent
+// sent and messages it received, then pages through the result and verifies:
+//   - each page holds at most `limit` messages,
+//   - consecutive pages neither overlap nor drop messages,
+//   - the merged list is sorted newest-first, and
+//   - total reflects the full filtered set.
+func TestIntegration_ListMessagesPagination(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	// Listing agent plus a peer so the agent has both sent and received
+	// traffic.
+	agentKey := registerLocalAgent(t, testServer.URL)
+	registerLocalAgentWithAddress(t, testServer.URL, "peer")
+
+	// Seed messages with strictly decreasing timestamps so the expected
+	// newest-first order is deterministic. Even indices are sent by the
+	// listing agent, odd indices are received by it (sent by the peer);
+	// interleaving both directions exposes any sent-then-received merge
+	// ordering bug.
+	const total = 8
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	newestFirst := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		ts := base.Add(time.Duration(total-1-i) * time.Minute).Format(time.RFC3339)
+		sender, recipient := "test@localhost", "peer@localhost"
+		if i%2 == 1 {
+			sender, recipient = "peer@localhost", "test@localhost"
+		}
+		msgID := sendTestMessage(t, testServer.URL, sender, recipient,
+			fmt.Sprintf("pagination-%d", i), ts)
+		newestFirst = append(newestFirst, msgID)
+	}
+
+	// Page through the full set with limit=3 and verify stability across
+	// offsets.
+	const limit = 3
+	seen := make(map[string]bool)
+	var all []string
+	for offset := 0; offset < total; offset += limit {
+		resp := listMessages(t, testServer.URL, agentKey, limit, offset)
+
+		if resp.Total != total {
+			t.Errorf("offset=%d: expected total %d, got %d", offset, total, resp.Total)
+		}
+		if resp.Offset != offset {
+			t.Errorf("offset=%d: expected echoed offset %d", offset, resp.Offset)
+		}
+		if resp.Limit != limit {
+			t.Errorf("offset=%d: expected echoed limit %d", offset, resp.Limit)
+		}
+		if len(resp.Messages) > limit {
+			t.Errorf("offset=%d: expected at most %d messages, got %d",
+				offset, limit, len(resp.Messages))
+		}
+
+		// Each page must be ordered newest-first.
+		for j := 1; j < len(resp.Messages); j++ {
+			prev, err := time.Parse(time.RFC3339, resp.Messages[j-1].Timestamp)
+			if err != nil {
+				t.Fatalf("parse previous timestamp %q: %v", resp.Messages[j-1].Timestamp, err)
+			}
+			cur, err := time.Parse(time.RFC3339, resp.Messages[j].Timestamp)
+			if err != nil {
+				t.Fatalf("parse current timestamp %q: %v", resp.Messages[j].Timestamp, err)
+			}
+			if !prev.After(cur) {
+				t.Errorf("offset=%d: messages not newest-first: %s (%s) before %s (%s)",
+					offset, resp.Messages[j-1].MessageID, prev, resp.Messages[j].MessageID, cur)
+			}
+		}
+
+		for _, m := range resp.Messages {
+			if seen[m.MessageID] {
+				t.Errorf("offset=%d: duplicate message %s across pages", offset, m.MessageID)
+			}
+			seen[m.MessageID] = true
+			all = append(all, m.MessageID)
+		}
+	}
+
+	// The union of all pages must cover every seeded message exactly once,
+	// in newest-first order.
+	if len(all) != total {
+		t.Errorf("expected %d messages across pages, got %d", total, len(all))
+	}
+	for i, id := range newestFirst {
+		if i < len(all) && all[i] != id {
+			t.Errorf("position %d: expected %s, got %s (merged list must be newest-first)",
+				i, id, all[i])
+		}
+	}
+
+	// An unpaginated listing returns everything, newest-first.
+	resp := listMessages(t, testServer.URL, agentKey, 100, 0)
+	if resp.Total != total {
+		t.Errorf("expected total %d, got %d", total, resp.Total)
+	}
+	if len(resp.Messages) != total {
+		t.Errorf("expected %d messages, got %d", total, len(resp.Messages))
+	}
+	for i, id := range newestFirst {
+		if i < len(resp.Messages) && resp.Messages[i].MessageID != id {
+			t.Errorf("unpaginated position %d: expected %s, got %s",
+				i, id, resp.Messages[i].MessageID)
+		}
+	}
+}
+
+// TestIntegration_ListMessagesInvalidStatus is a functional verification
+// test for status query parameter validation on GET /v1/messages. An
+// unvalidated status flows into the storage filter where, on the database
+// backend, it is compared against the Postgres delivery_status enum column
+// and a bogus value raises a 22P02 enum-cast error (500 MESSAGE_LIST_FAILED);
+// the memory backend would silently return an empty list. The handler must
+// reject unknown values with 400 INVALID_STATUS instead, so behavior is
+// identical across backends, and must keep accepting every known status.
+func TestIntegration_ListMessagesInvalidStatus(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	agentKey := registerLocalAgent(t, testServer.URL)
+
+	// An unknown status must be rejected with 400 before it reaches storage.
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages?status=bogus", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages with invalid status: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("invalid status: expected status %d, got %d: %s",
+			http.StatusBadRequest, resp.StatusCode, string(rb))
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "INVALID_STATUS" {
+		t.Errorf("expected error code INVALID_STATUS, got %s", errorResponse.Error.Code)
+	}
+
+	// Every known delivery status must remain accepted.
+	for _, status := range []string{"pending", "queued", "delivering", "delivered", "failed", "retrying"} {
+		req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages?status="+status, nil)
+		if err != nil {
+			t.Fatalf("build list request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+agentKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("list messages with status %s: %v", status, err)
+		}
+		rb, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("valid status %q: expected status %d, got %d: %s",
+				status, http.StatusOK, resp.StatusCode, string(rb))
+		}
+	}
+}
+
+// TestIntegration_AdminCanInspectUnregisteredSenderMessage is a functional
+// verification test for the admin key fallback on message query endpoints.
+// POST /v1/messages is public and accepts any sender, so a message submitted
+// by an unregistered sender (or routed in from a foreign domain) has no
+// registered agent key that matches sender or recipient. Without the admin
+// fallback such messages are permanently unreadable: unauthenticated polling
+// returns 401 and any registered agent key returns 404. The admin key must be
+// able to fetch the message, its status, and list it, so operators can
+// inspect traffic that no agent key can reach.
+func TestIntegration_AdminCanInspectUnregisteredSenderMessage(t *testing.T) {
+	// Route foreign-domain deliveries to a mock AMTP gateway so the send
+	// succeeds and the message is persisted with a status.
 	mockAMTPServer := createMockAMTPServer(t)
 	defer mockAMTPServer.Close()
 
-	// Update DNS mock records to point to the mock server
-	cfg := createTestConfig()
+	cfg := createTestConfig(t)
 	cfg.DNS.MockRecords = map[string]string{
 		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
 		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
@@ -118,9 +455,152 @@ func TestIntegration_MessageLifecycle(t *testing.T) {
 	testServer := httptest.NewServer(srv.GetRouter())
 	defer testServer.Close()
 
+	// A registered agent whose key must NOT grant access to the foreign
+	// message below (neither sender nor recipient matches it).
+	agentKey := registerLocalAgent(t, testServer.URL)
+
+	// Submit a message from an unregistered sender to an unregistered
+	// recipient in a foreign domain.
+	msgID := sendTestMessage(t, testServer.URL,
+		"unregistered@example.com", "remote-peer@example.com",
+		"admin-inspect", time.Now().UTC().Format(time.RFC3339))
+
+	// 1. Unauthenticated polling is rejected.
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("status request: %v", err)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("no auth: expected status %d, got %d: %s", http.StatusUnauthorized, resp.StatusCode, string(rb))
+	}
+
+	// 2. A registered agent key does not grant access (neither sender nor
+	// recipient is the registered agent).
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("status request: %v", err)
+	}
+	rb, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("agent key: expected status %d, got %d: %s", http.StatusNotFound, resp.StatusCode, string(rb))
+	}
+
+	// 3. The admin key can fetch the message.
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID, nil)
+	if err != nil {
+		t.Fatalf("build get request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get message: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("admin get: expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+	var got types.Message
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if got.MessageID != msgID {
+		t.Errorf("admin get: expected message %s, got %s", msgID, got.MessageID)
+	}
+	if got.Sender != "unregistered@example.com" {
+		t.Errorf("admin get: expected sender unregistered@example.com, got %s", got.Sender)
+	}
+
+	// 4. The admin key can fetch the status.
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+msgID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("status request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("admin status: expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+	var status types.MessageStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if status.MessageID != msgID {
+		t.Errorf("admin status: expected message %s, got %s", msgID, status.MessageID)
+	}
+
+	// 5. The admin key can list messages, including one whose participants
+	// are both foreign, and filter by the foreign sender address.
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages?sender=unregistered@example.com", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("admin list: expected status %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+	var listing listMessagesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	found := false
+	for _, m := range listing.Messages {
+		if m.MessageID == msgID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("admin list: expected message %s in filtered list of %d, got %v",
+			msgID, listing.Total, listing.Messages)
+	}
+}
+
+func TestIntegration_MessageLifecycle(t *testing.T) {
+	// Create mock AMTP server for deliveries
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	// Update DNS mock records to point to the mock server
+	cfg := createTestConfig(t)
+	cfg.DNS.MockRecords = map[string]string{
+		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
+	defer testServer.Close()
+
+	// Register a local agent so message queries can authenticate.
+	agentKey := registerLocalAgent(t, testServer.URL)
+
 	// Test 1: Send a message
 	sendRequest := types.SendMessageRequest{
-		Sender:     "test@example.com",
+		Sender:     "test@localhost",
 		Recipients: []string{"recipient@test.com"},
 		Subject:    "Integration Test Message",
 		Payload:    json.RawMessage(`{"message": "Hello from integration test!"}`),
@@ -164,7 +644,12 @@ func TestIntegration_MessageLifecycle(t *testing.T) {
 	messageID := sendResponse.MessageID
 
 	// Test 2: Retrieve the message
-	getResp, err := http.Get(testServer.URL + "/v1/messages/" + messageID)
+	getReq, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+messageID, nil)
+	if err != nil {
+		t.Fatalf("build get request: %v", err)
+	}
+	getReq.Header.Set("Authorization", "Bearer "+agentKey)
+	getResp, err := http.DefaultClient.Do(getReq)
 	if err != nil {
 		t.Fatalf("Failed to get message: %v", err)
 	}
@@ -193,7 +678,12 @@ func TestIntegration_MessageLifecycle(t *testing.T) {
 	}
 
 	// Test 3: Get message status
-	statusResp, err := http.Get(testServer.URL + "/v1/messages/" + messageID + "/status")
+	statusReq, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages/"+messageID+"/status", nil)
+	if err != nil {
+		t.Fatalf("build status request: %v", err)
+	}
+	statusReq.Header.Set("Authorization", "Bearer "+agentKey)
+	statusResp, err := http.DefaultClient.Do(statusReq)
 	if err != nil {
 		t.Fatalf("Failed to get message status: %v", err)
 	}
@@ -228,7 +718,7 @@ func TestIntegration_MultipleRecipients(t *testing.T) {
 	defer mockAMTPServer.Close()
 
 	// Update DNS mock records to point to the mock server
-	cfg := createTestConfig()
+	cfg := createTestConfig(t)
 	cfg.DNS.MockRecords = map[string]string{
 		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
 		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
@@ -302,7 +792,7 @@ func TestIntegration_CoordinationTypes(t *testing.T) {
 	defer mockAMTPServer.Close()
 
 	// Update DNS mock records to point to the mock server
-	cfg := createTestConfig()
+	cfg := createTestConfig(t)
 	cfg.DNS.MockRecords = map[string]string{
 		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
 		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
@@ -571,9 +1061,463 @@ func TestIntegration_AgentDiscoveryEndpoint(t *testing.T) {
 	}
 }
 
+// patchAgent sends an admin-authenticated PATCH to /v1/admin/agents/:name and
+// returns the HTTP status and response body.
+func patchAgent(t *testing.T, baseURL, name string, body interface{}) (int, []byte) {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal patch body: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPatch, baseURL+"/v1/admin/agents/"+name, bytes.NewBuffer(payload))
+	if err != nil {
+		t.Fatalf("build patch request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("patch agent: %v", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, rb
+}
+
+// TestIntegration_UpdateAgentPushInvariant is a functional verification test
+// for the push-mode delivery invariant (push mode requires a non-empty push
+// target). The invariant must hold for the combined state, not just the
+// pre-update record: two concurrent PATCHes — one clearing push_target, the
+// other switching to push mode — must not jointly store the invalid
+// combination. Each request validates against the state committed by the
+// other, so exactly one succeeds and the final state stays valid.
+func TestIntegration_UpdateAgentPushInvariant(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	baseURL := testServer.URL
+
+	// 1. Push mode without a target is rejected.
+	registerLocalAgentWithAddress(t, baseURL, "push-rigid")
+	status, body := patchAgent(t, baseURL, "push-rigid", map[string]string{"delivery_mode": "push"})
+	if status != http.StatusBadRequest {
+		t.Fatalf("push without target: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(body, &errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("push without target: expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+
+	// 2. Push mode with a target succeeds.
+	status, body = patchAgent(t, baseURL, "push-rigid", map[string]string{
+		"delivery_mode": "push",
+		"push_target":   "https://hooks.example.com/push-rigid",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("push with target: expected status %d, got %d: %s", http.StatusOK, status, string(body))
+	}
+
+	// 3. Clearing the target while in push mode is rejected, and the stored
+	// record stays unchanged.
+	status, body = patchAgent(t, baseURL, "push-rigid", map[string]string{"push_target": ""})
+	if status != http.StatusBadRequest {
+		t.Fatalf("clear target in push mode: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	}
+
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/admin/agents", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	defer resp.Body.Close()
+	var listing struct {
+		Agents map[string]struct {
+			DeliveryMode string `json:"delivery_mode"`
+			PushTarget   string `json:"push_target"`
+		} `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	stored, ok := listing.Agents["push-rigid@localhost"]
+	if !ok {
+		t.Fatalf("expected agent push-rigid@localhost in listing, got %v", listing.Agents)
+	}
+	if stored.DeliveryMode != "push" || stored.PushTarget != "https://hooks.example.com/push-rigid" {
+		t.Errorf("agent mutated by rejected update: got mode=%q target=%q", stored.DeliveryMode, stored.PushTarget)
+	}
+
+	// 4. Two concurrent PATCHes cannot jointly store push mode with an empty
+	// target. Starting state: pull mode with a non-empty target. The pair is
+	// repeated on several agents so a regression that allows the invalid
+	// combination is reliably caught regardless of goroutine scheduling.
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("race-agent-%d", i)
+		registerLocalAgentWithAddress(t, baseURL, name)
+		status, body = patchAgent(t, baseURL, name, map[string]string{
+			"delivery_mode": "push",
+			"push_target":   "https://hooks.example.com/" + name,
+		})
+		if status != http.StatusOK {
+			t.Fatalf("seed %s: expected status %d, got %d: %s", name, http.StatusOK, status, string(body))
+		}
+		status, body = patchAgent(t, baseURL, name, map[string]string{"delivery_mode": "pull"})
+		if status != http.StatusOK {
+			t.Fatalf("switch %s to pull: expected status %d, got %d: %s", name, http.StatusOK, status, string(body))
+		}
+
+		// Fire both PATCHes at once: one clears the target, the other switches
+		// back to push. Each validates against the state committed by the
+		// other, so exactly one must fail and the final state must stay valid.
+		start := make(chan struct{})
+		results := make(chan int, 2)
+		var wg sync.WaitGroup
+		for _, payload := range []map[string]string{{"push_target": ""}, {"delivery_mode": "push"}} {
+			wg.Add(1)
+			go func(p map[string]string) {
+				defer wg.Done()
+				<-start
+				status, _ := patchAgent(t, baseURL, name, p)
+				results <- status
+			}(payload)
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		okCount, badCount := 0, 0
+		for s := range results {
+			switch s {
+			case http.StatusOK:
+				okCount++
+			case http.StatusBadRequest:
+				badCount++
+			}
+		}
+		if okCount != 1 || badCount != 1 {
+			t.Fatalf("%s: concurrent updates: expected exactly one 200 and one 400, got %d 200 and %d 400",
+				name, okCount, badCount)
+		}
+
+		req, err = http.NewRequest(http.MethodGet, baseURL+"/v1/admin/agents", nil)
+		if err != nil {
+			t.Fatalf("build list request: %v", err)
+		}
+		req.Header.Set("X-Admin-Key", adminKeyValue)
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("list agents: %v", err)
+		}
+		rb, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		listing = struct {
+			Agents map[string]struct {
+				DeliveryMode string `json:"delivery_mode"`
+				PushTarget   string `json:"push_target"`
+			} `json:"agents"`
+		}{}
+		if err := json.Unmarshal(rb, &listing); err != nil {
+			t.Fatalf("decode list response: %v", err)
+		}
+		final, ok := listing.Agents[name+"@localhost"]
+		if !ok {
+			t.Fatalf("expected agent %s@localhost in listing, got %v", name, listing.Agents)
+		}
+		if final.DeliveryMode == "push" && final.PushTarget == "" {
+			t.Errorf("%s: concurrent updates stored invalid state: push mode with empty push target", name)
+		}
+	}
+}
+
+// listMessagesQuery queries GET /v1/messages with an explicit query string
+// (without the leading "?") as the given agent and returns the parsed
+// response. The caller supplies limit/offset in the query if needed.
+func listMessagesQuery(t *testing.T, baseURL, apiKey, query string) listMessagesResponse {
+	t.Helper()
+	url := baseURL + "/v1/messages"
+	if query != "" {
+		url += "?" + query
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("list messages status %d: %s", resp.StatusCode, string(rb))
+	}
+
+	var out listMessagesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	return out
+}
+
+// TestIntegration_ListMessagesCounterpartFilters is a functional verification
+// test for counterpart conversation filters on GET /v1/messages. An agent
+// must be able to filter its own traffic by the other side of a conversation:
+// "?recipient=bob@remote.com" lists messages the agent sent to bob and
+// "?sender=bob@remote.com" lists messages bob sent to the agent, instead of
+// 403 ACCESS_DENIED for any filter value other than the agent itself. The
+// result set must contain exactly the messages of that conversation and
+// nothing the agent is not a participant in.
+func TestIntegration_ListMessagesCounterpartFilters(t *testing.T) {
+	// Route foreign-domain deliveries to a mock AMTP gateway so sends to
+	// foreign recipients succeed and the messages are persisted.
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	cfg := createTestConfig(t)
+	cfg.DNS.MockRecords = map[string]string{
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
+	defer testServer.Close()
+
+	// The listing agent plus a local counterpart; foreign counterparts are
+	// resolved via the mock gateway.
+	agentKey := registerLocalAgent(t, testServer.URL)
+	registerLocalAgentWithAddress(t, testServer.URL, "peer")
+
+	// Seed one message per conversation direction. Keep a map from message ID
+	// to subject so the returned listing can be attributed.
+	now := time.Now().UTC()
+	seed := []struct {
+		sender, recipient, subject string
+	}{
+		{"test@localhost", "peer@localhost", "alice-to-peer"},
+		{"peer@localhost", "test@localhost", "peer-to-alice"},
+		{"test@localhost", "bob@example.com", "alice-to-bob"},
+		{"bob@example.com", "test@localhost", "bob-to-alice"},
+	}
+	subjectByID := make(map[string]string, len(seed))
+	for _, m := range seed {
+		msgID := sendTestMessage(t, testServer.URL, m.sender, m.recipient, m.subject,
+			now.Add(time.Duration(-len(subjectByID))*time.Minute).Format(time.RFC3339))
+		subjectByID[msgID] = m.subject
+	}
+
+	// subjectSetOf returns the subjects of the listed messages, failing the
+	// test if a listed message ID is unknown.
+	subjectSetOf := func(resp listMessagesResponse) map[string]bool {
+		set := make(map[string]bool, len(resp.Messages))
+		for _, m := range resp.Messages {
+			subject, ok := subjectByID[m.MessageID]
+			if !ok {
+				t.Errorf("listed unknown message %s", m.MessageID)
+				continue
+			}
+			set[subject] = true
+		}
+		return set
+	}
+	want := func(subjects ...string) map[string]bool {
+		set := make(map[string]bool, len(subjects))
+		for _, s := range subjects {
+			set[s] = true
+		}
+		return set
+	}
+
+	// Single-sided counterpart filters pin the agent as the other side.
+	tests := []struct {
+		name  string
+		query string
+		want  map[string]bool
+	}{
+		{"recipient local counterpart", "recipient=peer@localhost", want("alice-to-peer")},
+		{"sender local counterpart", "sender=peer@localhost", want("peer-to-alice")},
+		{"recipient foreign counterpart", "recipient=bob@example.com", want("alice-to-bob")},
+		{"sender foreign counterpart", "sender=bob@example.com", want("bob-to-alice")},
+		// Explicit conversation: the agent pinned as one side.
+		{"explicit sent to counterpart", "sender=test@localhost&recipient=bob@example.com", want("alice-to-bob")},
+		{"explicit received from counterpart", "sender=bob@example.com&recipient=test@localhost", want("bob-to-alice")},
+		// Bare-name counterpart normalizes to the full local address.
+		{"bare recipient counterpart", "recipient=peer", want("alice-to-peer")},
+		// Sender-only with the agent itself still lists everything sent.
+		{"sender self", "sender=test@localhost", want("alice-to-peer", "alice-to-bob")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := listMessagesQuery(t, testServer.URL, agentKey, tt.query)
+			got := subjectSetOf(resp)
+			if resp.Total != len(tt.want) {
+				t.Errorf("expected total %d, got %d (subjects %v)", len(tt.want), resp.Total, got)
+			}
+			for s := range tt.want {
+				if !got[s] {
+					t.Errorf("expected %q in result, got %v", s, got)
+				}
+			}
+			for s := range got {
+				if !tt.want[s] {
+					t.Errorf("unexpected %q in result", s)
+				}
+			}
+		})
+	}
+
+	// A conversation where neither side is the authenticated agent stays
+	// rejected: the caller cannot inspect traffic it is not a participant in.
+	req, err := http.NewRequest(http.MethodGet,
+		testServer.URL+"/v1/messages?sender=bob@example.com&recipient=carol@example.com", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Errorf("neither-side conversation: expected status %d, got %d: %s",
+			http.StatusForbidden, resp.StatusCode, string(rb))
+	}
+}
+
+// TestIntegration_ListMessagesInvalidFilter is a functional verification
+// test for sender/recipient filter error mapping on GET /v1/messages. A
+// filter that cannot be resolved to a valid agent name is a malformed
+// parameter and must be rejected with 400 INVALID_SENDER / INVALID_RECIPIENT
+// — not 403 ACCESS_DENIED, which would make an operator with a valid key hunt
+// for a credentials problem. A correctly spelled local address in the wrong
+// case (domain labels are case-insensitive) must resolve like its lowercase
+// form, and a conversation where neither side is the authenticated agent
+// stays a genuine authorization failure (403).
+func TestIntegration_ListMessagesInvalidFilter(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	agentKey := registerLocalAgent(t, testServer.URL)
+
+	statusAndCode := func(query string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages"+query, nil)
+		if err != nil {
+			t.Fatalf("build list request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+agentKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("list messages: %v", err)
+		}
+		defer resp.Body.Close()
+		rb, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden {
+			var errorResponse types.ErrorResponse
+			if err := json.Unmarshal(rb, &errorResponse); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			return resp.StatusCode, errorResponse.Error.Code
+		}
+		return resp.StatusCode, ""
+	}
+
+	if code, errCode := statusAndCode("?sender=bad%20name%21"); code != http.StatusBadRequest || errCode != "INVALID_SENDER" {
+		t.Errorf("invalid sender: expected 400 INVALID_SENDER, got %d %q", code, errCode)
+	}
+	if code, errCode := statusAndCode("?recipient=bad%20name%21"); code != http.StatusBadRequest || errCode != "INVALID_RECIPIENT" {
+		t.Errorf("invalid recipient: expected 400 INVALID_RECIPIENT, got %d %q", code, errCode)
+	}
+	if code, errCode := statusAndCode("?sender=.bob"); code != http.StatusBadRequest || errCode != "INVALID_SENDER" {
+		t.Errorf("dot-leading sender: expected 400 INVALID_SENDER, got %d %q", code, errCode)
+	}
+	// Wrong-case local address resolves (no error) instead of 403.
+	if code, _ := statusAndCode("?sender=test@LOCALHOST"); code != http.StatusOK {
+		t.Errorf("wrong-case local address: expected 200, got %d", code)
+	}
+	// Neither side is the agent: still a genuine authorization failure.
+	if code, _ := statusAndCode("?sender=bob@example.com&recipient=carol@example.com"); code != http.StatusForbidden {
+		t.Errorf("neither-side conversation: expected 403, got %d", code)
+	}
+}
+
+// TestIntegration_ListMessagesSinceSubSecond is a functional verification
+// test for the ?since= cursor on GET /v1/messages. The bound must be kept at
+// full timestamp precision end to end and applied inclusively: a cursor of
+// 12:00:00.9Z must not be floored to 12:00:00, which would re-return
+// messages stamped earlier in the same second on every incremental poll and
+// cause duplicate processing.
+func TestIntegration_ListMessagesSinceSubSecond(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	agentKey := registerLocalAgent(t, testServer.URL)
+	registerLocalAgentWithAddress(t, testServer.URL, "peer")
+
+	// Seed three messages whose timestamps fall within and around the same
+	// second, so a whole-second cutoff would wrongly re-return the first.
+	base := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	stamps := []time.Time{
+		base.Add(100 * time.Millisecond),  // 12:00:00.1
+		base.Add(900 * time.Millisecond),  // 12:00:00.9
+		base.Add(1100 * time.Millisecond), // 12:00:01.1
+	}
+	subjectByID := make(map[string]string, len(stamps))
+	for i, ts := range stamps {
+		subject := fmt.Sprintf("subsecond-%d", i)
+		msgID := sendTestMessage(t, testServer.URL, "test@localhost", "peer@localhost",
+			subject, ts.Format(time.RFC3339Nano))
+		subjectByID[msgID] = subject
+	}
+
+	subjectsOf := func(resp listMessagesResponse) map[string]bool {
+		set := make(map[string]bool, len(resp.Messages))
+		for _, m := range resp.Messages {
+			set[subjectByID[m.MessageID]] = true
+		}
+		return set
+	}
+
+	// Cursor at 12:00:00.9 (inclusive, full precision): only the message
+	// stamped at exactly 12:00:00.9 and the one after it qualify. The
+	// message at 12:00:00.1 must NOT be returned.
+	cursor := base.Add(900 * time.Millisecond).Format(time.RFC3339Nano)
+	resp := listMessagesQuery(t, testServer.URL, agentKey, "since="+cursor)
+	got := subjectsOf(resp)
+	if resp.Total != 2 || !got["subsecond-1"] || !got["subsecond-2"] {
+		t.Errorf("since=%s: expected messages subsecond-1 and subsecond-2 (total 2), got %v (total %d)",
+			cursor, got, resp.Total)
+	}
+	if got["subsecond-0"] {
+		t.Errorf("since=%s: message subsecond-0 (12:00:00.1) must not be re-returned", cursor)
+	}
+
+	// Advancing the cursor past everything returns an empty page, so a
+	// cursor-style poller converges instead of re-receiving messages.
+	cursor = base.Add(1200 * time.Millisecond).Format(time.RFC3339Nano)
+	resp = listMessagesQuery(t, testServer.URL, agentKey, "since="+cursor)
+	if resp.Total != 0 {
+		t.Errorf("since=%s: expected empty page, got %d messages: %v", cursor, resp.Total, subjectsOf(resp))
+	}
+}
+
 func TestIntegration_InvalidMessageID(t *testing.T) {
 	testServer := createTestServer(t)
 	defer testServer.Close()
+
+	agentKey := registerLocalAgent(t, testServer.URL)
 
 	tests := []struct {
 		name      string
@@ -588,7 +1532,12 @@ func TestIntegration_InvalidMessageID(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			resp, err := http.Get(testServer.URL + test.endpoint)
+			req, err := http.NewRequest(http.MethodGet, testServer.URL+test.endpoint, nil)
+			if err != nil {
+				t.Fatalf("Failed to build request: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+agentKey)
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatalf("Failed to get %s: %v", test.endpoint, err)
 			}
@@ -621,13 +1570,219 @@ func TestIntegration_InvalidMessageID(t *testing.T) {
 	}
 }
 
+// rotateAgentKey posts to POST /v1/admin/agents/:name/rotate-key with the
+// admin key and returns the HTTP status and response body.
+func rotateAgentKey(t *testing.T, baseURL, name string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/admin/agents/"+name+"/rotate-key", nil)
+	if err != nil {
+		t.Fatalf("build rotate request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rotate key: %v", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, rb
+}
+
+// TestIntegration_AdminKeyRotatesWithoutRestart is a functional verification
+// test for the cached admin-key validator on the message query read path.
+// The validator must keep honoring the configured key file across requests
+// (no per-request filesystem read) and pick up a rotated key file without a
+// server restart, so operators can rotate the admin key out-of-band while
+// agents are actively polling.
+func TestIntegration_AdminKeyRotatesWithoutRestart(t *testing.T) {
+	cfg := createTestConfig(t)
+	keyFile := cfg.Auth.AdminKeyFile
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
+	defer testServer.Close()
+
+	adminGet := func(key string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages", nil)
+		if err != nil {
+			t.Fatalf("build admin request: %v", err)
+		}
+		req.Header.Set("X-Admin-Key", key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("admin request: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// The initial key works (this primes the cache).
+	if code := adminGet(adminKeyValue); code != http.StatusOK {
+		t.Fatalf("expected initial admin key to work, got %d", code)
+	}
+
+	// Rotate the key file out-of-band. Bump the mtime so the change is
+	// observable even on coarse-granularity filesystems.
+	newKey := "rotated-admin-key"
+	if err := os.WriteFile(keyFile, []byte(newKey), 0o600); err != nil {
+		t.Fatalf("rewrite admin key file: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(keyFile, future, future); err != nil {
+		t.Fatalf("bump admin key file mtime: %v", err)
+	}
+
+	// The old key is rejected and the new one accepted without restart.
+	if code := adminGet(adminKeyValue); code != http.StatusForbidden {
+		t.Errorf("expected old admin key to be rejected after rotation, got %d", code)
+	}
+	if code := adminGet(newKey); code != http.StatusOK {
+		t.Errorf("expected rotated admin key to work, got %d", code)
+	}
+}
+
+// TestIntegration_UpdateAgentNotFound is a functional verification test for
+// PATCH /v1/admin/agents/:address error mapping. Updating an agent that does
+// not exist must be a 404 AGENT_NOT_FOUND (do not retry), not a 400 that a
+// retry script cannot tell apart from a storage failure.
+func TestIntegration_UpdateAgentNotFound(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	status, body := patchAgent(t, testServer.URL, "ghost", map[string]string{"delivery_mode": "pull"})
+	if status != http.StatusNotFound {
+		t.Fatalf("update nonexistent: expected status %d, got %d: %s", http.StatusNotFound, status, string(body))
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(body, &errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("expected AGENT_NOT_FOUND, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestIntegration_RotateAgentKeyValidation is a functional verification test
+// for POST /v1/admin/agents/:address/rotate-key. The endpoint must validate
+// the address like its sibling PATCH/DELETE endpoints:
+//   - a bare agent name is normalized to the full local address before
+//     reaching the registry, and the response echoes it;
+//   - a foreign-domain address is rejected with an explicit domain-mismatch
+//     error instead of being passed to the registry unchecked (which would
+//     surface as a misleading "agent not found");
+//   - a full local address is accepted;
+//   - a nonexistent agent still fails.
+func TestIntegration_RotateAgentKeyValidation(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	baseURL := testServer.URL
+	registerLocalAgent(t, baseURL)
+
+	// 1. A bare name is normalized to the full address.
+	status, body := rotateAgentKey(t, baseURL, "test")
+	if status != http.StatusOK {
+		t.Fatalf("rotate bare name: expected status %d, got %d: %s", http.StatusOK, status, string(body))
+	}
+	var rotated struct {
+		Address string `json:"address"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.Unmarshal(body, &rotated); err != nil {
+		t.Fatalf("decode rotate response: %v", err)
+	}
+	if rotated.Address != "test@localhost" {
+		t.Errorf("expected normalized address test@localhost, got %s", rotated.Address)
+	}
+	if rotated.APIKey == "" {
+		t.Error("expected a new api_key in the response")
+	}
+
+	// 2. A foreign-domain address is rejected with an explicit
+	// domain-mismatch error, not "agent not found".
+	status, body = rotateAgentKey(t, baseURL, "foo@evil.com")
+	if status != http.StatusBadRequest {
+		t.Fatalf("rotate foreign domain: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(body, &errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
+		t.Errorf("expected AGENT_KEY_ROTATION_FAILED, got %s", errorResponse.Error.Code)
+	}
+	detail, _ := errorResponse.Error.Details["error"].(string)
+	if !strings.Contains(detail, "does not match local domain") {
+		t.Errorf("expected domain-mismatch error, got %q", detail)
+	}
+
+	// 3. A full local address is accepted.
+	status, body = rotateAgentKey(t, baseURL, "test@localhost")
+	if status != http.StatusOK {
+		t.Fatalf("rotate full local address: expected status %d, got %d: %s", http.StatusOK, status, string(body))
+	}
+
+	// 4. A nonexistent agent is a 404 (do not retry), not a 400 that a
+	// retry script cannot tell apart from a storage failure.
+	status, body = rotateAgentKey(t, baseURL, "ghost")
+	if status != http.StatusNotFound {
+		t.Fatalf("rotate nonexistent: expected status %d, got %d: %s", http.StatusNotFound, status, string(body))
+	}
+	var ghostErr types.ErrorResponse
+	if err := json.Unmarshal(body, &ghostErr); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if ghostErr.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("expected AGENT_NOT_FOUND, got %s", ghostErr.Error.Code)
+	}
+}
+
+// TestIntegration_AgentAuthRepeatedReads is a functional verification test
+// for the message query auth path after it was refactored to hash the
+// presented key once, match it against a single agent listing, and debounce
+// last_access writes. A burst of authenticated reads with the same key must
+// all succeed (each prior request used to trigger one last_access UPDATE; the
+// debounce collapses them without changing behavior), and several agents'
+// keys must all keep authenticating.
+func TestIntegration_AgentAuthRepeatedReads(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	keys := []string{
+		registerLocalAgent(t, testServer.URL),
+		registerLocalAgentWithAddress(t, testServer.URL, "reader-1"),
+		registerLocalAgentWithAddress(t, testServer.URL, "reader-2"),
+	}
+
+	// A burst of reads with the same key exercises the debounced
+	// last_access write; every request must still authenticate.
+	for i := 0; i < 20; i++ {
+		resp := listMessages(t, testServer.URL, keys[0], 10, 0)
+		if resp.Total != 0 {
+			t.Fatalf("iteration %d: expected 0 messages, got %d", i, resp.Total)
+		}
+	}
+
+	// Every registered key still authenticates.
+	for _, key := range keys {
+		resp := listMessages(t, testServer.URL, key, 10, 0)
+		if resp.Total != 0 {
+			t.Fatalf("key %q: expected 0 messages, got %d", key, resp.Total)
+		}
+	}
+}
+
 func TestIntegration_Idempotency(t *testing.T) {
 	// Create mock AMTP server for deliveries
 	mockAMTPServer := createMockAMTPServer(t)
 	defer mockAMTPServer.Close()
 
 	// Update DNS mock records to point to the mock server
-	cfg := createTestConfig()
+	cfg := createTestConfig(t)
 	cfg.DNS.MockRecords = map[string]string{
 		"test.com":    fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
 		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
@@ -691,7 +1846,7 @@ func TestIntegration_Idempotency(t *testing.T) {
 
 func BenchmarkIntegration_SendMessage(b *testing.B) {
 	b.Skip("Integration tests temporarily disabled")
-	cfg := createTestConfig()
+	cfg := createTestConfig(b)
 
 	srv, err := server.New(cfg)
 	if err != nil {

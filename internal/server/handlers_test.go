@@ -23,6 +23,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +36,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/discovery"
 	"github.com/amtp-protocol/agentry/internal/logging"
 	"github.com/amtp-protocol/agentry/internal/metrics"
+	"github.com/amtp-protocol/agentry/internal/middleware"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
@@ -52,6 +56,35 @@ type MockStorage struct {
 	messages map[string]*types.Message
 	statuses map[string]*types.MessageStatus
 	agents   map[string]*agents.LocalAgent
+	// listFilters records every filter passed to ListMessages so handler
+	// tests can assert the shape of the underlying storage query.
+	listFilters []storage.MessageFilter
+	// countFilters records every filter passed to CountMessages.
+	countFilters []storage.MessageFilter
+	// countError, when set, makes CountMessages fail so handler tests can
+	// verify count failures surface as errors instead of being swallowed.
+	countError error
+	// statusBatches records every message ID slice passed to GetStatuses so
+	// handler tests can assert statuses are fetched in one batch call.
+	statusBatches [][]string
+	// statusesError, when set, makes GetStatuses fail so handler tests can
+	// verify status failures surface as errors.
+	statusesError error
+	// agentGetCalls counts GetAgent calls so tests can assert the message
+	// query auth path matches keys against a single listing instead of
+	// reading each agent individually.
+	agentGetCalls int
+	// getMessageError, when set, makes GetMessage fail with a transient
+	// (non-not-found) storage error so handler tests can verify storage
+	// failures surface as 5xx instead of being flattened to 404.
+	getMessageError error
+	// getStatusError, when set, makes GetStatus fail with a transient
+	// storage error for the same reason.
+	getStatusError error
+	// agentFieldsError, when set, makes UpdateAgentFields fail with a
+	// transient storage error so handler tests can verify agent update
+	// storage failures surface as 5xx instead of being flattened to 400.
+	agentFieldsError error
 }
 
 func NewMockMessageProcessor() *MockMessageProcessor {
@@ -76,10 +109,13 @@ func (m *MockStorage) StoreMessage(ctx context.Context, message *types.Message) 
 }
 
 func (m *MockStorage) GetMessage(ctx context.Context, messageID string) (*types.Message, error) {
+	if m.getMessageError != nil {
+		return nil, m.getMessageError
+	}
 	if message, exists := m.messages[messageID]; exists {
 		return message, nil
 	}
-	return nil, fmt.Errorf("message not found: %s", messageID)
+	return nil, fmt.Errorf("%w: %s", storage.ErrMessageNotFound, messageID)
 }
 
 func (m *MockStorage) DeleteMessage(ctx context.Context, messageID string) error {
@@ -88,11 +124,20 @@ func (m *MockStorage) DeleteMessage(ctx context.Context, messageID string) error
 }
 
 func (m *MockStorage) ListMessages(ctx context.Context, filter storage.MessageFilter) ([]*types.Message, error) {
+	m.listFilters = append(m.listFilters, filter)
 	var messages []*types.Message
 	for _, msg := range m.messages {
 		messages = append(messages, msg)
 	}
 	return messages, nil
+}
+
+func (m *MockStorage) CountMessages(ctx context.Context, filter storage.MessageFilter) (int64, error) {
+	m.countFilters = append(m.countFilters, filter)
+	if m.countError != nil {
+		return 0, m.countError
+	}
+	return int64(len(m.messages)), nil
 }
 
 func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
@@ -101,10 +146,27 @@ func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status 
 }
 
 func (m *MockStorage) GetStatus(ctx context.Context, messageID string) (*types.MessageStatus, error) {
+	if m.getStatusError != nil {
+		return nil, m.getStatusError
+	}
 	if status, exists := m.statuses[messageID]; exists {
 		return status, nil
 	}
-	return nil, fmt.Errorf("message status not found: %s", messageID)
+	return nil, fmt.Errorf("%w: %s", storage.ErrMessageNotFound, messageID)
+}
+
+func (m *MockStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	m.statusBatches = append(m.statusBatches, messageIDs)
+	if m.statusesError != nil {
+		return nil, m.statusesError
+	}
+	result := make(map[string]*types.MessageStatus)
+	for _, id := range messageIDs {
+		if status, exists := m.statuses[id]; exists {
+			result[id] = status
+		}
+	}
+	return result, nil
 }
 
 func (m *MockStorage) UpdateStatus(ctx context.Context, messageID string, updater storage.StatusUpdater) error {
@@ -139,9 +201,10 @@ func (m *MockStorage) CreateAgent(ctx context.Context, agent *agents.LocalAgent)
 }
 
 func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agents.LocalAgent, error) {
+	m.agentGetCalls++
 	agent, exists := m.agents[agentAddress]
 	if !exists {
-		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+		return nil, fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agentAddress)
 	}
 
 	agentCopy := *agent
@@ -153,7 +216,7 @@ func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent)
 		return fmt.Errorf("agent cannot be nil")
 	}
 	if _, exists := m.agents[agent.Address]; !exists {
-		return fmt.Errorf("agent not found: %s", agent.Address)
+		return fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agent.Address)
 	}
 
 	agentCopy := *agent
@@ -161,9 +224,39 @@ func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent)
 	return nil
 }
 
+func (m *MockStorage) UpdateAgentFields(ctx context.Context, agentAddress string, fields agents.AgentFields) error {
+	if m.agentFieldsError != nil {
+		return m.agentFieldsError
+	}
+	if _, exists := m.agents[agentAddress]; !exists {
+		return fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agentAddress)
+	}
+	agent := m.agents[agentAddress]
+	if fields.DeliveryMode != nil {
+		agent.DeliveryMode = *fields.DeliveryMode
+	}
+	if fields.PushTarget != nil {
+		agent.PushTarget = *fields.PushTarget
+	}
+	if fields.PushHeaders != nil {
+		agent.Headers = fields.PushHeaders
+	}
+	if fields.SupportedSchemas != nil {
+		agent.SupportedSchemas = fields.SupportedSchemas
+		agent.RequiresSchema = len(fields.SupportedSchemas) > 0
+	}
+	if fields.LastAccess != nil {
+		agent.LastAccess = *fields.LastAccess
+	}
+	if fields.APIKey != nil {
+		agent.APIKey = *fields.APIKey
+	}
+	return nil
+}
+
 func (m *MockStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
 	if _, exists := m.agents[agentAddress]; !exists {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agentAddress)
 	}
 
 	delete(m.agents, agentAddress)
@@ -342,6 +435,35 @@ func createTestServer() *Server {
 	return server
 }
 
+// createTestServerWithAdminKey returns a test server configured with an admin
+// key file containing the given key, so tests can exercise the admin fallback
+// on message query endpoints. The admin key is sent in the X-Admin-Key header.
+func createTestServerWithAdminKey(t *testing.T, adminKey string) *Server {
+	t.Helper()
+	server := createTestServer()
+	keyFile := filepath.Join(t.TempDir(), "admin.key")
+	if err := os.WriteFile(keyFile, []byte(adminKey), 0o600); err != nil {
+		t.Fatalf("write admin key file: %v", err)
+	}
+	server.config.Auth.AdminKeyFile = keyFile
+	server.config.Auth.AdminAPIKeyHeader = "X-Admin-Key"
+	// Mirror New(): attach the cached validator so tests exercise the same
+	// read path as production.
+	server.adminKeyValidator = middleware.NewAdminKeyValidator(keyFile)
+	return server
+}
+
+// registerTestAgent registers an agent in the given server and returns its
+// plaintext API key for use in Authorization headers.
+func registerTestAgent(t *testing.T, server *Server, name string) string {
+	t.Helper()
+	agent := &agents.LocalAgent{Address: name, DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register test agent %s: %v", name, err)
+	}
+	return agent.APIKey
+}
+
 func TestHandleSendMessage_Success(t *testing.T) {
 	server := createTestServer()
 
@@ -502,6 +624,7 @@ func TestHandleSendMessage_ProcessingFailed(t *testing.T) {
 func TestHandleGetMessage_Success(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "sender")
 
 	// First, send a message to store it
 	message := &types.Message{
@@ -509,7 +632,7 @@ func TestHandleGetMessage_Success(t *testing.T) {
 		MessageID:      "01234567-89ab-7def-8123-456789abcdef",
 		IdempotencyKey: "01234567-89ab-4def-8123-456789abcdef",
 		Timestamp:      time.Now().UTC(),
-		Sender:         "test@example.com",
+		Sender:         "sender@localhost",
 		Recipients:     []string{"recipient@test.com"},
 		Subject:        "Test Message",
 		Payload:        json.RawMessage(`{"message": "Hello, World!"}`),
@@ -520,6 +643,7 @@ func TestHandleGetMessage_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+key)
 
 	rr := httptest.NewRecorder()
 	server.router.ServeHTTP(rr, req)
@@ -545,11 +669,13 @@ func TestHandleGetMessage_Success(t *testing.T) {
 
 func TestHandleGetMessage_InvalidID(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "sender")
 
 	req, err := http.NewRequest("GET", "/v1/messages/invalid-id", nil)
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+key)
 
 	rr := httptest.NewRecorder()
 	server.router.ServeHTTP(rr, req)
@@ -571,11 +697,13 @@ func TestHandleGetMessage_InvalidID(t *testing.T) {
 
 func TestHandleGetMessage_NotFound(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "sender")
 
 	req, err := http.NewRequest("GET", "/v1/messages/01234567-89ab-7def-8123-456789abcdef", nil)
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+key)
 
 	rr := httptest.NewRecorder()
 	server.router.ServeHTTP(rr, req)
@@ -595,11 +723,211 @@ func TestHandleGetMessage_NotFound(t *testing.T) {
 	}
 }
 
+// TestHandleGetMessage_StorageError verifies that a transient storage failure
+// during message retrieval surfaces as a 5xx so clients retry, instead of
+// being flattened to 404 which would make a polling sender conclude the
+// message is lost and re-send it (duplicate delivery).
+func TestHandleGetMessage_StorageError(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "sender")
+
+	mockStorage.getMessageError = fmt.Errorf("storage outage: connection refused")
+
+	req, err := http.NewRequest("GET", "/v1/messages/01234567-89ab-7def-8123-456789abcdef", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d for storage error, got %d: %s",
+			http.StatusInternalServerError, rr.Code, rr.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+	if errorResponse.Error.Code != "MESSAGE_READ_FAILED" {
+		t.Errorf("Expected error code 'MESSAGE_READ_FAILED', got %s", errorResponse.Error.Code)
+	}
+	detail, _ := errorResponse.Error.Details["error"].(string)
+	if !strings.Contains(detail, "storage outage") {
+		t.Errorf("Expected storage error detail, got %q", detail)
+	}
+}
+
+func TestHandleGetMessage_ForbiddenOtherAgent(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	// Two agents: the message belongs to agent-a, caller authenticates as agent-b.
+	registerTestAgent(t, server, "agent-a")
+	keyB := registerTestAgent(t, server, "agent-b")
+
+	message := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01234567-89ab-7def-8123-456789abcdef",
+		IdempotencyKey: "01234567-89ab-4def-8123-456789abcdef",
+		Timestamp:      time.Now().UTC(),
+		Sender:         "agent-a@localhost",
+		Recipients:     []string{"other@test.com"},
+		Subject:        "Private",
+	}
+	mockStorage.messages[message.MessageID] = message
+
+	req, err := http.NewRequest("GET", "/v1/messages/"+message.MessageID, nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+keyB)
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d for other agent's message, got %d", http.StatusNotFound, rr.Code)
+	}
+}
+
+func TestHandleGetMessage_NoAuth(t *testing.T) {
+	server := createTestServer()
+
+	req, err := http.NewRequest("GET", "/v1/messages/01234567-89ab-7def-8123-456789abcdef", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status %d without auth, got %d", http.StatusUnauthorized, rr.Code)
+	}
+}
+
+// TestHandleGetMessage_AdminAccess verifies the admin key fallback on
+// GET /v1/messages/:id: a message submitted by an unregistered sender (or
+// routed in from a foreign domain) has no registered agent key that matches
+// sender or recipient, so only the admin can read it.
+func TestHandleGetMessage_AdminAccess(t *testing.T) {
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	mockStorage := server.storage.(*MockStorage)
+
+	// Sender and recipient are both foreign — no registered agent key can
+	// reference this message.
+	message := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01234567-89ab-7def-8123-456789abcdef",
+		IdempotencyKey: "01234567-89ab-4def-8123-456789abcdef",
+		Timestamp:      time.Now().UTC(),
+		Sender:         "unregistered@example.com",
+		Recipients:     []string{"remote-peer@example.com"},
+		Subject:        "Foreign",
+		Payload:        json.RawMessage(`{"msg":"hi"}`),
+	}
+	mockStorage.messages[message.MessageID] = message
+
+	req, err := http.NewRequest("GET", "/v1/messages/"+message.MessageID, nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status %d with admin key, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	var response types.Message
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if response.MessageID != message.MessageID {
+		t.Errorf("Expected message ID %s, got %s", message.MessageID, response.MessageID)
+	}
+	if response.Sender != "unregistered@example.com" {
+		t.Errorf("Expected sender unregistered@example.com, got %s", response.Sender)
+	}
+}
+
+// TestHandleGetMessage_AdminInvalidKey verifies the admin fallback rejects
+// invalid admin keys and stays inactive when no admin key file is configured.
+func TestHandleGetMessage_AdminInvalidKey(t *testing.T) {
+	messageID := "01234567-89ab-7def-8123-456789abcdef"
+
+	// A wrong admin key must be rejected with 403.
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	req, err := http.NewRequest("GET", "/v1/messages/"+messageID, nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "wrong-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("Expected status %d for invalid admin key, got %d", http.StatusForbidden, rr.Code)
+	}
+
+	// Without a configured admin key file there is no admin identity, so an
+	// admin header alone does not grant access.
+	server = createTestServer()
+	req, err = http.NewRequest("GET", "/v1/messages/"+messageID, nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	rr = httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status %d without admin key file, got %d", http.StatusUnauthorized, rr.Code)
+	}
+}
+
+// TestHandleGetMessage_AdminKeyFallbackWithoutValidator verifies that a
+// server constructed without the cached admin-key validator (i.e. built
+// directly, not via New()) still honors a configured admin key file through
+// the one-shot ValidateAdminKey fallback in isAdminRequest.
+func TestHandleGetMessage_AdminKeyFallbackWithoutValidator(t *testing.T) {
+	server := createTestServer()
+	keyFile := filepath.Join(t.TempDir(), "admin.key")
+	if err := os.WriteFile(keyFile, []byte("fallback-admin-key"), 0o600); err != nil {
+		t.Fatalf("write admin key file: %v", err)
+	}
+	server.config.Auth.AdminKeyFile = keyFile
+	server.config.Auth.AdminAPIKeyHeader = "X-Admin-Key"
+	// Intentionally leave adminKeyValidator nil to exercise the fallback.
+
+	req, err := http.NewRequest("GET", "/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "fallback-admin-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status %d with admin key via fallback, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleGetMessageStatus_Success(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "sender")
 
 	messageID := "01234567-89ab-7def-8123-456789abcdef"
+	// Message must exist and belong to the caller.
+	mockStorage.messages[messageID] = &types.Message{
+		MessageID:  messageID,
+		Sender:     "sender@localhost",
+		Recipients: []string{"recipient@test.com"},
+	}
 	status := &types.MessageStatus{
 		MessageID: messageID,
 		Status:    types.StatusDelivered,
@@ -621,6 +949,7 @@ func TestHandleGetMessageStatus_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+key)
 
 	rr := httptest.NewRecorder()
 	server.router.ServeHTTP(rr, req)
@@ -650,11 +979,13 @@ func TestHandleGetMessageStatus_Success(t *testing.T) {
 
 func TestHandleGetMessageStatus_InvalidID(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "sender")
 
 	req, err := http.NewRequest("GET", "/v1/messages/invalid-id/status", nil)
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+key)
 
 	rr := httptest.NewRecorder()
 	server.router.ServeHTTP(rr, req)
@@ -676,11 +1007,13 @@ func TestHandleGetMessageStatus_InvalidID(t *testing.T) {
 
 func TestHandleGetMessageStatus_NotFound(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "sender")
 
 	req, err := http.NewRequest("GET", "/v1/messages/01234567-89ab-7def-8123-456789abcdef/status", nil)
 	if err != nil {
 		t.Fatalf("Failed to create request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+key)
 
 	rr := httptest.NewRecorder()
 	server.router.ServeHTTP(rr, req)
@@ -697,6 +1030,134 @@ func TestHandleGetMessageStatus_NotFound(t *testing.T) {
 
 	if errorResponse.Error.Code != "MESSAGE_NOT_FOUND" {
 		t.Errorf("Expected error code 'MESSAGE_NOT_FOUND', got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleGetMessageStatus_StorageError verifies that a transient storage
+// failure on either the access-check read or the status read surfaces as a
+// 5xx so clients retry, instead of being flattened to 404 which would make a
+// sender polling status conclude the message is lost and re-send it.
+func TestHandleGetMessageStatus_StorageError(t *testing.T) {
+	messageID := "01234567-89ab-7def-8123-456789abcdef"
+
+	tests := []struct {
+		name        string
+		seedMessage bool
+		seedStatus  bool
+		messageErr  error
+		statusErr   error
+	}{
+		{
+			name:        "message read fails",
+			seedMessage: true,
+			seedStatus:  true,
+			messageErr:  fmt.Errorf("storage outage: connection refused"),
+		},
+		{
+			name:        "status read fails",
+			seedMessage: true,
+			seedStatus:  true,
+			statusErr:   fmt.Errorf("storage outage: status table unavailable"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := createTestServer()
+			mockStorage := server.storage.(*MockStorage)
+			key := registerTestAgent(t, server, "sender")
+
+			if tt.seedMessage {
+				mockStorage.messages[messageID] = &types.Message{
+					MessageID:  messageID,
+					Sender:     "sender@localhost",
+					Recipients: []string{"recipient@test.com"},
+				}
+			}
+			if tt.seedStatus {
+				mockStorage.statuses[messageID] = &types.MessageStatus{
+					MessageID: messageID,
+					Status:    types.StatusQueued,
+				}
+			}
+			mockStorage.getMessageError = tt.messageErr
+			mockStorage.getStatusError = tt.statusErr
+
+			req, err := http.NewRequest("GET", "/v1/messages/"+messageID+"/status", nil)
+			if err != nil {
+				t.Fatalf("Failed to create request: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+key)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("Expected status %d, got %d: %s",
+					http.StatusInternalServerError, rr.Code, rr.Body.String())
+			}
+
+			var errorResponse types.ErrorResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &errorResponse); err != nil {
+				t.Fatalf("Failed to unmarshal error response: %v", err)
+			}
+			if errorResponse.Error.Code != "MESSAGE_READ_FAILED" {
+				t.Errorf("Expected error code 'MESSAGE_READ_FAILED', got %s", errorResponse.Error.Code)
+			}
+		})
+	}
+}
+
+// TestHandleGetMessageStatus_AdminAccess verifies the admin key fallback on
+// GET /v1/messages/:id/status for a message whose sender and recipient are
+// both foreign (no registered agent key can reference it).
+func TestHandleGetMessageStatus_AdminAccess(t *testing.T) {
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	mockStorage := server.storage.(*MockStorage)
+
+	messageID := "01234567-89ab-7def-8123-456789abcdef"
+	mockStorage.messages[messageID] = &types.Message{
+		Version:        "1.0",
+		MessageID:      messageID,
+		IdempotencyKey: "01234567-89ab-4def-8123-456789abcdef",
+		Timestamp:      time.Now().UTC(),
+		Sender:         "unregistered@example.com",
+		Recipients:     []string{"remote-peer@example.com"},
+		Subject:        "Foreign",
+	}
+	mockStorage.statuses[messageID] = &types.MessageStatus{
+		MessageID: messageID,
+		Status:    types.StatusQueued,
+		Recipients: []types.RecipientStatus{
+			{
+				Address:   "remote-peer@example.com",
+				Status:    types.StatusQueued,
+				Timestamp: time.Now().UTC(),
+			},
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	req, err := http.NewRequest("GET", "/v1/messages/"+messageID+"/status", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status code %d with admin key, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	var response types.MessageStatus
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if response.MessageID != messageID {
+		t.Errorf("Expected message ID %s, got %s", messageID, response.MessageID)
+	}
+	if response.Status != types.StatusQueued {
+		t.Errorf("Expected status %s, got %s", types.StatusQueued, response.Status)
 	}
 }
 
@@ -1100,8 +1561,10 @@ func BenchmarkHandleGetMessage(b *testing.B) {
 // Test handleListMessages
 func TestHandleListMessages_Success(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "viewer")
 
 	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -1128,10 +1591,122 @@ func TestHandleListMessages_Success(t *testing.T) {
 	}
 }
 
-func TestHandleListMessages_WithParameters(t *testing.T) {
+// TestHandleListMessages_NoAuth verifies message listing requires a key.
+func TestHandleListMessages_NoAuth(t *testing.T) {
 	server := createTestServer()
 
-	req := httptest.NewRequest("GET", "/v1/messages?limit=50&offset=10&status=delivered&sender=test@example.com&recipient=user@example.com&since=2023-01-01T00:00:00Z", nil)
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status %d without auth, got %d", http.StatusUnauthorized, w.Code)
+	}
+}
+
+// TestHandleListMessages_AuthUsesSingleListing verifies that authenticating
+// an agent key on a message query endpoint hashes the key once and matches it
+// against a single agent listing, never reading individual agents (the old
+// scan-and-verify loop issued one GetAgent per registered agent).
+func TestHandleListMessages_AuthUsesSingleListing(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if mockStorage.agentGetCalls != 0 {
+		t.Errorf("auth must not read individual agents, got %d GetAgent calls", mockStorage.agentGetCalls)
+	}
+}
+
+// TestHandleListMessages_ReturnsStoredMessages verifies the list endpoint
+// surfaces stored messages with their delivery status attached.
+func TestHandleListMessages_ReturnsStoredMessages(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "sender")
+
+	// Seed a message and its status directly into storage.
+	now := time.Now().UTC()
+	msg := &types.Message{
+		Version:        "1.0",
+		MessageID:      "019fbd30-9f27-75aa-8cd4-de1f14e011ab",
+		IdempotencyKey: "11111111-1111-4111-8111-111111111111",
+		Timestamp:      now,
+		Sender:         "sender@localhost",
+		Recipients:     []string{"recipient@localhost"},
+		Subject:        "Hello",
+		Schema:         "agntcy:test.hello.v1",
+		Payload:        json.RawMessage(`{"msg":"hi"}`),
+	}
+	if err := mockStorage.StoreMessage(context.Background(), msg); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+	if err := mockStorage.StoreStatus(context.Background(), msg.MessageID, &types.MessageStatus{
+		MessageID: msg.MessageID,
+		Status:    types.StatusDelivered,
+	}); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var response struct {
+		Messages []map[string]interface{} `json:"messages"`
+		Total    int                      `json:"total"`
+		Limit    int                      `json:"limit"`
+		Offset   int                      `json:"offset"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if response.Total != 1 {
+		t.Errorf("Expected total 1, got %d", response.Total)
+	}
+	if len(response.Messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d", len(response.Messages))
+	}
+
+	got := response.Messages[0]
+	if got["message_id"] != msg.MessageID {
+		t.Errorf("Expected message_id %s, got %v", msg.MessageID, got["message_id"])
+	}
+	if got["subject"] != "Hello" {
+		t.Errorf("Expected subject Hello, got %v", got["subject"])
+	}
+	// Delivery status should be attached.
+	delivery, ok := got["delivery"].(map[string]interface{})
+	if !ok {
+		t.Errorf("Expected delivery status attached, got %v", got["delivery"])
+	} else if delivery["status"] != string(types.StatusDelivered) {
+		t.Errorf("Expected delivery status %s, got %v", types.StatusDelivered, delivery["status"])
+	}
+	if got["status"] != string(types.StatusDelivered) {
+		t.Errorf("Expected status %s, got %v", types.StatusDelivered, got["status"])
+	}
+}
+
+func TestHandleListMessages_WithParameters(t *testing.T) {
+	server := createTestServer()
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=50&offset=10&status=delivered&sender=viewer@localhost&recipient=viewer@localhost&since=2023-01-01T00:00:00Z", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -1154,8 +1729,381 @@ func TestHandleListMessages_WithParameters(t *testing.T) {
 	}
 }
 
+// TestHandleListMessages_CounterpartConversation verifies that a filter
+// referencing another agent is allowed as one side of a conversation: the
+// authenticated agent is pinned as the other side, so "?sender=viewer" with
+// agent "other" means "messages viewer sent to other" instead of 403.
+func TestHandleListMessages_CounterpartConversation(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	registerTestAgent(t, server, "viewer")
+	key := registerTestAgent(t, server, "other")
+
+	req := httptest.NewRequest("GET", "/v1/messages?sender=viewer@localhost", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d for counterpart filter, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	filter := mockStorage.listFilters[0]
+	// The counterpart is pinned as the sender; the authenticated agent is the
+	// recipient side of the conversation.
+	if filter.Sender != "viewer@localhost" {
+		t.Errorf("Expected sender viewer@localhost in storage filter, got %q", filter.Sender)
+	}
+	if len(filter.Recipients) != 1 || filter.Recipients[0] != "other@localhost" {
+		t.Errorf("Expected recipient [other@localhost] pinned in storage filter, got %v", filter.Recipients)
+	}
+}
+
+// TestHandleListMessages_BareNameFilters verifies that sender/recipient
+// filters accept bare agent names (normalized to full addresses) exactly like
+// full addresses, against real storage so the filter predicates are applied.
+func TestHandleListMessages_BareNameFilters(t *testing.T) {
+	server := createTestServerWithRealProcessor()
+	key := registerTestAgent(t, server, "viewer")
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := []*types.Message{
+		{
+			MessageID:  "019fbd30-0001-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now,
+			Sender:     "viewer@localhost",
+			Recipients: []string{"peer@localhost"},
+			Subject:    "sent",
+		},
+		{
+			MessageID:  "019fbd30-0002-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now.Add(-time.Minute),
+			Sender:     "peer@localhost",
+			Recipients: []string{"viewer@localhost"},
+			Subject:    "received",
+		},
+		{
+			MessageID:  "019fbd30-0003-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now.Add(-2 * time.Minute),
+			Sender:     "viewer@localhost",
+			Recipients: []string{"viewer@localhost"},
+			Subject:    "self",
+		},
+	}
+	for _, msg := range seed {
+		if err := server.storage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("seed %s: %v", msg.MessageID, err)
+		}
+	}
+
+	tests := []struct {
+		name    string
+		query   string
+		wantIDs []string
+	}{
+		{"bare sender", "?sender=viewer", []string{"019fbd30-0001-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		{"full sender", "?sender=viewer@localhost", []string{"019fbd30-0001-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		{"bare recipient", "?recipient=viewer", []string{"019fbd30-0002-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		{"full recipient", "?recipient=viewer@localhost", []string{"019fbd30-0002-75aa-8cd4-de1f14e011ab", "019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+		// Both filters AND: only the self message was sent by and addressed
+		// to the viewer.
+		{"bare both", "?sender=viewer&recipient=viewer", []string{"019fbd30-0003-75aa-8cd4-de1f14e011ab"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+			}
+
+			var response struct {
+				Messages []map[string]interface{} `json:"messages"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(response.Messages) != len(tt.wantIDs) {
+				t.Fatalf("Expected %d messages, got %d", len(tt.wantIDs), len(response.Messages))
+			}
+			got := make(map[string]bool)
+			for _, m := range response.Messages {
+				got[m["message_id"].(string)] = true
+			}
+			for _, id := range tt.wantIDs {
+				if !got[id] {
+					t.Errorf("Expected message %s in response, got %v", id, got)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleListMessages_BareNameFilterNormalized verifies that a bare-name
+// filter is normalized to the full address before reaching the storage layer.
+func TestHandleListMessages_BareNameFilterNormalized(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages?sender=viewer&recipient=viewer", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	filter := mockStorage.listFilters[0]
+	if filter.Sender != "viewer@localhost" {
+		t.Errorf("Expected normalized sender viewer@localhost in storage filter, got %q", filter.Sender)
+	}
+	if len(filter.Recipients) != 1 || filter.Recipients[0] != "viewer@localhost" {
+		t.Errorf("Expected normalized recipient [viewer@localhost] in storage filter, got %v", filter.Recipients)
+	}
+}
+
+// TestHandleListMessages_ConversationScoping verifies which sender/recipient
+// filter combinations a non-admin caller may use:
+//   - a counterpart (bare local name, local address, or foreign address) is
+//     allowed on one side of a conversation — the agent is pinned as the
+//     other side;
+//   - a conversation where neither side is the agent is rejected (403);
+//   - a filter that cannot be resolved to a valid agent name is a malformed
+//     parameter and rejected with 400, not an authorization failure.
+func TestHandleListMessages_ConversationScoping(t *testing.T) {
+	server := createTestServer()
+	registerTestAgent(t, server, "viewer")
+	key := registerTestAgent(t, server, "other")
+
+	tests := []struct {
+		name         string
+		query        string
+		expectedCode int
+	}{
+		// Counterpart conversations are now allowed (agent pinned as the
+		// other side).
+		{"bare other sender", "?sender=viewer", http.StatusOK},
+		{"bare other recipient", "?recipient=viewer", http.StatusOK},
+		{"foreign domain sender", "?sender=viewer@example.com", http.StatusOK},
+		// A correctly-spelled local address in the wrong case is still a
+		// local address: domain labels are case-insensitive.
+		{"local address wrong case", "?sender=viewer@LOCALHOST", http.StatusOK},
+		// A conversation where neither side is the authenticated agent stays
+		// rejected (this IS an authorization decision).
+		{"neither side is agent", "?sender=viewer@example.com&recipient=peer@example.net", http.StatusForbidden},
+		// A filter that cannot be resolved to a valid agent name is a
+		// malformed parameter (400), not an authorization failure (403).
+		{"invalid sender", "?sender=bad%20name%21", http.StatusBadRequest},
+		{"invalid recipient", "?recipient=bad%20name%21", http.StatusBadRequest},
+		{"dot-leading sender", "?sender=.bob", http.StatusBadRequest},
+		{"dot-trailing recipient", "?recipient=bob.", http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != tt.expectedCode {
+				t.Errorf("Expected status %d, got %d: %s", tt.expectedCode, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestHandleListMessages_CounterpartFilters verifies the storage filter shape
+// produced by counterpart conversation filters: a single-sided counterpart
+// filter pins the authenticated agent as the other side, and explicit
+// conversations pass through when one side is the agent.
+func TestHandleListMessages_CounterpartFilters(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	tests := []struct {
+		name          string
+		query         string
+		wantSender    string
+		wantRecipient string
+	}{
+		{"recipient counterpart", "?recipient=bob", "viewer@localhost", "bob@localhost"},
+		{"sender counterpart", "?sender=bob", "bob@localhost", "viewer@localhost"},
+		{"foreign recipient", "?recipient=bob@remote.com", "viewer@localhost", "bob@remote.com"},
+		{"foreign sender", "?sender=bob@remote.com", "bob@remote.com", "viewer@localhost"},
+		{"explicit sent to counterpart", "?sender=viewer@localhost&recipient=bob@remote.com", "viewer@localhost", "bob@remote.com"},
+		{"explicit received from counterpart", "?sender=bob@remote.com&recipient=viewer@localhost", "bob@remote.com", "viewer@localhost"},
+		{"self to self", "?sender=viewer&recipient=viewer", "viewer@localhost", "viewer@localhost"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := len(mockStorage.listFilters)
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+			}
+			if len(mockStorage.listFilters) != before+1 {
+				t.Fatalf("Expected ListMessages to be called once, got %d calls", len(mockStorage.listFilters)-before)
+			}
+			filter := mockStorage.listFilters[before]
+			if filter.Sender != tt.wantSender {
+				t.Errorf("Expected sender %q, got %q", tt.wantSender, filter.Sender)
+			}
+			if len(filter.Recipients) != 1 || filter.Recipients[0] != tt.wantRecipient {
+				t.Errorf("Expected recipient [%s], got %v", tt.wantRecipient, filter.Recipients)
+			}
+			// A pinned conversation must be an AND query, not the OR-mode
+			// "all traffic" query.
+			if filter.Or {
+				t.Error("Expected explicit conversation filter without OR mode")
+			}
+		})
+	}
+
+	// A conversation where neither side is the authenticated agent is
+	// rejected with 403 and never reaches storage.
+	req := httptest.NewRequest("GET", "/v1/messages?sender=bob@remote.com&recipient=carol@remote.com", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected status %d for neither-side conversation, got %d", http.StatusForbidden, w.Code)
+	}
+	if len(mockStorage.listFilters) != len(tests) {
+		t.Errorf("Expected %d storage queries, got %d", len(tests), len(mockStorage.listFilters))
+	}
+}
+
+// TestHandleListMessages_InvalidFilterCodes verifies that malformed
+// sender/recipient filters are reported as bad requests with specific error
+// codes (INVALID_SENDER / INVALID_RECIPIENT) matching the other parameter
+// validations (INVALID_LIMIT, INVALID_OFFSET, ...), instead of being
+// flattened into a 403 ACCESS_DENIED that sends operators hunting for a
+// credentials problem.
+func TestHandleListMessages_InvalidFilterCodes(t *testing.T) {
+	server := createTestServer()
+	key := registerTestAgent(t, server, "viewer")
+
+	tests := []struct {
+		name  string
+		query string
+		code  string
+	}{
+		{"invalid sender", "?sender=bad%20name%21", "INVALID_SENDER"},
+		{"invalid recipient", "?recipient=bad%20name%21", "INVALID_RECIPIENT"},
+		{"dot-leading sender", "?sender=.bob", "INVALID_SENDER"},
+		{"dot-trailing recipient", "?recipient=bob.", "INVALID_RECIPIENT"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+			}
+			var errorResponse types.ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+				t.Fatalf("unmarshal error response: %v", err)
+			}
+			if errorResponse.Error.Code != tt.code {
+				t.Errorf("Expected error code %s, got %s", tt.code, errorResponse.Error.Code)
+			}
+		})
+	}
+}
+
+// TestHandleListMessages_LocalAddressWrongCase verifies that a correctly
+// spelled local address with a wrong-case domain label resolves like its
+// lowercase form (domain labels are case-insensitive), so
+// "?sender=viewer@LOCALHOST" works exactly like "?sender=viewer@localhost".
+func TestHandleListMessages_LocalAddressWrongCase(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages?sender=viewer@LOCALHOST", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	filter := mockStorage.listFilters[0]
+	if filter.Sender != "viewer@localhost" {
+		t.Errorf("Expected normalized sender viewer@localhost, got %q", filter.Sender)
+	}
+}
+
+// TestResolveConversationFilters verifies the conversation scoping rules for
+// non-admin callers directly.
+func TestResolveConversationFilters(t *testing.T) {
+	tests := []struct {
+		name              string
+		agentAddr         string
+		sender, recipient string
+		wantSender        string
+		wantRecipient     string
+		wantErr           bool
+	}{
+		{"no filters", "alice@localhost", "", "", "", "", false},
+		{"sender self", "alice@localhost", "alice@localhost", "", "alice@localhost", "", false},
+		{"recipient self", "alice@localhost", "", "alice@localhost", "", "alice@localhost", false},
+		{"self to self", "alice@localhost", "alice@localhost", "alice@localhost", "alice@localhost", "alice@localhost", false},
+		{"sent to counterpart", "alice@localhost", "alice@localhost", "bob@remote.com", "alice@localhost", "bob@remote.com", false},
+		{"received from counterpart", "alice@localhost", "bob@remote.com", "alice@localhost", "bob@remote.com", "alice@localhost", false},
+		{"recipient-only counterpart pins sender", "alice@localhost", "", "bob@remote.com", "alice@localhost", "bob@remote.com", false},
+		{"sender-only counterpart pins recipient", "alice@localhost", "bob@remote.com", "", "bob@remote.com", "alice@localhost", false},
+		{"neither side is agent", "alice@localhost", "bob@remote.com", "carol@remote.com", "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender, recipient, err := resolveConversationFilters(tt.agentAddr, tt.sender, tt.recipient)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sender != tt.wantSender {
+				t.Errorf("expected sender %q, got %q", tt.wantSender, sender)
+			}
+			if recipient != tt.wantRecipient {
+				t.Errorf("expected recipient %q, got %q", tt.wantRecipient, recipient)
+			}
+		})
+	}
+}
+
 func TestHandleListMessages_InvalidLimit(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "viewer")
 
 	tests := []struct {
 		name  string
@@ -1170,6 +2118,7 @@ func TestHandleListMessages_InvalidLimit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/v1/messages?limit="+tt.limit, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
 			w := httptest.NewRecorder()
 			server.router.ServeHTTP(w, req)
 
@@ -1192,6 +2141,7 @@ func TestHandleListMessages_InvalidLimit(t *testing.T) {
 
 func TestHandleListMessages_InvalidOffset(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "viewer")
 
 	tests := []struct {
 		name   string
@@ -1204,6 +2154,7 @@ func TestHandleListMessages_InvalidOffset(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/v1/messages?offset="+tt.offset, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
 			w := httptest.NewRecorder()
 			server.router.ServeHTTP(w, req)
 
@@ -1226,8 +2177,10 @@ func TestHandleListMessages_InvalidOffset(t *testing.T) {
 
 func TestHandleListMessages_InvalidSince(t *testing.T) {
 	server := createTestServer()
+	key := registerTestAgent(t, server, "viewer")
 
 	req := httptest.NewRequest("GET", "/v1/messages?since=invalid-date", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -1243,6 +2196,550 @@ func TestHandleListMessages_InvalidSince(t *testing.T) {
 
 	if errorResponse.Error.Code != "INVALID_SINCE_FORMAT" {
 		t.Errorf("Expected error code 'INVALID_SINCE_FORMAT', got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleListMessages_InvalidStatus verifies the status query parameter is
+// validated against the known delivery statuses before it reaches storage. An
+// unvalidated value would raise a Postgres enum-cast error (22P02) on the
+// database backend and surface as a 500, while the memory backend would
+// silently return an empty list; rejecting unknown values with 400 keeps
+// behavior identical across backends.
+func TestHandleListMessages_InvalidStatus(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	// An unknown status must be rejected with 400 before it reaches storage.
+	req := httptest.NewRequest("GET", "/v1/messages?status=bogus", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+	if errorResponse.Error.Code != "INVALID_STATUS" {
+		t.Errorf("Expected error code 'INVALID_STATUS', got %s", errorResponse.Error.Code)
+	}
+
+	// Storage must never see the invalid value.
+	if len(mockStorage.listFilters) != 0 {
+		t.Errorf("Expected no storage queries for invalid status, got %d", len(mockStorage.listFilters))
+	}
+
+	// Every known status is accepted and forwarded to the storage filter.
+	known := []types.DeliveryStatus{
+		types.StatusPending, types.StatusQueued, types.StatusDelivering,
+		types.StatusDelivered, types.StatusFailed, types.StatusRetrying,
+	}
+	for _, status := range known {
+		req = httptest.NewRequest("GET", "/v1/messages?status="+string(status), nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		w = httptest.NewRecorder()
+		server.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("status %q: expected status %d, got %d: %s",
+				status, http.StatusOK, w.Code, w.Body.String())
+		}
+	}
+	if len(mockStorage.listFilters) != len(known) {
+		t.Errorf("Expected %d storage queries for valid statuses, got %d",
+			len(known), len(mockStorage.listFilters))
+	}
+	// The filter must carry the status through to storage unchanged.
+	for i, status := range known {
+		if mockStorage.listFilters[i].Status != status {
+			t.Errorf("filter %d: expected status %s, got %s", i, status, mockStorage.listFilters[i].Status)
+		}
+	}
+
+	// An empty status means "no filter" and must stay accepted.
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("empty status: expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+// TestHandleListMessages_AdminAccess verifies the admin key fallback on
+// GET /v1/messages: the admin sees the full message set (including messages
+// whose sender and recipient are both foreign) and may filter by any
+// participant — bare local names are normalized, foreign addresses pass
+// through unchanged. A registered agent key stays scoped to that agent.
+func TestHandleListMessages_AdminAccess(t *testing.T) {
+	server := createTestServerWithAdminKey(t, "admin-secret")
+	mockStorage := server.storage.(*MockStorage)
+	// A local agent whose key must NOT expose the foreign messages.
+	key := registerTestAgent(t, server, "viewer")
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := []*types.Message{
+		{
+			MessageID:  "019fbd30-0001-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now,
+			Sender:     "unregistered@example.com",
+			Recipients: []string{"remote-peer@example.com"},
+			Subject:    "foreign-1",
+		},
+		{
+			MessageID:  "019fbd30-0002-75aa-8cd4-de1f14e011ab",
+			Timestamp:  now.Add(-time.Minute),
+			Sender:     "another@example.net",
+			Recipients: []string{"somewhere@example.org"},
+			Subject:    "foreign-2",
+		},
+	}
+	for _, msg := range seed {
+		if err := mockStorage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("seed %s: %v", msg.MessageID, err)
+		}
+	}
+
+	// 1. The admin sees both foreign messages with no direction filter, and
+	// the storage filter carries no agent scoping.
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin list: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	if filter := mockStorage.listFilters[0]; filter.Sender != "" || len(filter.Recipients) != 0 {
+		t.Errorf("admin list: expected unscoped storage filter, got sender=%q recipients=%v",
+			filter.Sender, filter.Recipients)
+	}
+	var listResp struct {
+		Messages []map[string]interface{} `json:"messages"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal admin list: %v", err)
+	}
+	if len(listResp.Messages) != len(seed) {
+		t.Errorf("admin list: expected %d messages, got %d", len(seed), len(listResp.Messages))
+	}
+
+	// 2. The admin can filter by a foreign sender address, which is passed
+	// through to the storage filter unchanged.
+	req = httptest.NewRequest("GET", "/v1/messages?sender=unregistered@example.com", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin sender filter: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) < 2 {
+		t.Fatal("Expected a second ListMessages call")
+	}
+	if got := mockStorage.listFilters[1].Sender; got != "unregistered@example.com" {
+		t.Errorf("admin sender filter: expected sender unregistered@example.com, got %q", got)
+	}
+
+	// 3. Bare-name filters are normalized for admins too.
+	req = httptest.NewRequest("GET", "/v1/messages?recipient=viewer", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin bare filter: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) < 3 {
+		t.Fatal("Expected a third ListMessages call")
+	}
+	recips := mockStorage.listFilters[2].Recipients
+	if len(recips) != 1 || recips[0] != "viewer@localhost" {
+		t.Errorf("admin bare filter: expected recipient [viewer@localhost], got %v", recips)
+	}
+
+	// 4. The registered agent's key stays scoped: the foreign messages are
+	// post-filtered out.
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("agent list: expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal agent list: %v", err)
+	}
+	if len(listResp.Messages) != 0 {
+		t.Errorf("agent list: expected 0 messages for foreign traffic, got %d", len(listResp.Messages))
+	}
+
+	// 5. An invalid admin key is rejected with 403.
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("X-Admin-Key", "wrong-key")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("invalid admin key: expected status %d, got %d", http.StatusForbidden, w.Code)
+	}
+}
+
+// TestHandleListMessages_MergedQueryUsesOrFilter verifies that the default
+// "all traffic" path (no sender/recipient filter) issues exactly one
+// OR-mode storage query covering both directions, with limit/offset intact,
+// instead of two independently paginated queries.
+func TestHandleListMessages_MergedQueryUsesOrFilter(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	now := time.Now().UTC()
+	if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+		MessageID:  "019fbd30-0001-75aa-8cd4-de1f14e011ab",
+		Timestamp:  now,
+		Sender:     "viewer@localhost",
+		Recipients: []string{"peer@localhost"},
+		Subject:    "sent",
+	}); err != nil {
+		t.Fatalf("seed sent message: %v", err)
+	}
+	if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+		MessageID:  "019fbd30-0002-75aa-8cd4-de1f14e011ab",
+		Timestamp:  now.Add(-time.Minute),
+		Sender:     "peer@localhost",
+		Recipients: []string{"viewer@localhost"},
+		Subject:    "received",
+	}); err != nil {
+		t.Fatalf("seed received message: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=5&offset=2", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// The merged path must issue one OR-mode ListMessages query (limit/offset
+	// intact) and one OR-mode CountMessages query for the total, so the count
+	// covers the full filtered set without materializing it.
+	if len(mockStorage.listFilters) != 1 {
+		t.Fatalf("Expected 1 ListMessages query for the merged path, got %d", len(mockStorage.listFilters))
+	}
+	filter := mockStorage.listFilters[0]
+	if !filter.Or {
+		t.Error("Expected the merged query to use OR semantics")
+	}
+	if filter.Sender != "viewer@localhost" {
+		t.Errorf("Expected merged query sender viewer@localhost, got %q", filter.Sender)
+	}
+	if len(filter.Recipients) != 1 || filter.Recipients[0] != "viewer@localhost" {
+		t.Errorf("Expected merged query recipients [viewer@localhost], got %v", filter.Recipients)
+	}
+	if filter.Limit != 5 {
+		t.Errorf("Expected limit 5 propagated to storage, got %d", filter.Limit)
+	}
+	if filter.Offset != 2 {
+		t.Errorf("Expected offset 2 propagated to storage, got %d", filter.Offset)
+	}
+
+	// The total-count query must keep OR semantics; pagination is ignored by
+	// the storage backends for counting.
+	if len(mockStorage.countFilters) != 1 {
+		t.Fatalf("Expected 1 CountMessages query for the merged path, got %d", len(mockStorage.countFilters))
+	}
+	countFilter := mockStorage.countFilters[0]
+	if !countFilter.Or {
+		t.Error("Expected the total-count query to keep OR semantics")
+	}
+	if countFilter.Sender != "viewer@localhost" {
+		t.Errorf("Expected count query sender viewer@localhost, got %q", countFilter.Sender)
+	}
+	if len(countFilter.Recipients) != 1 || countFilter.Recipients[0] != "viewer@localhost" {
+		t.Errorf("Expected count query recipients [viewer@localhost], got %v", countFilter.Recipients)
+	}
+
+	// Both directions must be surfaced in the response.
+	var response struct {
+		Messages []map[string]interface{} `json:"messages"`
+		Total    int                      `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Total != 2 {
+		t.Errorf("Expected total 2, got %d", response.Total)
+	}
+	if len(response.Messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(response.Messages))
+	}
+	subjects := map[string]bool{}
+	for _, m := range response.Messages {
+		subjects[m["subject"].(string)] = true
+	}
+	if !subjects["sent"] || !subjects["received"] {
+		t.Errorf("Expected both sent and received messages in the merged result, got %v", subjects)
+	}
+}
+
+// TestHandleListMessages_MergedQueryPagination runs the merged "all traffic"
+// path against real storage and verifies that limit/offset apply to the
+// merged, newest-first result set: pages never exceed limit, consecutive
+// pages neither overlap nor drop messages, and the ordering is globally
+// newest-first.
+func TestHandleListMessages_MergedQueryPagination(t *testing.T) {
+	server := createTestServerWithRealProcessor()
+	key := registerTestAgent(t, server, "viewer")
+
+	ctx := context.Background()
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	const total = 8
+	// Newest-first expected order; even indices are sent by the viewer, odd
+	// indices are received by it.
+	newestFirst := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		sender, recipient := "viewer@localhost", "peer@localhost"
+		if i%2 == 1 {
+			sender, recipient = "peer@localhost", "viewer@localhost"
+		}
+		msgID := fmt.Sprintf("019fbd30-%04d-75aa-8cd4-de1f14e011ab", i)
+		msg := &types.Message{
+			Version:        "1.0",
+			MessageID:      msgID,
+			IdempotencyKey: "11111111-1111-4111-8111-111111111111",
+			Timestamp:      base.Add(time.Duration(total-1-i) * time.Minute),
+			Sender:         sender,
+			Recipients:     []string{recipient},
+			Subject:        fmt.Sprintf("merged-%d", i),
+			Payload:        json.RawMessage(`{"i":` + fmt.Sprintf("%d", i) + `}`),
+		}
+		if err := server.storage.StoreMessage(ctx, msg); err != nil {
+			t.Fatalf("seed %s: %v", msgID, err)
+		}
+		newestFirst = append(newestFirst, msgID)
+	}
+
+	// Page through the full set with limit=3.
+	const limit = 3
+	seen := make(map[string]struct{})
+	var all []string
+	for offset := 0; offset < total; offset += limit {
+		req := httptest.NewRequest("GET", fmt.Sprintf("/v1/messages?limit=%d&offset=%d", limit, offset), nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		server.router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("offset=%d: expected status %d, got %d: %s", offset, http.StatusOK, w.Code, w.Body.String())
+		}
+
+		var response struct {
+			Messages []struct {
+				MessageID string `json:"message_id"`
+				Timestamp string `json:"timestamp"`
+			} `json:"messages"`
+			Total  int `json:"total"`
+			Limit  int `json:"limit"`
+			Offset int `json:"offset"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatalf("offset=%d: unmarshal: %v", offset, err)
+		}
+
+		if response.Total != total {
+			t.Errorf("offset=%d: expected total %d, got %d", offset, total, response.Total)
+		}
+		if len(response.Messages) > limit {
+			t.Errorf("offset=%d: expected at most %d messages, got %d", offset, limit, len(response.Messages))
+		}
+
+		// Newest-first within the page.
+		for j := 1; j < len(response.Messages); j++ {
+			prev, err := time.Parse(time.RFC3339, response.Messages[j-1].Timestamp)
+			if err != nil {
+				t.Fatalf("offset=%d: parse previous timestamp: %v", offset, err)
+			}
+			cur, err := time.Parse(time.RFC3339, response.Messages[j].Timestamp)
+			if err != nil {
+				t.Fatalf("offset=%d: parse current timestamp: %v", offset, err)
+			}
+			if !prev.After(cur) {
+				t.Errorf("offset=%d: page not newest-first: %s before %s",
+					offset, response.Messages[j-1].MessageID, response.Messages[j].MessageID)
+			}
+		}
+
+		for _, m := range response.Messages {
+			if _, dup := seen[m.MessageID]; dup {
+				t.Errorf("offset=%d: duplicate message %s across pages", offset, m.MessageID)
+			}
+			seen[m.MessageID] = struct{}{}
+			all = append(all, m.MessageID)
+		}
+	}
+
+	if len(all) != total {
+		t.Errorf("Expected %d messages across pages, got %d", total, len(all))
+	}
+	for i, id := range newestFirst {
+		if i < len(all) && all[i] != id {
+			t.Errorf("Position %d: expected %s, got %s (merged list must be newest-first)", i, id, all[i])
+		}
+	}
+}
+
+// TestHandleListMessages_CountFailure verifies that a CountMessages failure
+// surfaces as an error response instead of being silently swallowed (the
+// previous total computation ignored storage errors and undercounted).
+func TestHandleListMessages_CountFailure(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	mockStorage.countError = fmt.Errorf("count exploded")
+
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errorResponse.Error.Code != "MESSAGE_LIST_FAILED" {
+		t.Errorf("Expected error code MESSAGE_LIST_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleListMessages_StatusesBatch verifies that delivery statuses for the
+// whole page are fetched in a single GetStatuses call (not N+1 GetStatus
+// calls) and attached to the response items.
+func TestHandleListMessages_StatusesBatch(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	now := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		msgID := fmt.Sprintf("019fbd30-%04d-75aa-8cd4-de1f14e011ab", i)
+		if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+			MessageID:  msgID,
+			Timestamp:  now.Add(-time.Duration(i) * time.Minute),
+			Sender:     "viewer@localhost",
+			Recipients: []string{"peer@localhost"},
+			Subject:    fmt.Sprintf("msg-%d", i),
+		}); err != nil {
+			t.Fatalf("seed message %d: %v", i, err)
+		}
+		if err := mockStorage.StoreStatus(context.Background(), msgID, &types.MessageStatus{
+			MessageID: msgID,
+			Status:    types.StatusDelivered,
+		}); err != nil {
+			t.Fatalf("seed status %d: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	// Statuses must be fetched in exactly one batch containing every page
+	// message ID, not one GetStatus call per message.
+	if len(mockStorage.statusBatches) != 1 {
+		t.Fatalf("Expected exactly 1 GetStatuses batch, got %d", len(mockStorage.statusBatches))
+	}
+	batch := mockStorage.statusBatches[0]
+	if len(batch) != 3 {
+		t.Fatalf("Expected batch of 3 message IDs, got %d", len(batch))
+	}
+	got := make(map[string]bool)
+	for _, id := range batch {
+		got[id] = true
+	}
+	for i := 0; i < 3; i++ {
+		msgID := fmt.Sprintf("019fbd30-%04d-75aa-8cd4-de1f14e011ab", i)
+		if !got[msgID] {
+			t.Errorf("Expected batch to include %s, got %v", msgID, batch)
+		}
+	}
+
+	// Each response item must carry its delivery status.
+	var response struct {
+		Messages []map[string]interface{} `json:"messages"`
+		Total    int                      `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(response.Messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d", len(response.Messages))
+	}
+	for _, m := range response.Messages {
+		if m["status"] != string(types.StatusDelivered) {
+			t.Errorf("Expected status %s on message %v, got %v", types.StatusDelivered, m["message_id"], m["status"])
+		}
+		if _, ok := m["delivery"].(map[string]interface{}); !ok {
+			t.Errorf("Expected delivery attached to message %v", m["message_id"])
+		}
+	}
+}
+
+// TestHandleListMessages_StatusesFailure verifies that a GetStatuses failure
+// surfaces as an error response instead of silently dropping statuses.
+func TestHandleListMessages_StatusesFailure(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+		MessageID:  "019fbd30-0000-75aa-8cd4-de1f14e011ab",
+		Timestamp:  time.Now().UTC(),
+		Sender:     "viewer@localhost",
+		Recipients: []string{"peer@localhost"},
+		Subject:    "hello",
+	}); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+	mockStorage.statusesError = fmt.Errorf("statuses exploded")
+
+	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if errorResponse.Error.Code != "MESSAGE_LIST_FAILED" {
+		t.Errorf("Expected error code MESSAGE_LIST_FAILED, got %s", errorResponse.Error.Code)
 	}
 }
 
@@ -1538,6 +3035,409 @@ func TestHandleListAgents_Success(t *testing.T) {
 
 	if len(agents) != 2 {
 		t.Errorf("Expected 2 agents, got %d", len(agents))
+	}
+}
+
+// TestHandleRotateAgentKey_Success verifies a new key is issued and the
+// old key no longer authenticates.
+func TestHandleRotateAgentKey_Success(t *testing.T) {
+	server := createTestServer()
+	ctx := context.Background()
+
+	// Register an agent and capture the original API key.
+	agent := &agents.LocalAgent{Address: "rotate-me", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	oldKey := agent.APIKey
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var response struct {
+		Message string `json:"message"`
+		Address string `json:"address"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.APIKey == "" {
+		t.Fatal("Expected a new api_key in the response")
+	}
+	if response.APIKey == oldKey {
+		t.Error("Expected the new key to differ from the old key")
+	}
+	if response.Address != "rotate-me@localhost" {
+		t.Errorf("Expected normalized address rotate-me@localhost, got %s", response.Address)
+	}
+
+	// Old key must no longer verify.
+	if server.agentRegistry.VerifyAPIKey(ctx, "rotate-me@localhost", oldKey) {
+		t.Error("Old API key should be invalid after rotation")
+	}
+	// New key must verify.
+	if !server.agentRegistry.VerifyAPIKey(ctx, "rotate-me@localhost", response.APIKey) {
+		t.Error("New API key should verify after rotation")
+	}
+}
+
+// TestHandleRotateAgentKey_NotFound verifies rotation of an unknown agent is
+// reported as 404 (do not retry), not a 400 that a retry script cannot tell
+// apart from a storage failure.
+func TestHandleRotateAgentKey_NotFound(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/nonexistent/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("Expected AGENT_NOT_FOUND, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleRotateAgentKey_StorageError verifies that a transient storage
+// outage propagating out of the rotation write is reported as 500 so the
+// caller retries, instead of being flattened into 400.
+func TestHandleRotateAgentKey_StorageError(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+
+	agent := &agents.LocalAgent{Address: "rotate-me", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	mockStorage.agentFieldsError = fmt.Errorf("connection refused")
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
+		t.Errorf("Expected AGENT_KEY_ROTATION_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleRotateAgentKey_ForeignDomain verifies that a foreign-domain
+// address is rejected with an explicit domain-mismatch error before reaching
+// the registry, matching the sibling PATCH/DELETE endpoints, instead of
+// surfacing as a misleading "agent not found".
+func TestHandleRotateAgentKey_ForeignDomain(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/foo@evil.com/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
+		t.Errorf("Expected AGENT_KEY_ROTATION_FAILED, got %s", errorResponse.Error.Code)
+	}
+	detail, _ := errorResponse.Error.Details["error"].(string)
+	if !strings.Contains(detail, "does not match local domain") {
+		t.Errorf("Expected domain-mismatch error, got %q", detail)
+	}
+}
+
+// TestHandleRotateAgentKey_FullLocalAddress verifies that a full local
+// address is accepted and normalized exactly like a bare name.
+func TestHandleRotateAgentKey_FullLocalAddress(t *testing.T) {
+	server := createTestServer()
+
+	agent := &agents.LocalAgent{Address: "rotate-me", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me@localhost/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var response struct {
+		Address string `json:"address"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Address != "rotate-me@localhost" {
+		t.Errorf("Expected address rotate-me@localhost, got %s", response.Address)
+	}
+	if response.APIKey == "" {
+		t.Error("Expected a new api_key in the response")
+	}
+}
+
+// TestHandleUpdateAgent_Success verifies delivery mode and schemas can be
+// updated on an existing agent.
+func TestHandleUpdateAgent_Success(t *testing.T) {
+	server := createTestServer()
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	body := []byte(`{"delivery_mode":"push","push_target":"https://hooks.example.com/a","supported_schemas":["agntcy:upd.test.v1"]}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var response struct {
+		Message string `json:"message"`
+		Agent   struct {
+			Address          string   `json:"address"`
+			DeliveryMode     string   `json:"delivery_mode"`
+			PushTarget       string   `json:"push_target"`
+			SupportedSchemas []string `json:"supported_schemas"`
+			APIKey           string   `json:"api_key"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Agent.DeliveryMode != "push" {
+		t.Errorf("Expected delivery_mode push, got %s", response.Agent.DeliveryMode)
+	}
+	if response.Agent.PushTarget != "https://hooks.example.com/a" {
+		t.Errorf("Expected push target updated, got %s", response.Agent.PushTarget)
+	}
+	if len(response.Agent.SupportedSchemas) != 1 || response.Agent.SupportedSchemas[0] != "agntcy:upd.test.v1" {
+		t.Errorf("Expected schemas updated, got %v", response.Agent.SupportedSchemas)
+	}
+	if response.Agent.APIKey != "" {
+		t.Error("API key must be redacted in update response")
+	}
+
+	// Verify storage reflects the change.
+	stored, err := server.agentRegistry.GetAgent(ctx, "upd-agent@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if stored.DeliveryMode != "push" {
+		t.Errorf("Expected stored delivery_mode push, got %s", stored.DeliveryMode)
+	}
+}
+
+// TestHandleUpdateAgent_PushWithoutTarget verifies push mode without a
+// target URL is rejected.
+func TestHandleUpdateAgent_PushWithoutTarget(t *testing.T) {
+	server := createTestServer()
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{Address: "upd-agent2", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	body := []byte(`{"delivery_mode":"push"}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent2", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleUpdateAgent_RemovePushTargetRejected verifies that clearing the
+// push target while the agent is in push mode is rejected and the stored
+// record stays unchanged, so the delivery invariant holds for the combined
+// state rather than only the pre-update record.
+func TestHandleUpdateAgent_RemovePushTargetRejected(t *testing.T) {
+	server := createTestServer()
+	ctx := context.Background()
+
+	agent := &agents.LocalAgent{
+		Address:      "upd-agent3",
+		DeliveryMode: "push",
+		PushTarget:   "https://hooks.example.com/upd-agent3",
+	}
+	if err := server.agentRegistry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	body := []byte(`{"push_target":""}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent3", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+
+	// The stored record must be untouched by the rejected update.
+	stored, err := server.agentRegistry.GetAgent(ctx, "upd-agent3@localhost")
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if stored.DeliveryMode != "push" || stored.PushTarget != "https://hooks.example.com/upd-agent3" {
+		t.Errorf("agent mutated by rejected update: mode=%q target=%q", stored.DeliveryMode, stored.PushTarget)
+	}
+}
+
+// TestHandleUpdateAgent_NotFound verifies updating an unknown agent is
+// reported as 404 (do not retry), not a 400 that a retry script cannot tell
+// apart from a storage failure.
+func TestHandleUpdateAgent_NotFound(t *testing.T) {
+	server := createTestServer()
+
+	body := []byte(`{"delivery_mode":"pull"}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/ghost", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d, got %d", http.StatusNotFound, w.Code)
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("Expected AGENT_NOT_FOUND, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleUpdateAgent_StorageError verifies that a transient storage
+// outage propagating out of the field-level update is reported as 500 so
+// the caller retries, instead of being flattened into 400.
+func TestHandleUpdateAgent_StorageError(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+
+	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	mockStorage.agentFieldsError = fmt.Errorf("connection refused")
+
+	body := []byte(`{"delivery_mode":"push","push_target":"https://hooks.example.com/a"}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleUpdateAgent_InvalidSchema verifies that a schema declaration that
+// fails the registry's own validation is a client error (400), not a storage
+// failure (5xx) — the "invalid supported schemas" classification branch.
+func TestHandleUpdateAgent_InvalidSchema(t *testing.T) {
+	server := createTestServer()
+
+	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	body := []byte(`{"supported_schemas":["not-a-schema"]}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleUpdateAgent_ForeignDomain verifies that an address with a foreign
+// domain is rejected by the registry's resolution layer as a client error
+// (400), not reported as a missing agent (404) or a storage failure (500).
+func TestHandleUpdateAgent_ForeignDomain(t *testing.T) {
+	server := createTestServer()
+
+	body := []byte(`{"delivery_mode":"pull"}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/foo@evil.com", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_UPDATE_FAILED" {
+		t.Errorf("Expected AGENT_UPDATE_FAILED, got %s", errorResponse.Error.Code)
 	}
 }
 

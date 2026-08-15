@@ -170,6 +170,15 @@ func (m *MockStorage) ListMessages(ctx context.Context, filter storage.MessageFi
 	return results, nil
 }
 
+func (m *MockStorage) CountMessages(ctx context.Context, filter storage.MessageFilter) (int64, error) {
+	if m.error != nil {
+		return 0, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	return int64(len(m.messages)), nil
+}
+
 func (m *MockStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
 	if m.error != nil {
 		return m.error
@@ -190,6 +199,21 @@ func (m *MockStorage) GetStatus(ctx context.Context, messageID string) (*types.M
 		return status, nil
 	}
 	return nil, fmt.Errorf("message status not found: %s", messageID)
+}
+
+func (m *MockStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	if m.error != nil {
+		return nil, m.error
+	}
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	result := make(map[string]*types.MessageStatus)
+	for _, id := range messageIDs {
+		if status, exists := m.statuses[id]; exists {
+			result[id] = status
+		}
+	}
+	return result, nil
 }
 
 func (m *MockStorage) UpdateStatus(ctx context.Context, messageID string, updater storage.StatusUpdater) error {
@@ -318,6 +342,33 @@ func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent)
 
 	agentCopy := *agent
 	m.agents[agent.Address] = &agentCopy
+	return nil
+}
+
+func (m *MockStorage) UpdateAgentFields(ctx context.Context, agentAddress string, fields agents.AgentFields) error {
+	if _, exists := m.agents[agentAddress]; !exists {
+		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+	agent := m.agents[agentAddress]
+	if fields.DeliveryMode != nil {
+		agent.DeliveryMode = *fields.DeliveryMode
+	}
+	if fields.PushTarget != nil {
+		agent.PushTarget = *fields.PushTarget
+	}
+	if fields.PushHeaders != nil {
+		agent.Headers = fields.PushHeaders
+	}
+	if fields.SupportedSchemas != nil {
+		agent.SupportedSchemas = fields.SupportedSchemas
+		agent.RequiresSchema = len(fields.SupportedSchemas) > 0
+	}
+	if fields.LastAccess != nil {
+		agent.LastAccess = *fields.LastAccess
+	}
+	if fields.APIKey != nil {
+		agent.APIKey = *fields.APIKey
+	}
 	return nil
 }
 

@@ -23,14 +23,23 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
+
+// ErrInvalidDeliveryConfig is wrapped by ValidateDeliveryConfig errors so
+// callers (e.g. the server layer mapping failures to HTTP responses) can
+// distinguish a rejected delivery configuration — a client-side 400 — from
+// a genuine storage failure — a 5xx — even when the validation runs inside
+// the storage backend's atomic update.
+var ErrInvalidDeliveryConfig = errors.New("invalid delivery configuration")
 
 // LocalAgent represents a local agent configuration
 type LocalAgent struct {
@@ -51,7 +60,18 @@ type Registry struct {
 	schemaManager SchemaManager
 	storage       AgentStore
 	apiKeySalt    string
+
+	// lastAccessMu guards lastAccessAt, which debounces last_access writes
+	// so a burst of read requests does not issue one storage UPDATE each.
+	lastAccessMu sync.Mutex
+	lastAccessAt map[string]time.Time
 }
+
+// lastAccessWriteDebounce is the minimum interval between two last_access
+// writes for the same agent. The timestamp only feeds the discovery
+// "active_only" filter (which uses day-scale thresholds), so sub-minute
+// staleness is immaterial.
+const lastAccessWriteDebounce = time.Minute
 
 // SchemaManager interface for schema validation
 type SchemaManager interface {
@@ -73,7 +93,38 @@ func NewRegistry(config RegistryConfig, storage AgentStore) *Registry {
 		schemaManager: config.SchemaManager,
 		storage:       storage,
 		apiKeySalt:    config.APIKeySalt,
+		lastAccessAt:  make(map[string]time.Time),
 	}
+}
+
+// schemaManagerAvailable reports whether the schema manager is usable,
+// guarding against "typed nil" interfaces (a nil *schema.Manager stored in
+// the SchemaManager interface, which is non-nil as an interface value but
+// panics when any method is invoked).
+func (r *Registry) schemaManagerAvailable() bool {
+	if r.schemaManager == nil {
+		return false
+	}
+	if sm, ok := r.schemaManager.(*schema.Manager); ok {
+		return sm != nil
+	}
+	return true
+}
+
+// ValidateDeliveryConfig enforces the delivery-mode invariants shared by
+// registration and field-level updates: the mode must be 'push' or 'pull',
+// and push mode requires a non-empty push target. Storage backends call it on
+// the merged state inside their atomic update, so two concurrent field-level
+// updates cannot jointly store an invalid combination even though each passes
+// validation against the record it read.
+func ValidateDeliveryConfig(deliveryMode, pushTarget string) error {
+	if deliveryMode != "push" && deliveryMode != "pull" {
+		return fmt.Errorf("%w: delivery mode must be 'push' or 'pull'", ErrInvalidDeliveryConfig)
+	}
+	if deliveryMode == "push" && pushTarget == "" {
+		return fmt.Errorf("%w: push target URL is required for push delivery mode", ErrInvalidDeliveryConfig)
+	}
+	return nil
 }
 
 // RegisterAgent registers a local agent with delivery configuration
@@ -91,12 +142,8 @@ func (r *Registry) RegisterAgent(ctx context.Context, agent *LocalAgent) error {
 	// Update the agent with the normalized full address
 	agent.Address = fullAddress
 
-	if agent.DeliveryMode != "push" && agent.DeliveryMode != "pull" {
-		return fmt.Errorf("delivery mode must be 'push' or 'pull'")
-	}
-
-	if agent.DeliveryMode == "push" && agent.PushTarget == "" {
-		return fmt.Errorf("push target URL is required for push delivery mode")
+	if err := ValidateDeliveryConfig(agent.DeliveryMode, agent.PushTarget); err != nil {
+		return err
 	}
 
 	// Validate supported schemas
@@ -141,9 +188,9 @@ func (r *Registry) RegisterAgent(ctx context.Context, agent *LocalAgent) error {
 // UnregisterAgent removes a local agent
 func (r *Registry) UnregisterAgent(ctx context.Context, agentNameOrAddress string) error {
 	// Normalize the input to full address
-	fullAddress, err := r.normalizeAgentAddress(agentNameOrAddress)
+	fullAddress, err := r.resolveAgentAddress(agentNameOrAddress)
 	if err != nil {
-		return fmt.Errorf("invalid agent identifier: %w", err)
+		return err
 	}
 
 	err = r.storage.DeleteAgent(ctx, fullAddress)
@@ -177,6 +224,74 @@ func (r *Registry) getAgentInternal(ctx context.Context, agentAddress string) (*
 		return nil, fmt.Errorf("agent not found: %s", agentAddress)
 	}
 	return agent, nil
+}
+
+// UpdateAgent updates mutable delivery configuration for an existing agent.
+// Supported fields: delivery mode, push target, push headers, and supported
+// schemas. The API key is preserved.
+//
+// The update is applied as a field-level storage write so a concurrent key
+// rotation (which only touches the API key hash) is never clobbered by a
+// full-record read-modify-write.
+func (r *Registry) UpdateAgent(ctx context.Context, agentNameOrAddress string, updates *AgentUpdate) (*LocalAgent, error) {
+	fullAddress, err := r.resolveAgentAddress(agentNameOrAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	agent, err := r.getAgentInternal(ctx, fullAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate against the merged state (current values overridden by the
+	// requested updates) before writing anything. This is a fast-fail check;
+	// the storage layer re-validates the merged state atomically inside its
+	// update, because the record read here may be stale by the time the write
+	// lands when two updates race.
+	deliveryMode := agent.DeliveryMode
+	if updates.DeliveryMode != nil {
+		deliveryMode = *updates.DeliveryMode
+	}
+	pushTarget := agent.PushTarget
+	if updates.PushTarget != nil {
+		pushTarget = *updates.PushTarget
+	}
+	if err := ValidateDeliveryConfig(deliveryMode, pushTarget); err != nil {
+		return nil, err
+	}
+	if updates.SupportedSchemas != nil {
+		if err := r.validateSupportedSchemas(ctx, updates.SupportedSchemas); err != nil {
+			return nil, fmt.Errorf("invalid supported schemas: %w", err)
+		}
+	}
+
+	fields := AgentFields{
+		DeliveryMode:     updates.DeliveryMode,
+		PushTarget:       updates.PushTarget,
+		PushHeaders:      updates.PushHeaders,
+		SupportedSchemas: updates.SupportedSchemas,
+	}
+	if err := r.storage.UpdateAgentFields(ctx, fullAddress, fields); err != nil {
+		return nil, fmt.Errorf("failed to update agent: %w", err)
+	}
+
+	// Return a copy of the freshly stored record with the API key redacted.
+	updated, err := r.getAgentInternal(ctx, fullAddress)
+	if err != nil {
+		return nil, err
+	}
+	result := *updated
+	result.APIKey = ""
+	return &result, nil
+}
+
+// AgentUpdate contains optional fields to update on an agent.
+type AgentUpdate struct {
+	DeliveryMode     *string           `json:"delivery_mode,omitempty"`
+	PushTarget       *string           `json:"push_target,omitempty"`
+	PushHeaders      map[string]string `json:"push_headers,omitempty"`
+	SupportedSchemas []string          `json:"supported_schemas,omitempty"`
 }
 
 // GetAllAgents returns all registered local agents
@@ -233,38 +348,74 @@ func (r *Registry) VerifyAPIKey(ctx context.Context, agentAddress, apiKey string
 	return subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashedInput)) == 1
 }
 
-// UpdateLastAccess updates the last access timestamp for an agent
-func (r *Registry) UpdateLastAccess(ctx context.Context, agentAddress string) {
-	agent, err := r.getAgentInternal(ctx, agentAddress)
-	if err != nil || agent == nil {
-		return
+// AuthenticateAgent returns the full address of the registered agent that
+// owns the given API key, or ok=false if none does. The presented key is
+// hashed once and compared against a single listing of agents — the stored
+// API key is already the salted hash — so authentication costs one listing
+// plus a constant-time comparison per agent instead of a per-agent storage
+// read and a redundant hash per iteration.
+func (r *Registry) AuthenticateAgent(ctx context.Context, apiKey string) (string, bool) {
+	if apiKey == "" {
+		return "", false
 	}
 
-	agent.LastAccess = time.Now().UTC()
-	err = r.storage.UpdateAgent(ctx, agent)
+	hashed := r.hashAPIKey(apiKey)
+	agents, err := r.storage.ListAgents(ctx)
 	if err != nil {
+		return "", false
+	}
+
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		// Use constant-time comparison to prevent timing attacks.
+		if subtle.ConstantTimeCompare([]byte(agent.APIKey), []byte(hashed)) == 1 {
+			return agent.Address, true
+		}
+	}
+	return "", false
+}
+
+// UpdateLastAccess updates the last access timestamp for an agent using a
+// field-level write so it cannot clobber a concurrent key rotation. Writes
+// are debounced to at most one per debounce window per agent, so a burst of
+// read requests does not issue one storage UPDATE each.
+func (r *Registry) UpdateLastAccess(ctx context.Context, agentAddress string) {
+	now := time.Now().UTC()
+
+	r.lastAccessMu.Lock()
+	if last, ok := r.lastAccessAt[agentAddress]; ok && now.Sub(last) < lastAccessWriteDebounce {
+		r.lastAccessMu.Unlock()
+		return
+	}
+	r.lastAccessAt[agentAddress] = now
+	r.lastAccessMu.Unlock()
+
+	if err := r.storage.UpdateAgentFields(ctx, agentAddress, AgentFields{LastAccess: &now}); err != nil {
 		return
 	}
 }
 
-// RotateAPIKey generates a new API key for an existing agent
+// RotateAPIKey generates a new API key for an existing agent. Only the API
+// key hash is written, so a concurrent agent update is never clobbered.
+//
+// No pre-check read is performed: the storage layer reports missing agents
+// and propagates underlying storage errors through UpdateAgentFields, so a
+// transient storage outage surfaces as such instead of being masked as
+// "agent not found".
 func (r *Registry) RotateAPIKey(ctx context.Context, agentAddress string) (string, error) {
-	agent, err := r.GetAgent(ctx, agentAddress)
-	if err != nil || agent == nil {
-		return "", fmt.Errorf("agent not found: %s", agentAddress)
-	}
-
 	// Generate new API key
 	newAPIKey, err := r.GenerateAPIKey()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate new API key: %w", err)
 	}
 
-	// Update agent with new key
-	agent.APIKey = r.hashAPIKey(newAPIKey)
-	err = r.storage.UpdateAgent(ctx, agent)
-	if err != nil {
-		return "", fmt.Errorf("failed to update agent with new API key: %w", err)
+	// Update only the key hash; other fields (and concurrent updates) are
+	// left untouched.
+	hashed := r.hashAPIKey(newAPIKey)
+	if err := r.storage.UpdateAgentFields(ctx, agentAddress, AgentFields{APIKey: &hashed}); err != nil {
+		return "", fmt.Errorf("failed to rotate agent API key: %w", err)
 	}
 
 	return newAPIKey, nil
@@ -334,7 +485,7 @@ func (r *Registry) validateSupportedSchemas(ctx context.Context, schemas []strin
 		}
 
 		// For non-wildcard schemas, check if they exist in the registry
-		if !strings.HasSuffix(schemaStr, "*") && r.schemaManager != nil {
+		if !strings.HasSuffix(schemaStr, "*") && r.schemaManagerAvailable() {
 			schemaID, err := schema.ParseSchemaIdentifier(schemaStr)
 			if err != nil {
 				return fmt.Errorf("invalid schema identifier '%s': %w", schemaStr, err)
@@ -386,6 +537,32 @@ func (r *Registry) validateSchemaFormat(schemaStr string) error {
 	}
 
 	return nil
+}
+
+// resolveAgentAddress accepts either a bare agent name or a full address
+// matching the local domain, and returns the normalized full address.
+// Registration still requires a bare name via normalizeAgentAddress; this
+// helper is used by update/unregister operations that may receive the full
+// address from API clients. Domain labels are case-insensitive (RFC 1035),
+// so a correctly spelled local address in the wrong case resolves like its
+// lowercase form.
+func (r *Registry) resolveAgentAddress(nameOrAddress string) (string, error) {
+	if strings.Contains(nameOrAddress, "@") {
+		parts := strings.SplitN(nameOrAddress, "@", 2)
+		if !strings.EqualFold(parts[1], r.localDomain) {
+			return "", fmt.Errorf("agent address domain %q does not match local domain %q", parts[1], r.localDomain)
+		}
+		nameOrAddress = parts[0]
+	}
+	return r.normalizeAgentAddress(nameOrAddress)
+}
+
+// ResolveAgentAddress accepts either a bare agent name or a full address
+// matching the local domain and returns the normalized full address. It
+// wraps resolveAgentAddress so callers outside the package (e.g. the server
+// layer normalizing filter parameters) share the same resolution semantics.
+func (r *Registry) ResolveAgentAddress(nameOrAddress string) (string, error) {
+	return r.resolveAgentAddress(nameOrAddress)
 }
 
 // normalizeAgentAddress processes agent name and constructs full address

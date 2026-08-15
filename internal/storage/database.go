@@ -141,7 +141,7 @@ func (ds *DatabaseStorage) GetMessage(ctx context.Context, messageID string) (*t
 		Where("message_id = ?", messageID).
 		First(&dbMessage).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil, fmt.Errorf("message not found: %s", messageID)
+			return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 		}
 		return nil, fmt.Errorf("failed to get message: %w", err)
 	}
@@ -191,22 +191,32 @@ func (ds *DatabaseStorage) DeleteMessage(ctx context.Context, messageID string) 
 	})
 }
 
-// ListMessages returns messages matching the filter criteria
-func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilter) ([]*types.Message, error) {
-	query := ds.db.WithContext(ctx).Model(&Message{})
-
-	// Apply filters
-	if filter.Sender != "" {
-		query = query.Where("sender = ?", filter.Sender)
-	}
-
-	if len(filter.Recipients) > 0 {
-		// Use JSONB containment operator to check if recipients array contains any of the filter recipients
+// applyMessageFilters applies the shared filter predicates (sender/recipients,
+// status, since) to a message query. Ordering and pagination are applied by
+// the caller so that ListMessages and CountMessages stay consistent.
+func (ds *DatabaseStorage) applyMessageFilters(query *gorm.DB, filter MessageFilter) (*gorm.DB, error) {
+	// Sender/recipient filters are ANDed by default; when filter.Or is set
+	// with both sides present, a single clause matches "sent by OR addressed
+	// to" so that pagination applies to the merged result set.
+	if filter.Or && filter.Sender != "" && len(filter.Recipients) > 0 {
 		recipientsJSON, err := json.Marshal(filter.Recipients)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal recipients filter: %w", err)
 		}
-		query = query.Where("recipients @> ?", string(recipientsJSON))
+		query = query.Where("sender = ? OR recipients @> ?", filter.Sender, string(recipientsJSON))
+	} else {
+		if filter.Sender != "" {
+			query = query.Where("sender = ?", filter.Sender)
+		}
+
+		if len(filter.Recipients) > 0 {
+			// Use JSONB containment operator to check if recipients array contains any of the filter recipients
+			recipientsJSON, err := json.Marshal(filter.Recipients)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal recipients filter: %w", err)
+			}
+			query = query.Where("recipients @> ?", string(recipientsJSON))
+		}
 	}
 
 	if filter.Status != "" {
@@ -215,12 +225,29 @@ func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilte
 			Where("message_statuses.status = ?", filter.Status)
 	}
 
+	// Since is an inclusive lower bound on the message timestamp, bound at
+	// full precision so a sub-second cursor is not floored to whole seconds.
 	if filter.Since != nil {
-		query = query.Where("timestamp >= ?", time.Unix(*filter.Since, 0))
+		query = query.Where("timestamp >= ?", *filter.Since)
 	}
 
-	// Apply ordering and pagination
-	query = query.Order("created_at DESC")
+	return query, nil
+}
+
+// ListMessages returns messages matching the filter criteria
+func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilter) ([]*types.Message, error) {
+	query := ds.db.WithContext(ctx).Model(&Message{})
+
+	query, err := ds.applyMessageFilters(query, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply ordering and pagination. The messages table has no created_at
+	// column — only timestamp — and the column is qualified so the ordering
+	// stays unambiguous when the status filter joins message_statuses (which
+	// does have created_at). This matches MemoryStorage's newest-first order.
+	query = query.Order("messages.timestamp DESC")
 
 	if filter.Offset > 0 {
 		query = query.Offset(filter.Offset)
@@ -246,6 +273,24 @@ func (ds *DatabaseStorage) ListMessages(ctx context.Context, filter MessageFilte
 	}
 
 	return messages, nil
+}
+
+// CountMessages returns the number of messages matching the filter criteria
+// without materializing the result set. Limit and Offset are ignored: the
+// count always covers the full filtered set.
+func (ds *DatabaseStorage) CountMessages(ctx context.Context, filter MessageFilter) (int64, error) {
+	query := ds.db.WithContext(ctx).Model(&Message{})
+
+	query, err := ds.applyMessageFilters(query, filter)
+	if err != nil {
+		return 0, err
+	}
+
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("failed to count messages: %w", err)
+	}
+	return count, nil
 }
 
 // StoreStatus stores message status
@@ -314,7 +359,7 @@ func (ds *DatabaseStorage) GetStatus(ctx context.Context, messageID string) (*ty
 		Where("message_id = ?", messageID).
 		First(&messageStatus).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil, fmt.Errorf("message status not found: %s", messageID)
+			return nil, fmt.Errorf("%w: %s", ErrMessageNotFound, messageID)
 		}
 		return nil, fmt.Errorf("failed to get message status: %w", err)
 	}
@@ -328,6 +373,48 @@ func (ds *DatabaseStorage) GetStatus(ctx context.Context, messageID string) (*ty
 	}
 
 	return ds.convertToTypesMessageStatus(&messageStatus, recipientStatuses)
+}
+
+// GetStatuses retrieves the message statuses for the given IDs with two IN
+// queries (message statuses + recipient statuses) so the caller avoids an
+// N+1 GetStatus per message. IDs without a stored status are omitted from
+// the result, keyed by message ID.
+func (ds *DatabaseStorage) GetStatuses(ctx context.Context, messageIDs []string) (map[string]*types.MessageStatus, error) {
+	if len(messageIDs) == 0 {
+		return map[string]*types.MessageStatus{}, nil
+	}
+
+	// Fetch all message statuses in one batch.
+	var messageStatuses []MessageStatus
+	if err := ds.db.WithContext(ctx).
+		Where("message_id IN ?", messageIDs).
+		Find(&messageStatuses).Error; err != nil {
+		return nil, fmt.Errorf("failed to get message statuses: %w", err)
+	}
+
+	// Fetch all recipient statuses in one batch.
+	var recipientStatuses []RecipientStatus
+	if err := ds.db.WithContext(ctx).
+		Where("message_id IN ?", messageIDs).
+		Find(&recipientStatuses).Error; err != nil {
+		return nil, fmt.Errorf("failed to get recipient statuses: %w", err)
+	}
+
+	// Group recipient statuses by message ID.
+	recipientsByMessageID := make(map[string][]RecipientStatus, len(messageStatuses))
+	for _, rs := range recipientStatuses {
+		recipientsByMessageID[rs.MessageID] = append(recipientsByMessageID[rs.MessageID], rs)
+	}
+
+	result := make(map[string]*types.MessageStatus, len(messageStatuses))
+	for i := range messageStatuses {
+		status, err := ds.convertToTypesMessageStatus(&messageStatuses[i], recipientsByMessageID[messageStatuses[i].MessageID])
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert message status: %w", err)
+		}
+		result[messageStatuses[i].MessageID] = status
+	}
+	return result, nil
 }
 
 // UpdateStatus updates message status using the provided updater function
@@ -590,7 +677,7 @@ func (ds *DatabaseStorage) GetAgent(ctx context.Context, agentAddress string) (*
 		Where("address = ?", agentAddress).
 		First(&dbAgent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("agent not found: %s", agentAddress)
+			return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 		}
 		return nil, fmt.Errorf("failed to get agent: %w", err)
 	}
@@ -624,7 +711,116 @@ func (ds *DatabaseStorage) UpdateAgent(ctx context.Context, agent *agents.LocalA
 	}
 
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found: %s", agent.Address)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agent.Address)
+	}
+
+	return nil
+}
+
+// UpdateAgentFields updates only the specified fields of an existing agent.
+// The API key hash and any other unmentioned columns are preserved, so a
+// concurrent key rotation cannot be clobbered by a full-record update.
+func (ds *DatabaseStorage) UpdateAgentFields(ctx context.Context, agentAddress string, fields agents.AgentFields) error {
+	if agentAddress == "" {
+		return fmt.Errorf("agent address cannot be empty")
+	}
+
+	updates := map[string]interface{}{}
+	if fields.DeliveryMode != nil {
+		updates["delivery_mode"] = *fields.DeliveryMode
+	}
+	if fields.PushTarget != nil {
+		updates["push_target"] = *fields.PushTarget
+	}
+	if fields.PushHeaders != nil {
+		headersJSON, err := json.Marshal(fields.PushHeaders)
+		if err != nil {
+			return fmt.Errorf("failed to marshal headers: %w", err)
+		}
+		updates["headers"] = datatypes.JSON(headersJSON)
+	}
+	if fields.SupportedSchemas != nil {
+		schemasJSON, err := json.Marshal(fields.SupportedSchemas)
+		if err != nil {
+			return fmt.Errorf("failed to marshal supported schemas: %w", err)
+		}
+		if len(schemasJSON) == 0 || string(schemasJSON) == "null" {
+			schemasJSON = []byte("[]")
+		}
+		updates["supported_schemas"] = datatypes.JSON(schemasJSON)
+		updates["requires_schema"] = len(fields.SupportedSchemas) > 0
+	}
+	if fields.LastAccess != nil {
+		updates["last_access"] = *fields.LastAccess
+	}
+	if fields.APIKey != nil {
+		updates["api_key"] = *fields.APIKey
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	query := ds.db.WithContext(ctx).
+		Model(&Agent{}).
+		Where("address = ?", agentAddress)
+
+	// Delivery-invariant guard. COALESCE overlays the requested values (or
+	// NULL when a field is untouched) on the current row, so the predicate
+	// tests the combined state the UPDATE would produce. Postgres evaluates
+	// it under the row lock of the UPDATE itself, making the check atomic.
+	if fields.DeliveryMode != nil || fields.PushTarget != nil {
+		var newMode, newTarget interface{}
+		if fields.DeliveryMode != nil {
+			newMode = *fields.DeliveryMode
+		}
+		if fields.PushTarget != nil {
+			newTarget = *fields.PushTarget
+		}
+		query = query.Where(
+			"NOT (COALESCE(?, delivery_mode) NOT IN ('push','pull') OR (COALESCE(?, delivery_mode) = 'push' AND COALESCE(?, push_target) = ''))",
+			newMode, newMode, newTarget)
+	}
+
+	result := query.Updates(updates)
+
+	if result.Error != nil {
+		return fmt.Errorf("failed to update agent: %w", result.Error)
+	}
+
+	if result.RowsAffected == 0 {
+		// Either the agent does not exist or the merged state violates the
+		// delivery invariant. Re-read the row to tell the cases apart and
+		// return the precise validation error.
+		var existing Agent
+		if err := ds.db.WithContext(ctx).First(&existing, "address = ?", agentAddress).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
+			}
+			return fmt.Errorf("failed to update agent: %w", err)
+		}
+		mergedMode := existing.DeliveryMode
+		if fields.DeliveryMode != nil {
+			mergedMode = *fields.DeliveryMode
+		}
+		mergedTarget := ""
+		if existing.PushTarget != nil {
+			mergedTarget = *existing.PushTarget
+		}
+		if fields.PushTarget != nil {
+			mergedTarget = *fields.PushTarget
+		}
+		if err := agents.ValidateDeliveryConfig(mergedMode, mergedTarget); err != nil {
+			return err
+		}
+		// The row exists and its merged configuration is valid, yet the
+		// UPDATE matched nothing: the row changed between the UPDATE and the
+		// re-read (e.g. it was deleted and re-created concurrently, or the
+		// invariant predicate missed a state that has since been fixed). The
+		// write did not land, so report failure rather than silently
+		// returning success — the caller would otherwise confirm a stale
+		// record as updated.
+		return fmt.Errorf("agent update did not apply for %s: the row changed concurrently", agentAddress)
 	}
 
 	return nil
@@ -645,7 +841,7 @@ func (ds *DatabaseStorage) DeleteAgent(ctx context.Context, agentAddress string)
 	}
 
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 	}
 
 	return nil

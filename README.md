@@ -175,8 +175,10 @@ curl -X POST http://localhost:8080/v1/messages \
     "payload": {"message": "Testing graceful failure"}
   }'
 
-# Check message status (replace MESSAGE_ID)
-curl http://localhost:8080/v1/messages/MESSAGE_ID/status
+# Check message status (replace MESSAGE_ID; requires the agent API key or
+# the admin key, see "Message Query Authentication" below)
+curl -H "Authorization: Bearer Kx7vR9wQ2mP8sL3nF6jH4tY1uE5oA9cB2dG8hK0mN7pS4vW6xZ3q" \
+     http://localhost:8080/v1/messages/MESSAGE_ID/status
 ```
 
 **⚠️ Important**: Use `localhost`, `test.com`, or `example.com` domains for local testing. Avoid real domains like `gmail.com` as they will fail DNS discovery.
@@ -455,6 +457,21 @@ GET /v1/messages
 ```http
 GET /v1/messages/{message_id}
 ```
+
+**Authentication (message query endpoints)**: `GET /v1/messages`,
+`GET /v1/messages/{message_id}` and `GET /v1/messages/{message_id}/status`
+are **not public**. Each requires one of:
+
+- an **agent API key** (`Authorization: Bearer <agent-api-key>`) — the
+  caller is scoped to messages the agent sent or received; or
+- the **gateway admin key** (`X-Admin-Key` header, see below) — the admin
+  may inspect any message.
+
+`POST /v1/messages` remains **public by design** (AMTP is a federated
+protocol where remote senders have no local key). Practical consequence: a
+client that submits a message but holds no registered local agent key cannot
+poll the delivery status of its own message — it must present a registered
+agent's key or the admin key to do so.
 
 ### Local Agent Management
 

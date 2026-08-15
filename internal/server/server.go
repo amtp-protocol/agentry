@@ -72,6 +72,12 @@ type Server struct {
 	logger        *logging.Logger
 	metrics       metrics.MetricsProvider
 	workflow      workflow.Manager
+
+	// adminKeyValidator caches the parsed admin key set so the message query
+	// read path (GET /v1/messages, GET /v1/messages/:id, /status) never
+	// blocks on a filesystem read per request; it re-reads only when the key
+	// file's mtime or size changes.
+	adminKeyValidator *middleware.AdminKeyValidator
 }
 
 // New creates a new AMTP server
@@ -140,6 +146,13 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	agentRegistry := agents.NewRegistry(agentRegistryConfig, storage)
 
+	// Cache the admin key file so the message query read path never performs
+	// a blocking filesystem read per request (see isAdminRequest).
+	var adminKeyValidator *middleware.AdminKeyValidator
+	if cfg.Auth.AdminKeyFile != "" {
+		adminKeyValidator = middleware.NewAdminKeyValidator(cfg.Auth.AdminKeyFile)
+	}
+
 	// Create delivery engine with agent registry
 	deliveryConfig := processing.DeliveryConfig{
 		Timeout:        30 * time.Second,
@@ -181,17 +194,18 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Create server
 	server := &Server{
-		config:        cfg,
-		router:        router,
-		discovery:     discoveryService,
-		validator:     validator,
-		processor:     processor,
-		storage:       storage,
-		agentRegistry: agentRegistry,
-		schemaManager: schemaManager,
-		logger:        logger,
-		metrics:       metricsInstance,
-		workflow:      workflowManager,
+		config:            cfg,
+		router:            router,
+		discovery:         discoveryService,
+		validator:         validator,
+		processor:         processor,
+		storage:           storage,
+		agentRegistry:     agentRegistry,
+		schemaManager:     schemaManager,
+		logger:            logger,
+		metrics:           metricsInstance,
+		workflow:          workflowManager,
+		adminKeyValidator: adminKeyValidator,
 	}
 
 	// Setup middleware
@@ -292,7 +306,12 @@ func (s *Server) setupRoutes() {
 	// AMTP API v1
 	v1 := server.router.Group("/v1")
 	{
-		// Message endpoints (public)
+		// Message endpoints. POST is intentionally public — AMTP is a
+		// federated protocol where remote senders have no local key. The
+		// three GET routes require an agent API key or the gateway admin
+		// key (see handleListMessages / handleGetMessage /
+		// handleGetMessageStatus): agents are scoped to their own traffic,
+		// and the admin may inspect any message.
 		v1.POST("/messages", server.withRequestMetrics(func(c *gin.Context) { server.handleSendMessage(c) }))
 		v1.GET("/messages/:id", server.withRequestMetrics(func(c *gin.Context) { server.handleGetMessage(c) }))
 		v1.GET("/messages/:id/status", server.withRequestMetrics(func(c *gin.Context) { server.handleGetMessageStatus(c) }))
@@ -319,6 +338,8 @@ func (s *Server) setupRoutes() {
 			// Agent management endpoints
 			admin.POST("/agents", server.withRequestMetrics(func(c *gin.Context) { server.handleRegisterAgent(c) }))
 			admin.DELETE("/agents/:address", server.withRequestMetrics(func(c *gin.Context) { server.handleUnregisterAgent(c) }))
+			admin.PATCH("/agents/:address", server.withRequestMetrics(func(c *gin.Context) { server.handleUpdateAgent(c) }))
+			admin.POST("/agents/:address/rotate-key", server.withRequestMetrics(func(c *gin.Context) { server.handleRotateAgentKey(c) }))
 			admin.GET("/agents", server.withRequestMetrics(func(c *gin.Context) { server.handleListAgents(c) }))
 
 			// Schema management endpoints

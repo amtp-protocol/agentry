@@ -22,13 +22,13 @@ AMTP_DOMAIN="invalid_domain" ./agentry
 # Error: domain cannot contain underscores: invalid_domain
 
 # Domain starting with hyphen
-AMTP_DOMAIN="-invalid.com" ./agentry  
+AMTP_DOMAIN="-invalid.com" ./agentry
 # Error: label cannot start or end with hyphen in domain: -invalid.com
 ```
 
 ### 2. **Multi-Domain Deployment Examples**
 
-**Files**: 
+**Files**:
 - `docker/docker-compose.multi-domain.yml` - Production multi-domain setup
 - `docker/docker-compose.local-dev.yml` - Development setup
 - `docker/nginx/nginx.conf` - Nginx reverse proxy configuration
@@ -200,6 +200,24 @@ _amtp.partner.com.      IN TXT "v=amtp1;gateway=https://partner.com:443"
 - **Admin key authentication** for management operations
 - **Agent API keys** for inbox access
 - **Secure defaults** (TLS enabled, auth required in production)
+- **Admin message inspection**: the admin key (`X-Admin-Key` header) also
+  authenticates the message query endpoints (`GET /v1/messages`,
+  `GET /v1/messages/{id}`, `GET /v1/messages/{id}/status`). Message
+  submission is public by design (AMTP is federated), so messages from
+  unregistered or foreign senders have no matching agent key; the admin key
+  lets operators inspect such messages. Agent keys remain scoped to messages
+  the agent sent or received.
+- **Conversation filters**: on `GET /v1/messages`, an agent may filter its
+  own traffic by the other side of a conversation —
+  `?recipient=bob@remote.com` lists messages the agent sent to bob and
+  `?sender=bob@remote.com` lists messages bob sent to the agent. The agent
+  is always pinned as one side of the query; filters where neither side is
+  the agent are rejected.
+- **Cursor polling**: the `since` parameter on `GET /v1/messages` is an
+  **inclusive** lower bound on the message timestamp, kept at full timestamp
+  precision. `?since=2026-08-09T12:00:00.999Z` returns messages stamped at
+  or after 12:00:00.999Z, so cursor-style pollers do not re-receive messages
+  from the same second on the next page.
 
 ## 📊 **Monitoring and Observability**
 
@@ -252,7 +270,7 @@ docker-compose -f docker/docker-compose.local-dev.yml down
 This implementation provides a **robust, secure, and scalable** domain management system for AMTP gateways. The "one gateway = one domain" architecture ensures:
 
 - ✅ **Clear ownership** and responsibility boundaries
-- ✅ **Security isolation** between domains  
+- ✅ **Security isolation** between domains
 - ✅ **Independent scaling** and deployment
 - ✅ **Simplified management** and troubleshooting
 - ✅ **Production-ready** deployment options

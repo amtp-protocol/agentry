@@ -21,9 +21,10 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/amtp-protocol/agentry/internal/schema"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+
+	"github.com/amtp-protocol/agentry/internal/schema"
 )
 
 // StoreSchema stores a schema in the database

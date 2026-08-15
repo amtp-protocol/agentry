@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/amtp-protocol/agentry/internal/types"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+
+	"github.com/amtp-protocol/agentry/internal/types"
 )
 
 func (db *DatabaseStorage) StoreWorkflow(ctx context.Context, state *types.Workflow) error {
@@ -41,12 +42,12 @@ func (db *DatabaseStorage) StoreWorkflow(ctx context.Context, state *types.Workf
 	}
 
 	workState := &Workflow{
-		WorkflowID:            state.WorkflowID,
-		Status:                state.Status,
-		CoordinationType:      state.CoordinationType,
-		TimeoutSeconds:        state.TimeoutSeconds,
-		Version:               state.Version,
-		Deadline:              state.Deadline,
+		WorkflowID:             state.WorkflowID,
+		Status:                 state.Status,
+		CoordinationType:       state.CoordinationType,
+		TimeoutSeconds:         state.TimeoutSeconds,
+		Version:                state.Version,
+		Deadline:               state.Deadline,
 		CoordinationConfigJSON: coordJSON,
 		OriginalRecipients:     origRecipsJSON,
 		Sender:                 state.Sender,

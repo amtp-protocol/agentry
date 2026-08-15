@@ -219,26 +219,57 @@ func (m *Manager) ValidateMessage(ctx context.Context, message *types.Message) (
 
 // GetSchema retrieves a schema by identifier
 func (m *Manager) GetSchema(ctx context.Context, id SchemaIdentifier) (*Schema, error) {
+	if m == nil {
+		return nil, fmt.Errorf("schema manager is not initialized")
+	}
+	if m.registryClient == nil {
+		return nil, fmt.Errorf("schema registry is not initialized")
+	}
 	return m.registryClient.GetSchema(ctx, id)
 }
 
 // ListSchemas lists available schemas
 func (m *Manager) ListSchemas(ctx context.Context, pattern string) ([]SchemaIdentifier, error) {
+	if m == nil {
+		return nil, fmt.Errorf("schema manager is not initialized")
+	}
+	if m.registryClient == nil {
+		return nil, fmt.Errorf("schema registry is not initialized")
+	}
 	return m.registryClient.ListSchemas(ctx, pattern)
 }
 
 // RegisterSchema registers a new schema
 func (m *Manager) RegisterSchema(ctx context.Context, schema *Schema, metadata *SchemaMetadata) error {
+	if m == nil {
+		return fmt.Errorf("schema manager is not initialized")
+	}
+	if m.registryClient == nil {
+		return fmt.Errorf("schema registry is not initialized")
+	}
 	return m.registryClient.RegisterSchema(ctx, schema, metadata)
 }
 
 // UpdateSchema updates an existing schema
 func (m *Manager) UpdateSchema(ctx context.Context, schema *Schema, metadata *SchemaMetadata) error {
+	if m == nil {
+		return fmt.Errorf("schema manager is not initialized")
+	}
+	if m.registryClient == nil {
+		return fmt.Errorf("schema registry is not initialized")
+	}
 	return m.registryClient.RegisterOrUpdateSchema(ctx, schema, metadata)
 }
 
 // DeleteSchema deletes a schema
 func (m *Manager) DeleteSchema(ctx context.Context, id SchemaIdentifier) error {
+	if m == nil {
+		return fmt.Errorf("schema manager is not initialized")
+	}
+	if m.registryClient == nil {
+		return fmt.Errorf("schema registry is not initialized")
+	}
+
 	// Clear from cache first
 	if cachedClient, ok := m.registryClient.(*CachedRegistryClient); ok {
 		cachedClient.InvalidateCache(ctx, id) // #nosec G104 -- ignore error
