@@ -56,6 +56,9 @@ type inMemoryAgentStore struct {
 	// full-record update, which could clobber a concurrent key rotation.
 	fullUpdates  int
 	fieldUpdates int
+	// fieldUpdateError, when set, makes UpdateAgentFields fail so tests can
+	// verify the registry propagates the underlying storage error.
+	fieldUpdateError error
 }
 
 func newInMemoryAgentStore() *inMemoryAgentStore {
@@ -123,6 +126,10 @@ func (s *inMemoryAgentStore) UpdateAgentFields(ctx context.Context, agentAddress
 	agent, exists := s.agents[agentAddress]
 	if !exists {
 		return fmt.Errorf("agent not found: %s", agentAddress)
+	}
+
+	if s.fieldUpdateError != nil {
+		return s.fieldUpdateError
 	}
 
 	if fields.DeliveryMode != nil || fields.PushTarget != nil {
@@ -363,6 +370,35 @@ func TestRotateAPIKey(t *testing.T) {
 	_, err = registry.RotateAPIKey(ctx, "nonexistent@localhost")
 	if err == nil {
 		t.Error("Rotating API key for non-existent agent should fail")
+	}
+	// The storage layer reports the missing agent; the error must be
+	// propagated, not masked as a generic failure.
+	if !strings.Contains(err.Error(), "agent not found") {
+		t.Errorf("Expected agent not found error, got: %v", err)
+	}
+}
+
+// TestRotateAPIKey_PropagatesStorageError verifies that a storage failure
+// during key rotation is propagated to the caller instead of being masked as
+// "agent not found" (a transient storage outage would previously be
+// indistinguishable from a missing agent).
+func TestRotateAPIKey_PropagatesStorageError(t *testing.T) {
+	registry := createTestRegistry()
+	ctx := context.Background()
+
+	agent := &LocalAgent{Address: "test", DeliveryMode: "pull"}
+	if err := registry.RegisterAgent(ctx, agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	store := registry.storage.(*inMemoryAgentStore)
+	store.fieldUpdateError = fmt.Errorf("storage outage: connection refused")
+
+	_, err := registry.RotateAPIKey(ctx, agent.Address)
+	if err == nil {
+		t.Fatal("expected rotation to fail during storage outage")
+	}
+	if !strings.Contains(err.Error(), "storage outage: connection refused") {
+		t.Errorf("expected underlying storage error to be propagated, got: %v", err)
 	}
 }
 

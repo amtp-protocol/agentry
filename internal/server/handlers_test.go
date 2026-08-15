@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -2841,6 +2842,67 @@ func TestHandleRotateAgentKey_NotFound(t *testing.T) {
 	}
 	if errorResponse.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
 		t.Errorf("Expected AGENT_KEY_ROTATION_FAILED, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleRotateAgentKey_ForeignDomain verifies that a foreign-domain
+// address is rejected with an explicit domain-mismatch error before reaching
+// the registry, matching the sibling PATCH/DELETE endpoints, instead of
+// surfacing as a misleading "agent not found".
+func TestHandleRotateAgentKey_ForeignDomain(t *testing.T) {
+	server := createTestServer()
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/foo@evil.com/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
+		t.Errorf("Expected AGENT_KEY_ROTATION_FAILED, got %s", errorResponse.Error.Code)
+	}
+	detail, _ := errorResponse.Error.Details["error"].(string)
+	if !strings.Contains(detail, "does not match local domain") {
+		t.Errorf("Expected domain-mismatch error, got %q", detail)
+	}
+}
+
+// TestHandleRotateAgentKey_FullLocalAddress verifies that a full local
+// address is accepted and normalized exactly like a bare name.
+func TestHandleRotateAgentKey_FullLocalAddress(t *testing.T) {
+	server := createTestServer()
+
+	agent := &agents.LocalAgent{Address: "rotate-me", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me@localhost/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var response struct {
+		Address string `json:"address"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Address != "rotate-me@localhost" {
+		t.Errorf("Expected address rotate-me@localhost, got %s", response.Address)
+	}
+	if response.APIKey == "" {
+		t.Error("Expected a new api_key in the response")
 	}
 }
 

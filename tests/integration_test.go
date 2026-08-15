@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1449,6 +1450,98 @@ func TestIntegration_InvalidMessageID(t *testing.T) {
 				t.Errorf("Expected error code %s, got %s", expectedCode, errorResponse.Error.Code)
 			}
 		})
+	}
+}
+
+// rotateAgentKey posts to POST /v1/admin/agents/:name/rotate-key with the
+// admin key and returns the HTTP status and response body.
+func rotateAgentKey(t *testing.T, baseURL, name string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/admin/agents/"+name+"/rotate-key", nil)
+	if err != nil {
+		t.Fatalf("build rotate request: %v", err)
+	}
+	req.Header.Set("X-Admin-Key", adminKeyValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rotate key: %v", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, rb
+}
+
+// TestIntegration_RotateAgentKeyValidation is a functional verification test
+// for POST /v1/admin/agents/:address/rotate-key. The endpoint must validate
+// the address like its sibling PATCH/DELETE endpoints:
+//   - a bare agent name is normalized to the full local address before
+//     reaching the registry, and the response echoes it;
+//   - a foreign-domain address is rejected with an explicit domain-mismatch
+//     error instead of being passed to the registry unchecked (which would
+//     surface as a misleading "agent not found");
+//   - a full local address is accepted;
+//   - a nonexistent agent still fails.
+func TestIntegration_RotateAgentKeyValidation(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	baseURL := testServer.URL
+	registerLocalAgent(t, baseURL)
+
+	// 1. A bare name is normalized to the full address.
+	status, body := rotateAgentKey(t, baseURL, "test")
+	if status != http.StatusOK {
+		t.Fatalf("rotate bare name: expected status %d, got %d: %s", http.StatusOK, status, string(body))
+	}
+	var rotated struct {
+		Address string `json:"address"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := json.Unmarshal(body, &rotated); err != nil {
+		t.Fatalf("decode rotate response: %v", err)
+	}
+	if rotated.Address != "test@localhost" {
+		t.Errorf("expected normalized address test@localhost, got %s", rotated.Address)
+	}
+	if rotated.APIKey == "" {
+		t.Error("expected a new api_key in the response")
+	}
+
+	// 2. A foreign-domain address is rejected with an explicit
+	// domain-mismatch error, not "agent not found".
+	status, body = rotateAgentKey(t, baseURL, "foo@evil.com")
+	if status != http.StatusBadRequest {
+		t.Fatalf("rotate foreign domain: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(body, &errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
+		t.Errorf("expected AGENT_KEY_ROTATION_FAILED, got %s", errorResponse.Error.Code)
+	}
+	detail, _ := errorResponse.Error.Details["error"].(string)
+	if !strings.Contains(detail, "does not match local domain") {
+		t.Errorf("expected domain-mismatch error, got %q", detail)
+	}
+
+	// 3. A full local address is accepted.
+	status, body = rotateAgentKey(t, baseURL, "test@localhost")
+	if status != http.StatusOK {
+		t.Fatalf("rotate full local address: expected status %d, got %d: %s", http.StatusOK, status, string(body))
+	}
+
+	// 4. A nonexistent agent still fails.
+	status, body = rotateAgentKey(t, baseURL, "ghost")
+	if status != http.StatusBadRequest {
+		t.Fatalf("rotate nonexistent: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	}
+	var ghostErr types.ErrorResponse
+	if err := json.Unmarshal(body, &ghostErr); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if ghostErr.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
+		t.Errorf("expected AGENT_KEY_ROTATION_FAILED, got %s", ghostErr.Error.Code)
 	}
 }
 

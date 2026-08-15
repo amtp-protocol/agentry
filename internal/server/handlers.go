@@ -1054,11 +1054,17 @@ func (s *Server) handleListAgents(c *gin.Context) {
 func (s *Server) handleRotateAgentKey(c *gin.Context) {
 	agentAddress := c.Param("address")
 
-	// Normalize a bare agent name to a full address (name@domain) before
-	// consulting the registry, matching how registration stores agents.
-	fullAddress := agentAddress
-	if !strings.Contains(agentAddress, "@") && s.config.Server.Domain != "" {
-		fullAddress = agentAddress + "@" + s.config.Server.Domain
+	// Normalize a bare agent name or local address to its full address before
+	// consulting the registry, matching the sibling PATCH/DELETE endpoints.
+	// Foreign-domain addresses are rejected here with an explicit
+	// domain-mismatch error instead of reaching the registry unchecked.
+	fullAddress, err := s.agentRegistry.ResolveAgentAddress(agentAddress)
+	if err != nil {
+		s.respondWithError(c, http.StatusBadRequest, "AGENT_KEY_ROTATION_FAILED",
+			"Failed to rotate agent API key", map[string]interface{}{
+				"error": err.Error(),
+			})
+		return
 	}
 
 	newKey, err := s.agentRegistry.RotateAPIKey(c.Request.Context(), fullAddress)

@@ -338,11 +338,12 @@ func (r *Registry) UpdateLastAccess(ctx context.Context, agentAddress string) {
 
 // RotateAPIKey generates a new API key for an existing agent. Only the API
 // key hash is written, so a concurrent agent update is never clobbered.
+//
+// No pre-check read is performed: the storage layer reports missing agents
+// and propagates underlying storage errors through UpdateAgentFields, so a
+// transient storage outage surfaces as such instead of being masked as
+// "agent not found".
 func (r *Registry) RotateAPIKey(ctx context.Context, agentAddress string) (string, error) {
-	if _, err := r.getAgentInternal(ctx, agentAddress); err != nil {
-		return "", fmt.Errorf("agent not found: %s", agentAddress)
-	}
-
 	// Generate new API key
 	newAPIKey, err := r.GenerateAPIKey()
 	if err != nil {
@@ -353,7 +354,7 @@ func (r *Registry) RotateAPIKey(ctx context.Context, agentAddress string) (strin
 	// left untouched.
 	hashed := r.hashAPIKey(newAPIKey)
 	if err := r.storage.UpdateAgentFields(ctx, agentAddress, AgentFields{APIKey: &hashed}); err != nil {
-		return "", fmt.Errorf("failed to update agent with new API key: %w", err)
+		return "", fmt.Errorf("failed to rotate agent API key: %w", err)
 	}
 
 	return newAPIKey, nil
