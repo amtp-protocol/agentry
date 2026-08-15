@@ -535,11 +535,13 @@ func (r *Registry) validateSchemaFormat(schemaStr string) error {
 // matching the local domain, and returns the normalized full address.
 // Registration still requires a bare name via normalizeAgentAddress; this
 // helper is used by update/unregister operations that may receive the full
-// address from API clients.
+// address from API clients. Domain labels are case-insensitive (RFC 1035),
+// so a correctly spelled local address in the wrong case resolves like its
+// lowercase form.
 func (r *Registry) resolveAgentAddress(nameOrAddress string) (string, error) {
 	if strings.Contains(nameOrAddress, "@") {
 		parts := strings.SplitN(nameOrAddress, "@", 2)
-		if parts[1] != r.localDomain {
+		if !strings.EqualFold(parts[1], r.localDomain) {
 			return "", fmt.Errorf("agent address domain %q does not match local domain %q", parts[1], r.localDomain)
 		}
 		nameOrAddress = parts[0]

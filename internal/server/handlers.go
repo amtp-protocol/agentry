@@ -443,18 +443,22 @@ func buildListMessagesFilter(status, sender, recipient, agentAddr string, since 
 // normalizeParticipantFilter normalizes a sender/recipient filter parameter
 // on the message list endpoint. Bare agent names are resolved to their full
 // local address so "?sender=viewer" works like "?sender=viewer@localhost";
-// full local addresses are normalized too. Full addresses with a foreign
-// domain pass through unchanged: they can only be counterpart references —
-// no local agent key can authenticate as a foreign address — and the
-// conversation scoping in handleListMessages pins them to the authenticated
-// agent. An empty value is returned unchanged, meaning the filter is absent.
+// full local addresses are normalized too — domain labels are
+// case-insensitive, so "viewer@LOCALHOST" resolves exactly like
+// "viewer@localhost". Full addresses with a foreign domain pass through
+// unchanged: they can only be counterpart references — no local agent key
+// can authenticate as a foreign address — and the conversation scoping in
+// handleListMessages pins them to the authenticated agent. An empty value is
+// returned unchanged, meaning the filter is absent. A value that cannot be
+// resolved to a valid agent name is an error the caller reports as a
+// malformed parameter (400), not an authorization failure (403).
 func (s *Server) normalizeParticipantFilter(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
 	if strings.Contains(value, "@") {
 		parts := strings.SplitN(value, "@", 2)
-		if parts[1] != s.config.Server.Domain {
+		if !strings.EqualFold(parts[1], s.config.Server.Domain) {
 			return value, nil
 		}
 	}
@@ -561,17 +565,24 @@ func (s *Server) handleListMessages(c *gin.Context) {
 	// conversation as long as the authenticated agent is pinned on the other
 	// side, so "?recipient=bob@remote.com" lists messages the agent sent to
 	// bob instead of returning 403. A filter that cannot be resolved to a
-	// valid agent name is rejected.
+	// valid agent name is a malformed parameter (400), not an authorization
+	// failure (403): ?sender=bob+x and ?sender=.bob have nothing to do with
+	// credentials, so they get the same treatment as INVALID_LIMIT /
+	// INVALID_OFFSET / INVALID_STATUS.
 	sender, err = s.normalizeParticipantFilter(sender)
 	if err != nil {
-		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
-			"Sender filter must reference a valid agent", nil)
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_SENDER",
+			"Sender filter must reference a valid agent", map[string]interface{}{
+				"error": err.Error(),
+			})
 		return
 	}
 	recipient, err = s.normalizeParticipantFilter(recipient)
 	if err != nil {
-		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
-			"Recipient filter must reference a valid agent", nil)
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_RECIPIENT",
+			"Recipient filter must reference a valid agent", map[string]interface{}{
+				"error": err.Error(),
+			})
 		return
 	}
 	if !isAdmin {

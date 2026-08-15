@@ -1396,6 +1396,63 @@ func TestIntegration_ListMessagesCounterpartFilters(t *testing.T) {
 	}
 }
 
+// TestIntegration_ListMessagesInvalidFilter is a functional verification
+// test for sender/recipient filter error mapping on GET /v1/messages. A
+// filter that cannot be resolved to a valid agent name is a malformed
+// parameter and must be rejected with 400 INVALID_SENDER / INVALID_RECIPIENT
+// — not 403 ACCESS_DENIED, which would make an operator with a valid key hunt
+// for a credentials problem. A correctly spelled local address in the wrong
+// case (domain labels are case-insensitive) must resolve like its lowercase
+// form, and a conversation where neither side is the authenticated agent
+// stays a genuine authorization failure (403).
+func TestIntegration_ListMessagesInvalidFilter(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	agentKey := registerLocalAgent(t, testServer.URL)
+
+	statusAndCode := func(query string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/messages"+query, nil)
+		if err != nil {
+			t.Fatalf("build list request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+agentKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("list messages: %v", err)
+		}
+		defer resp.Body.Close()
+		rb, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden {
+			var errorResponse types.ErrorResponse
+			if err := json.Unmarshal(rb, &errorResponse); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			return resp.StatusCode, errorResponse.Error.Code
+		}
+		return resp.StatusCode, ""
+	}
+
+	if code, errCode := statusAndCode("?sender=bad%20name%21"); code != http.StatusBadRequest || errCode != "INVALID_SENDER" {
+		t.Errorf("invalid sender: expected 400 INVALID_SENDER, got %d %q", code, errCode)
+	}
+	if code, errCode := statusAndCode("?recipient=bad%20name%21"); code != http.StatusBadRequest || errCode != "INVALID_RECIPIENT" {
+		t.Errorf("invalid recipient: expected 400 INVALID_RECIPIENT, got %d %q", code, errCode)
+	}
+	if code, errCode := statusAndCode("?sender=.bob"); code != http.StatusBadRequest || errCode != "INVALID_SENDER" {
+		t.Errorf("dot-leading sender: expected 400 INVALID_SENDER, got %d %q", code, errCode)
+	}
+	// Wrong-case local address resolves (no error) instead of 403.
+	if code, _ := statusAndCode("?sender=test@LOCALHOST"); code != http.StatusOK {
+		t.Errorf("wrong-case local address: expected 200, got %d", code)
+	}
+	// Neither side is the agent: still a genuine authorization failure.
+	if code, _ := statusAndCode("?sender=bob@example.com&recipient=carol@example.com"); code != http.StatusForbidden {
+		t.Errorf("neither-side conversation: expected 403, got %d", code)
+	}
+}
+
 // TestIntegration_ListMessagesSinceSubSecond is a functional verification
 // test for the ?since= cursor on GET /v1/messages. The bound must be kept at
 // full timestamp precision end to end and applied inclusively: a cursor of

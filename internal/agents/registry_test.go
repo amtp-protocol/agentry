@@ -1091,6 +1091,10 @@ func TestResolveAgentAddress(t *testing.T) {
 	}{
 		{"bare name", "viewer", "viewer@localhost", false},
 		{"full address matching local domain", "viewer@localhost", "viewer@localhost", false},
+		// Domain labels are case-insensitive (RFC 1035): a correctly spelled
+		// local address in the wrong case resolves like its lowercase form.
+		{"local address wrong case", "viewer@LOCALHOST", "viewer@localhost", false},
+		{"local address mixed case", "viewer@LocalHost", "viewer@localhost", false},
 		{"foreign domain", "viewer@example.com", "", true},
 		{"invalid characters", "bad name!", "", true},
 		{"empty", "", "", true},

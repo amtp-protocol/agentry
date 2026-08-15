@@ -1845,8 +1845,9 @@ func TestHandleListMessages_BareNameFilterNormalized(t *testing.T) {
 //   - a counterpart (bare local name, local address, or foreign address) is
 //     allowed on one side of a conversation — the agent is pinned as the
 //     other side;
-//   - a conversation where neither side is the agent is rejected;
-//   - a filter that cannot be resolved to a valid agent name is rejected.
+//   - a conversation where neither side is the agent is rejected (403);
+//   - a filter that cannot be resolved to a valid agent name is a malformed
+//     parameter and rejected with 400, not an authorization failure.
 func TestHandleListMessages_ConversationScoping(t *testing.T) {
 	server := createTestServer()
 	registerTestAgent(t, server, "viewer")
@@ -1862,11 +1863,18 @@ func TestHandleListMessages_ConversationScoping(t *testing.T) {
 		{"bare other sender", "?sender=viewer", http.StatusOK},
 		{"bare other recipient", "?recipient=viewer", http.StatusOK},
 		{"foreign domain sender", "?sender=viewer@example.com", http.StatusOK},
+		// A correctly-spelled local address in the wrong case is still a
+		// local address: domain labels are case-insensitive.
+		{"local address wrong case", "?sender=viewer@LOCALHOST", http.StatusOK},
 		// A conversation where neither side is the authenticated agent stays
-		// rejected.
+		// rejected (this IS an authorization decision).
 		{"neither side is agent", "?sender=viewer@example.com&recipient=peer@example.net", http.StatusForbidden},
-		// An invalid agent name cannot be resolved.
-		{"invalid sender", "?sender=bad%20name%21", http.StatusForbidden},
+		// A filter that cannot be resolved to a valid agent name is a
+		// malformed parameter (400), not an authorization failure (403).
+		{"invalid sender", "?sender=bad%20name%21", http.StatusBadRequest},
+		{"invalid recipient", "?recipient=bad%20name%21", http.StatusBadRequest},
+		{"dot-leading sender", "?sender=.bob", http.StatusBadRequest},
+		{"dot-trailing recipient", "?recipient=bob.", http.StatusBadRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1946,6 +1954,73 @@ func TestHandleListMessages_CounterpartFilters(t *testing.T) {
 	}
 	if len(mockStorage.listFilters) != len(tests) {
 		t.Errorf("Expected %d storage queries, got %d", len(tests), len(mockStorage.listFilters))
+	}
+}
+
+// TestHandleListMessages_InvalidFilterCodes verifies that malformed
+// sender/recipient filters are reported as bad requests with specific error
+// codes (INVALID_SENDER / INVALID_RECIPIENT) matching the other parameter
+// validations (INVALID_LIMIT, INVALID_OFFSET, ...), instead of being
+// flattened into a 403 ACCESS_DENIED that sends operators hunting for a
+// credentials problem.
+func TestHandleListMessages_InvalidFilterCodes(t *testing.T) {
+	server := createTestServer()
+	key := registerTestAgent(t, server, "viewer")
+
+	tests := []struct {
+		name  string
+		query string
+		code  string
+	}{
+		{"invalid sender", "?sender=bad%20name%21", "INVALID_SENDER"},
+		{"invalid recipient", "?recipient=bad%20name%21", "INVALID_RECIPIENT"},
+		{"dot-leading sender", "?sender=.bob", "INVALID_SENDER"},
+		{"dot-trailing recipient", "?recipient=bob.", "INVALID_RECIPIENT"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+			}
+			var errorResponse types.ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+				t.Fatalf("unmarshal error response: %v", err)
+			}
+			if errorResponse.Error.Code != tt.code {
+				t.Errorf("Expected error code %s, got %s", tt.code, errorResponse.Error.Code)
+			}
+		})
+	}
+}
+
+// TestHandleListMessages_LocalAddressWrongCase verifies that a correctly
+// spelled local address with a wrong-case domain label resolves like its
+// lowercase form (domain labels are case-insensitive), so
+// "?sender=viewer@LOCALHOST" works exactly like "?sender=viewer@localhost".
+func TestHandleListMessages_LocalAddressWrongCase(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages?sender=viewer@LOCALHOST", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	filter := mockStorage.listFilters[0]
+	if filter.Sender != "viewer@localhost" {
+		t.Errorf("Expected normalized sender viewer@localhost, got %q", filter.Sender)
 	}
 }
 
