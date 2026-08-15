@@ -43,6 +43,14 @@ var ErrWorkflowNotFound = errors.New("workflow not found")
 // re-send it, producing duplicate delivery.
 var ErrMessageNotFound = errors.New("message not found")
 
+// ErrAgentNotFound is returned (wrapped with the address for context) by
+// agent lookups and updates when the addressed agent does not exist. Callers
+// use errors.Is to distinguish a genuine not-found (404) from transient
+// storage failures (5xx), so an operator's retry script can tell "you asked
+// for an agent that does not exist" (do not retry) from "the gateway's DB is
+// down" (retry).
+var ErrAgentNotFound = errors.New("agent not found")
+
 // Storage defines the interface for message storage operations
 type Storage interface {
 	agents.AgentStore

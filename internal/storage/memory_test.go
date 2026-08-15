@@ -1261,6 +1261,9 @@ func TestMemoryStorage_GetAgent_NotFound(t *testing.T) {
 	if err.Error() != "agent not found: non-existent-agent" {
 		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
 	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("Expected ErrAgentNotFound sentinel, got: %v", err)
+	}
 }
 
 func TestMemoryStorage_GetAgent_EmptyAddress(t *testing.T) {
@@ -1453,6 +1456,9 @@ func TestMemoryStorage_UpdateAgentFields_NotFound(t *testing.T) {
 	}
 	if err.Error() != "agent not found: non-existent@localhost" {
 		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("Expected ErrAgentNotFound sentinel, got: %v", err)
 	}
 }
 
@@ -1675,6 +1681,9 @@ func TestMemoryStorage_DeleteAgent_NotFound(t *testing.T) {
 
 	if err.Error() != "agent not found: non-existent-agent" {
 		t.Errorf("Expected 'agent not found' error, got %s", err.Error())
+	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("Expected ErrAgentNotFound sentinel, got: %v", err)
 	}
 }
 

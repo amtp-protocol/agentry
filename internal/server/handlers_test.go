@@ -81,6 +81,10 @@ type MockStorage struct {
 	// getStatusError, when set, makes GetStatus fail with a transient
 	// storage error for the same reason.
 	getStatusError error
+	// agentFieldsError, when set, makes UpdateAgentFields fail with a
+	// transient storage error so handler tests can verify agent update
+	// storage failures surface as 5xx instead of being flattened to 400.
+	agentFieldsError error
 }
 
 func NewMockMessageProcessor() *MockMessageProcessor {
@@ -200,7 +204,7 @@ func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agent
 	m.agentGetCalls++
 	agent, exists := m.agents[agentAddress]
 	if !exists {
-		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+		return nil, fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agentAddress)
 	}
 
 	agentCopy := *agent
@@ -212,7 +216,7 @@ func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent)
 		return fmt.Errorf("agent cannot be nil")
 	}
 	if _, exists := m.agents[agent.Address]; !exists {
-		return fmt.Errorf("agent not found: %s", agent.Address)
+		return fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agent.Address)
 	}
 
 	agentCopy := *agent
@@ -221,8 +225,11 @@ func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent)
 }
 
 func (m *MockStorage) UpdateAgentFields(ctx context.Context, agentAddress string, fields agents.AgentFields) error {
+	if m.agentFieldsError != nil {
+		return m.agentFieldsError
+	}
 	if _, exists := m.agents[agentAddress]; !exists {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agentAddress)
 	}
 	agent := m.agents[agentAddress]
 	if fields.DeliveryMode != nil {
@@ -249,7 +256,7 @@ func (m *MockStorage) UpdateAgentFields(ctx context.Context, agentAddress string
 
 func (m *MockStorage) DeleteAgent(ctx context.Context, agentAddress string) error {
 	if _, exists := m.agents[agentAddress]; !exists {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", storage.ErrAgentNotFound, agentAddress)
 	}
 
 	delete(m.agents, agentAddress)
@@ -3053,7 +3060,9 @@ func TestHandleRotateAgentKey_Success(t *testing.T) {
 	}
 }
 
-// TestHandleRotateAgentKey_NotFound verifies rotation fails for unknown agents.
+// TestHandleRotateAgentKey_NotFound verifies rotation of an unknown agent is
+// reported as 404 (do not retry), not a 400 that a retry script cannot tell
+// apart from a storage failure.
 func TestHandleRotateAgentKey_NotFound(t *testing.T) {
 	server := createTestServer()
 
@@ -3061,10 +3070,39 @@ func TestHandleRotateAgentKey_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d, got %d", http.StatusNotFound, w.Code)
 	}
 
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("Expected AGENT_NOT_FOUND, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleRotateAgentKey_StorageError verifies that a transient storage
+// outage propagating out of the rotation write is reported as 500 so the
+// caller retries, instead of being flattened into 400.
+func TestHandleRotateAgentKey_StorageError(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+
+	agent := &agents.LocalAgent{Address: "rotate-me", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	mockStorage.agentFieldsError = fmt.Errorf("connection refused")
+
+	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me/rotate-key", nil)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
 	var errorResponse types.ErrorResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
@@ -3267,7 +3305,9 @@ func TestHandleUpdateAgent_RemovePushTargetRejected(t *testing.T) {
 	}
 }
 
-// TestHandleUpdateAgent_NotFound verifies updating an unknown agent fails.
+// TestHandleUpdateAgent_NotFound verifies updating an unknown agent is
+// reported as 404 (do not retry), not a 400 that a retry script cannot tell
+// apart from a storage failure.
 func TestHandleUpdateAgent_NotFound(t *testing.T) {
 	server := createTestServer()
 
@@ -3277,10 +3317,41 @@ func TestHandleUpdateAgent_NotFound(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("Expected status %d, got %d", http.StatusBadRequest, w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Expected status %d, got %d", http.StatusNotFound, w.Code)
 	}
 
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("Expected AGENT_NOT_FOUND, got %s", errorResponse.Error.Code)
+	}
+}
+
+// TestHandleUpdateAgent_StorageError verifies that a transient storage
+// outage propagating out of the field-level update is reported as 500 so
+// the caller retries, instead of being flattened into 400.
+func TestHandleUpdateAgent_StorageError(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+
+	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
+	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+	mockStorage.agentFieldsError = fmt.Errorf("connection refused")
+
+	body := []byte(`{"delivery_mode":"push","push_target":"https://hooks.example.com/a"}`)
+	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
 	var errorResponse types.ErrorResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &errorResponse); err != nil {
 		t.Fatalf("unmarshal error: %v", err)

@@ -472,7 +472,7 @@ func (ms *MemoryStorage) GetAgent(ctx context.Context, agentAddress string) (*ag
 
 	agent, exists := ms.agents[agentAddress]
 	if !exists {
-		return nil, fmt.Errorf("agent not found: %s", agentAddress)
+		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 	}
 
 	return cloneAgent(agent), nil
@@ -487,7 +487,7 @@ func (ms *MemoryStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAge
 	defer ms.agentsMux.Unlock()
 
 	if _, exists := ms.agents[agent.Address]; !exists {
-		return fmt.Errorf("agent not found: %s", agent.Address)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agent.Address)
 	}
 
 	// Store a copy to prevent external modifications from affecting storage
@@ -507,7 +507,7 @@ func (ms *MemoryStorage) UpdateAgentFields(ctx context.Context, agentAddress str
 
 	agent, exists := ms.agents[agentAddress]
 	if !exists {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 	}
 
 	if fields.DeliveryMode != nil || fields.PushTarget != nil {
@@ -559,7 +559,7 @@ func (ms *MemoryStorage) DeleteAgent(ctx context.Context, agentAddress string) e
 	defer ms.agentsMux.Unlock()
 
 	if _, exists := ms.agents[agentAddress]; !exists {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 	}
 
 	delete(ms.agents, agentAddress)

@@ -1221,8 +1221,12 @@ func TestGetAgent_NotFound(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "agents" WHERE address = $1 ORDER BY "agents"."id" LIMIT $2`)).WithArgs("nonexistent@localhost", 1).WillReturnError(gorm.ErrRecordNotFound)
 
-	if _, err := storage.GetAgent(context.Background(), "nonexistent@localhost"); err == nil || !regexp.MustCompile(`agent not found`).MatchString(err.Error()) {
+	_, err := storage.GetAgent(context.Background(), "nonexistent@localhost")
+	if err == nil || !regexp.MustCompile(`agent not found`).MatchString(err.Error()) {
 		t.Fatalf("expected agent not found error, got: %v", err)
+	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("expected ErrAgentNotFound sentinel, got: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unfulfilled expectations: %v", err)
@@ -1345,6 +1349,9 @@ func TestUpdateAgentFields_NotFound(t *testing.T) {
 	if err == nil || !regexp.MustCompile(`agent not found`).MatchString(err.Error()) {
 		t.Fatalf("expected agent not found error, got: %v", err)
 	}
+	if !errors.Is(err, ErrAgentNotFound) {
+		t.Errorf("expected ErrAgentNotFound sentinel, got: %v", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unfulfilled expectations: %v", err)
 	}
@@ -1386,6 +1393,9 @@ func TestUpdateAgentFields_PushInvariantRejected(t *testing.T) {
 		if err == nil || !regexp.MustCompile(`push target URL is required`).MatchString(err.Error()) {
 			t.Fatalf("expected push target required error, got: %v", err)
 		}
+		if !errors.Is(err, agents.ErrInvalidDeliveryConfig) {
+			t.Errorf("expected ErrInvalidDeliveryConfig sentinel, got: %v", err)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unfulfilled expectations: %v", err)
 		}
@@ -1420,6 +1430,9 @@ func TestUpdateAgentFields_PushInvariantRejected(t *testing.T) {
 		})
 		if err == nil || !regexp.MustCompile(`push target URL is required`).MatchString(err.Error()) {
 			t.Fatalf("expected push target required error, got: %v", err)
+		}
+		if !errors.Is(err, agents.ErrInvalidDeliveryConfig) {
+			t.Errorf("expected ErrInvalidDeliveryConfig sentinel, got: %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unfulfilled expectations: %v", err)

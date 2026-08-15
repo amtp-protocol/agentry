@@ -677,7 +677,7 @@ func (ds *DatabaseStorage) GetAgent(ctx context.Context, agentAddress string) (*
 		Where("address = ?", agentAddress).
 		First(&dbAgent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("agent not found: %s", agentAddress)
+			return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 		}
 		return nil, fmt.Errorf("failed to get agent: %w", err)
 	}
@@ -711,7 +711,7 @@ func (ds *DatabaseStorage) UpdateAgent(ctx context.Context, agent *agents.LocalA
 	}
 
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found: %s", agent.Address)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agent.Address)
 	}
 
 	return nil
@@ -795,7 +795,7 @@ func (ds *DatabaseStorage) UpdateAgentFields(ctx context.Context, agentAddress s
 		var existing Agent
 		if err := ds.db.WithContext(ctx).First(&existing, "address = ?", agentAddress).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("agent not found: %s", agentAddress)
+				return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 			}
 			return fmt.Errorf("failed to update agent: %w", err)
 		}
@@ -831,7 +831,7 @@ func (ds *DatabaseStorage) DeleteAgent(ctx context.Context, agentAddress string)
 	}
 
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found: %s", agentAddress)
+		return fmt.Errorf("%w: %s", ErrAgentNotFound, agentAddress)
 	}
 
 	return nil

@@ -19,6 +19,7 @@ package agents
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -270,6 +271,17 @@ func TestValidateDeliveryConfig(t *testing.T) {
 	if err := ValidateDeliveryConfig("smtp", "http://localhost:8080/hook"); err == nil ||
 		!strings.Contains(err.Error(), "delivery mode must be 'push' or 'pull'") {
 		t.Errorf("invalid mode should be rejected, got: %v", err)
+	}
+
+	// Rejections carry the ErrInvalidDeliveryConfig sentinel so the HTTP
+	// layer can classify them as client errors (400) rather than storage
+	// failures (5xx), even when the validation runs inside the storage
+	// backend's atomic update.
+	if err := ValidateDeliveryConfig("push", ""); err == nil || !errors.Is(err, ErrInvalidDeliveryConfig) {
+		t.Errorf("expected ErrInvalidDeliveryConfig sentinel for push without target, got: %v", err)
+	}
+	if err := ValidateDeliveryConfig("smtp", ""); err == nil || !errors.Is(err, ErrInvalidDeliveryConfig) {
+		t.Errorf("expected ErrInvalidDeliveryConfig sentinel for invalid mode, got: %v", err)
 	}
 }
 

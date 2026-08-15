@@ -1097,7 +1097,17 @@ func (s *Server) handleRotateAgentKey(c *gin.Context) {
 
 	newKey, err := s.agentRegistry.RotateAPIKey(c.Request.Context(), fullAddress)
 	if err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "AGENT_KEY_ROTATION_FAILED",
+		// Distinguish "this agent does not exist" (404, do not retry) from
+		// a transient storage failure (500, retry): both previously came
+		// back as the same 400 AGENT_KEY_ROTATION_FAILED.
+		if errors.Is(err, storage.ErrAgentNotFound) {
+			s.respondWithError(c, http.StatusNotFound, "AGENT_NOT_FOUND",
+				"Agent not found", map[string]interface{}{
+					"error": err.Error(),
+				})
+			return
+		}
+		s.respondWithError(c, http.StatusInternalServerError, "AGENT_KEY_ROTATION_FAILED",
 			"Failed to rotate agent API key", map[string]interface{}{
 				"error": err.Error(),
 			})
@@ -1110,6 +1120,49 @@ func (s *Server) handleRotateAgentKey(c *gin.Context) {
 		"api_key":   newKey,
 		"timestamp": time.Now().UTC(),
 	})
+}
+
+// respondToAgentMutationError maps a registry agent-mutation error (update)
+// to an HTTP response so the caller can distinguish the cases that matter
+// to an operator's retry script:
+//   - a genuinely missing agent is 404 (do not retry);
+//   - a rejected delivery configuration or schema declaration is 400 (fix
+//     the request);
+//   - a storage error propagating out of the atomic field-level update
+//     ("failed to update agent: ..." / "failed to get agent: ...") is 500
+//     (retry); a transient DB outage must not be flattened into "agent not
+//     found" or a client-side error.
+func (s *Server) respondToAgentMutationError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, storage.ErrAgentNotFound):
+		s.respondWithError(c, http.StatusNotFound, "AGENT_NOT_FOUND",
+			"Agent not found", map[string]interface{}{
+				"error": err.Error(),
+			})
+	case errors.Is(err, agents.ErrInvalidDeliveryConfig):
+		s.respondWithError(c, http.StatusBadRequest, "AGENT_UPDATE_FAILED",
+			"Failed to update agent", map[string]interface{}{
+				"error": err.Error(),
+			})
+	case strings.HasPrefix(err.Error(), "invalid supported schemas"):
+		s.respondWithError(c, http.StatusBadRequest, "AGENT_UPDATE_FAILED",
+			"Failed to update agent", map[string]interface{}{
+				"error": err.Error(),
+			})
+	case strings.HasPrefix(err.Error(), "failed to update agent:"),
+		strings.HasPrefix(err.Error(), "failed to get agent:"):
+		s.respondWithError(c, http.StatusInternalServerError, "AGENT_UPDATE_FAILED",
+			"Failed to update agent", map[string]interface{}{
+				"error": err.Error(),
+			})
+	default:
+		// Address/name validation errors from the registry's resolution
+		// layer (invalid name, foreign domain, empty name).
+		s.respondWithError(c, http.StatusBadRequest, "AGENT_UPDATE_FAILED",
+			"Failed to update agent", map[string]interface{}{
+				"error": err.Error(),
+			})
+	}
 }
 
 // handleUpdateAgent handles PATCH /v1/admin/agents/:address
@@ -1128,10 +1181,7 @@ func (s *Server) handleUpdateAgent(c *gin.Context) {
 
 	updated, err := s.agentRegistry.UpdateAgent(c.Request.Context(), agentAddress, &updates)
 	if err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "AGENT_UPDATE_FAILED",
-			"Failed to update agent", map[string]interface{}{
-				"error": err.Error(),
-			})
+		s.respondToAgentMutationError(c, err)
 		return
 	}
 

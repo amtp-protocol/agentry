@@ -23,6 +23,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -32,6 +33,13 @@ import (
 	"github.com/amtp-protocol/agentry/internal/schema"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
+
+// ErrInvalidDeliveryConfig is wrapped by ValidateDeliveryConfig errors so
+// callers (e.g. the server layer mapping failures to HTTP responses) can
+// distinguish a rejected delivery configuration — a client-side 400 — from
+// a genuine storage failure — a 5xx — even when the validation runs inside
+// the storage backend's atomic update.
+var ErrInvalidDeliveryConfig = errors.New("invalid delivery configuration")
 
 // LocalAgent represents a local agent configuration
 type LocalAgent struct {
@@ -111,10 +119,10 @@ func (r *Registry) schemaManagerAvailable() bool {
 // validation against the record it read.
 func ValidateDeliveryConfig(deliveryMode, pushTarget string) error {
 	if deliveryMode != "push" && deliveryMode != "pull" {
-		return fmt.Errorf("delivery mode must be 'push' or 'pull'")
+		return fmt.Errorf("%w: delivery mode must be 'push' or 'pull'", ErrInvalidDeliveryConfig)
 	}
 	if deliveryMode == "push" && pushTarget == "" {
-		return fmt.Errorf("push target URL is required for push delivery mode")
+		return fmt.Errorf("%w: push target URL is required for push delivery mode", ErrInvalidDeliveryConfig)
 	}
 	return nil
 }

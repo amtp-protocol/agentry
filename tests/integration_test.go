@@ -1645,6 +1645,27 @@ func TestIntegration_AdminKeyRotatesWithoutRestart(t *testing.T) {
 	}
 }
 
+// TestIntegration_UpdateAgentNotFound is a functional verification test for
+// PATCH /v1/admin/agents/:address error mapping. Updating an agent that does
+// not exist must be a 404 AGENT_NOT_FOUND (do not retry), not a 400 that a
+// retry script cannot tell apart from a storage failure.
+func TestIntegration_UpdateAgentNotFound(t *testing.T) {
+	testServer := createTestServer(t)
+	defer testServer.Close()
+
+	status, body := patchAgent(t, testServer.URL, "ghost", map[string]string{"delivery_mode": "pull"})
+	if status != http.StatusNotFound {
+		t.Fatalf("update nonexistent: expected status %d, got %d: %s", http.StatusNotFound, status, string(body))
+	}
+	var errorResponse types.ErrorResponse
+	if err := json.Unmarshal(body, &errorResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errorResponse.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("expected AGENT_NOT_FOUND, got %s", errorResponse.Error.Code)
+	}
+}
+
 // TestIntegration_RotateAgentKeyValidation is a functional verification test
 // for POST /v1/admin/agents/:address/rotate-key. The endpoint must validate
 // the address like its sibling PATCH/DELETE endpoints:
@@ -1705,17 +1726,18 @@ func TestIntegration_RotateAgentKeyValidation(t *testing.T) {
 		t.Fatalf("rotate full local address: expected status %d, got %d: %s", http.StatusOK, status, string(body))
 	}
 
-	// 4. A nonexistent agent still fails.
+	// 4. A nonexistent agent is a 404 (do not retry), not a 400 that a
+	// retry script cannot tell apart from a storage failure.
 	status, body = rotateAgentKey(t, baseURL, "ghost")
-	if status != http.StatusBadRequest {
-		t.Fatalf("rotate nonexistent: expected status %d, got %d: %s", http.StatusBadRequest, status, string(body))
+	if status != http.StatusNotFound {
+		t.Fatalf("rotate nonexistent: expected status %d, got %d: %s", http.StatusNotFound, status, string(body))
 	}
 	var ghostErr types.ErrorResponse
 	if err := json.Unmarshal(body, &ghostErr); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if ghostErr.Error.Code != "AGENT_KEY_ROTATION_FAILED" {
-		t.Errorf("expected AGENT_KEY_ROTATION_FAILED, got %s", ghostErr.Error.Code)
+	if ghostErr.Error.Code != "AGENT_NOT_FOUND" {
+		t.Errorf("expected AGENT_NOT_FOUND, got %s", ghostErr.Error.Code)
 	}
 }
 
