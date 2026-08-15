@@ -430,25 +430,62 @@ func buildListMessagesFilter(status, sender, recipient, agentAddr string, since 
 // normalizeParticipantFilter normalizes a sender/recipient filter parameter
 // on the message list endpoint. Bare agent names are resolved to their full
 // local address so "?sender=viewer" works like "?sender=viewer@localhost";
-// full local addresses are normalized too. Admin callers may also filter by
-// foreign-domain addresses — e.g. the sender of a message routed in from
-// another gateway — which no local agent key can reference. An empty value is
-// returned unchanged, meaning the filter is absent.
-func (s *Server) normalizeParticipantFilter(value string, isAdmin bool) (string, error) {
+// full local addresses are normalized too. Full addresses with a foreign
+// domain pass through unchanged: they can only be counterpart references —
+// no local agent key can authenticate as a foreign address — and the
+// conversation scoping in handleListMessages pins them to the authenticated
+// agent. An empty value is returned unchanged, meaning the filter is absent.
+func (s *Server) normalizeParticipantFilter(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
-	if isAdmin && strings.Contains(value, "@") {
-		return value, nil
+	if strings.Contains(value, "@") {
+		parts := strings.SplitN(value, "@", 2)
+		if parts[1] != s.config.Server.Domain {
+			return value, nil
+		}
 	}
 	return s.agentRegistry.ResolveAgentAddress(value)
 }
 
+// resolveConversationFilters scopes the sender/recipient filters of a
+// non-admin caller to the authenticated agent's own traffic while allowing
+// the other side of a conversation to reference any counterpart — local or
+// foreign. Rules:
+//   - A single-sided filter naming a counterpart pins the agent as the other
+//     side: "?sender=bob" means "messages bob sent to me" and
+//     "?recipient=bob" means "messages I sent to bob".
+//   - When both sides are given, the authenticated agent must be one of
+//     them; the other side may be any counterpart (or the agent itself for
+//     self-to-self traffic).
+//   - Both sides naming other agents (neither is the caller) is rejected:
+//     the caller cannot inspect traffic it is not a participant in.
+func resolveConversationFilters(agentAddr, sender, recipient string) (string, string, error) {
+	switch {
+	case sender == agentAddr || recipient == agentAddr:
+		// The agent is already pinned as one side; the other side may be
+		// empty ("messages I sent/received") or any counterpart.
+		return sender, recipient, nil
+	case sender != "" && recipient != "":
+		// Both sides specified but neither references the agent.
+		return "", "", fmt.Errorf("neither sender nor recipient references the authenticated agent")
+	case sender != "":
+		// "?sender=X" scoped to the agent: the agent is the recipient side.
+		return sender, agentAddr, nil
+	case recipient != "":
+		// "?recipient=X" scoped to the agent: the agent is the sender side.
+		return agentAddr, recipient, nil
+	}
+	return sender, recipient, nil
+}
+
 // handleListMessages handles GET /v1/messages
 // Requires an Agent API key or the gateway admin key. Results are scoped to
-// the authenticated agent: the sender/recipient filters must reference that
-// agent, and the returned set is always restricted to messages it sent or
-// received. The admin may list any message and filter by any participant.
+// the authenticated agent's own traffic. Sender/recipient filters may
+// reference the agent itself or a counterpart on the other side of a
+// conversation: "?recipient=bob@remote.com" lists messages the agent sent to
+// bob, and "?sender=bob@remote.com" lists messages bob sent to the agent.
+// The admin may list any message and filter by any participant.
 func (s *Server) handleListMessages(c *gin.Context) {
 	// Authenticate the caller as an agent or the gateway admin.
 	agentAddr, isAdmin, ok := s.authenticateAgent(c)
@@ -501,32 +538,32 @@ func (s *Server) handleListMessages(c *gin.Context) {
 
 	// A caller may only query their own agent's traffic. Normalize bare-name
 	// filters to full addresses so "?sender=viewer" works like
-	// "?sender=viewer@localhost"; then reject filters that reference other
-	// agents. A filter that cannot be resolved to a local agent — an invalid
-	// name or a foreign domain — is treated as referencing another agent.
-	// Admin callers may filter by any participant, including foreign-domain
-	// addresses that no local agent key can reference.
-	sender, err = s.normalizeParticipantFilter(sender, isAdmin)
+	// "?sender=viewer@localhost"; foreign-domain addresses pass through as
+	// counterpart references. Admin callers may filter by any participant.
+	// Non-admin callers may reference a counterpart on one side of a
+	// conversation as long as the authenticated agent is pinned on the other
+	// side, so "?recipient=bob@remote.com" lists messages the agent sent to
+	// bob instead of returning 403. A filter that cannot be resolved to a
+	// valid agent name is rejected.
+	sender, err = s.normalizeParticipantFilter(sender)
 	if err != nil {
 		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
 			"Sender filter must reference a valid agent", nil)
 		return
 	}
-	if !isAdmin && sender != "" && sender != agentAddr {
-		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
-			"Sender filter must reference the authenticated agent", nil)
-		return
-	}
-	recipient, err = s.normalizeParticipantFilter(recipient, isAdmin)
+	recipient, err = s.normalizeParticipantFilter(recipient)
 	if err != nil {
 		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
 			"Recipient filter must reference a valid agent", nil)
 		return
 	}
-	if !isAdmin && recipient != "" && recipient != agentAddr {
-		s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
-			"Recipient filter must reference the authenticated agent", nil)
-		return
+	if !isAdmin {
+		sender, recipient, err = resolveConversationFilters(agentAddr, sender, recipient)
+		if err != nil {
+			s.respondWithError(c, http.StatusForbidden, "ACCESS_DENIED",
+				"Sender and recipient filters must reference the authenticated agent", nil)
+			return
+		}
 	}
 
 	// Build the storage filter scoped to the authenticated agent. The

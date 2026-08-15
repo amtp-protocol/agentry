@@ -1540,10 +1540,13 @@ func TestHandleListMessages_WithParameters(t *testing.T) {
 	}
 }
 
-// TestHandleListMessages_ForbiddenOtherAgent verifies filters referencing
-// another agent are rejected.
-func TestHandleListMessages_ForbiddenOtherAgent(t *testing.T) {
+// TestHandleListMessages_CounterpartConversation verifies that a filter
+// referencing another agent is allowed as one side of a conversation: the
+// authenticated agent is pinned as the other side, so "?sender=viewer" with
+// agent "other" means "messages viewer sent to other" instead of 403.
+func TestHandleListMessages_CounterpartConversation(t *testing.T) {
 	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
 	registerTestAgent(t, server, "viewer")
 	key := registerTestAgent(t, server, "other")
 
@@ -1552,8 +1555,21 @@ func TestHandleListMessages_ForbiddenOtherAgent(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Errorf("Expected status %d for other agent filter, got %d", http.StatusForbidden, w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d for counterpart filter, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	if len(mockStorage.listFilters) == 0 {
+		t.Fatal("Expected ListMessages to be called")
+	}
+	filter := mockStorage.listFilters[0]
+	// The counterpart is pinned as the sender; the authenticated agent is the
+	// recipient side of the conversation.
+	if filter.Sender != "viewer@localhost" {
+		t.Errorf("Expected sender viewer@localhost in storage filter, got %q", filter.Sender)
+	}
+	if len(filter.Recipients) != 1 || filter.Recipients[0] != "other@localhost" {
+		t.Errorf("Expected recipient [other@localhost] pinned in storage filter, got %v", filter.Recipients)
 	}
 }
 
@@ -1669,22 +1685,33 @@ func TestHandleListMessages_BareNameFilterNormalized(t *testing.T) {
 	}
 }
 
-// TestHandleListMessages_ForbiddenBareOtherAgent verifies that a bare name
-// referencing another agent, and a foreign-domain address, are both rejected
-// with 403.
-func TestHandleListMessages_ForbiddenBareOtherAgent(t *testing.T) {
+// TestHandleListMessages_ConversationScoping verifies which sender/recipient
+// filter combinations a non-admin caller may use:
+//   - a counterpart (bare local name, local address, or foreign address) is
+//     allowed on one side of a conversation — the agent is pinned as the
+//     other side;
+//   - a conversation where neither side is the agent is rejected;
+//   - a filter that cannot be resolved to a valid agent name is rejected.
+func TestHandleListMessages_ConversationScoping(t *testing.T) {
 	server := createTestServer()
 	registerTestAgent(t, server, "viewer")
 	key := registerTestAgent(t, server, "other")
 
 	tests := []struct {
-		name  string
-		query string
+		name         string
+		query        string
+		expectedCode int
 	}{
-		{"bare other sender", "?sender=viewer"},
-		{"bare other recipient", "?recipient=viewer"},
-		{"foreign domain sender", "?sender=viewer@example.com"},
-		{"invalid sender", "?sender=bad%20name%21"},
+		// Counterpart conversations are now allowed (agent pinned as the
+		// other side).
+		{"bare other sender", "?sender=viewer", http.StatusOK},
+		{"bare other recipient", "?recipient=viewer", http.StatusOK},
+		{"foreign domain sender", "?sender=viewer@example.com", http.StatusOK},
+		// A conversation where neither side is the authenticated agent stays
+		// rejected.
+		{"neither side is agent", "?sender=viewer@example.com&recipient=peer@example.net", http.StatusForbidden},
+		// An invalid agent name cannot be resolved.
+		{"invalid sender", "?sender=bad%20name%21", http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1693,8 +1720,118 @@ func TestHandleListMessages_ForbiddenBareOtherAgent(t *testing.T) {
 			w := httptest.NewRecorder()
 			server.router.ServeHTTP(w, req)
 
-			if w.Code != http.StatusForbidden {
-				t.Errorf("Expected status %d, got %d: %s", http.StatusForbidden, w.Code, w.Body.String())
+			if w.Code != tt.expectedCode {
+				t.Errorf("Expected status %d, got %d: %s", tt.expectedCode, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestHandleListMessages_CounterpartFilters verifies the storage filter shape
+// produced by counterpart conversation filters: a single-sided counterpart
+// filter pins the authenticated agent as the other side, and explicit
+// conversations pass through when one side is the agent.
+func TestHandleListMessages_CounterpartFilters(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	tests := []struct {
+		name          string
+		query         string
+		wantSender    string
+		wantRecipient string
+	}{
+		{"recipient counterpart", "?recipient=bob", "viewer@localhost", "bob@localhost"},
+		{"sender counterpart", "?sender=bob", "bob@localhost", "viewer@localhost"},
+		{"foreign recipient", "?recipient=bob@remote.com", "viewer@localhost", "bob@remote.com"},
+		{"foreign sender", "?sender=bob@remote.com", "bob@remote.com", "viewer@localhost"},
+		{"explicit sent to counterpart", "?sender=viewer@localhost&recipient=bob@remote.com", "viewer@localhost", "bob@remote.com"},
+		{"explicit received from counterpart", "?sender=bob@remote.com&recipient=viewer@localhost", "bob@remote.com", "viewer@localhost"},
+		{"self to self", "?sender=viewer&recipient=viewer", "viewer@localhost", "viewer@localhost"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := len(mockStorage.listFilters)
+			req := httptest.NewRequest("GET", "/v1/messages"+tt.query, nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			w := httptest.NewRecorder()
+			server.router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+			}
+			if len(mockStorage.listFilters) != before+1 {
+				t.Fatalf("Expected ListMessages to be called once, got %d calls", len(mockStorage.listFilters)-before)
+			}
+			filter := mockStorage.listFilters[before]
+			if filter.Sender != tt.wantSender {
+				t.Errorf("Expected sender %q, got %q", tt.wantSender, filter.Sender)
+			}
+			if len(filter.Recipients) != 1 || filter.Recipients[0] != tt.wantRecipient {
+				t.Errorf("Expected recipient [%s], got %v", tt.wantRecipient, filter.Recipients)
+			}
+			// A pinned conversation must be an AND query, not the OR-mode
+			// "all traffic" query.
+			if filter.Or {
+				t.Error("Expected explicit conversation filter without OR mode")
+			}
+		})
+	}
+
+	// A conversation where neither side is the authenticated agent is
+	// rejected with 403 and never reaches storage.
+	req := httptest.NewRequest("GET", "/v1/messages?sender=bob@remote.com&recipient=carol@remote.com", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected status %d for neither-side conversation, got %d", http.StatusForbidden, w.Code)
+	}
+	if len(mockStorage.listFilters) != len(tests) {
+		t.Errorf("Expected %d storage queries, got %d", len(tests), len(mockStorage.listFilters))
+	}
+}
+
+// TestResolveConversationFilters verifies the conversation scoping rules for
+// non-admin callers directly.
+func TestResolveConversationFilters(t *testing.T) {
+	tests := []struct {
+		name              string
+		agentAddr         string
+		sender, recipient string
+		wantSender        string
+		wantRecipient     string
+		wantErr           bool
+	}{
+		{"no filters", "alice@localhost", "", "", "", "", false},
+		{"sender self", "alice@localhost", "alice@localhost", "", "alice@localhost", "", false},
+		{"recipient self", "alice@localhost", "", "alice@localhost", "", "alice@localhost", false},
+		{"self to self", "alice@localhost", "alice@localhost", "alice@localhost", "alice@localhost", "alice@localhost", false},
+		{"sent to counterpart", "alice@localhost", "alice@localhost", "bob@remote.com", "alice@localhost", "bob@remote.com", false},
+		{"received from counterpart", "alice@localhost", "bob@remote.com", "alice@localhost", "bob@remote.com", "alice@localhost", false},
+		{"recipient-only counterpart pins sender", "alice@localhost", "", "bob@remote.com", "alice@localhost", "bob@remote.com", false},
+		{"sender-only counterpart pins recipient", "alice@localhost", "bob@remote.com", "", "bob@remote.com", "alice@localhost", false},
+		{"neither side is agent", "alice@localhost", "bob@remote.com", "carol@remote.com", "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender, recipient, err := resolveConversationFilters(tt.agentAddr, tt.sender, tt.recipient)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sender != tt.wantSender {
+				t.Errorf("expected sender %q, got %q", tt.wantSender, sender)
+			}
+			if recipient != tt.wantRecipient {
+				t.Errorf("expected recipient %q, got %q", tt.wantRecipient, recipient)
 			}
 		})
 	}

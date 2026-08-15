@@ -1235,6 +1235,166 @@ func TestIntegration_UpdateAgentPushInvariant(t *testing.T) {
 	}
 }
 
+// listMessagesQuery queries GET /v1/messages with an explicit query string
+// (without the leading "?") as the given agent and returns the parsed
+// response. The caller supplies limit/offset in the query if needed.
+func listMessagesQuery(t *testing.T, baseURL, apiKey, query string) listMessagesResponse {
+	t.Helper()
+	url := baseURL + "/v1/messages"
+	if query != "" {
+		url += "?" + query
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Fatalf("list messages status %d: %s", resp.StatusCode, string(rb))
+	}
+
+	var out listMessagesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	return out
+}
+
+// TestIntegration_ListMessagesCounterpartFilters is a functional verification
+// test for counterpart conversation filters on GET /v1/messages. An agent
+// must be able to filter its own traffic by the other side of a conversation:
+// "?recipient=bob@remote.com" lists messages the agent sent to bob and
+// "?sender=bob@remote.com" lists messages bob sent to the agent, instead of
+// 403 ACCESS_DENIED for any filter value other than the agent itself. The
+// result set must contain exactly the messages of that conversation and
+// nothing the agent is not a participant in.
+func TestIntegration_ListMessagesCounterpartFilters(t *testing.T) {
+	// Route foreign-domain deliveries to a mock AMTP gateway so sends to
+	// foreign recipients succeed and the messages are persisted.
+	mockAMTPServer := createMockAMTPServer(t)
+	defer mockAMTPServer.Close()
+
+	cfg := createTestConfig(t)
+	cfg.DNS.MockRecords = map[string]string{
+		"example.com": fmt.Sprintf("v=amtp1;gateway=%s;auth=none;max-size=10485760", mockAMTPServer.URL),
+	}
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	testServer := httptest.NewServer(srv.GetRouter())
+	defer testServer.Close()
+
+	// The listing agent plus a local counterpart; foreign counterparts are
+	// resolved via the mock gateway.
+	agentKey := registerLocalAgent(t, testServer.URL)
+	registerLocalAgentWithAddress(t, testServer.URL, "peer")
+
+	// Seed one message per conversation direction. Keep a map from message ID
+	// to subject so the returned listing can be attributed.
+	now := time.Now().UTC()
+	seed := []struct {
+		sender, recipient, subject string
+	}{
+		{"test@localhost", "peer@localhost", "alice-to-peer"},
+		{"peer@localhost", "test@localhost", "peer-to-alice"},
+		{"test@localhost", "bob@example.com", "alice-to-bob"},
+		{"bob@example.com", "test@localhost", "bob-to-alice"},
+	}
+	subjectByID := make(map[string]string, len(seed))
+	for _, m := range seed {
+		msgID := sendTestMessage(t, testServer.URL, m.sender, m.recipient, m.subject,
+			now.Add(time.Duration(-len(subjectByID))*time.Minute).Format(time.RFC3339))
+		subjectByID[msgID] = m.subject
+	}
+
+	// subjectSetOf returns the subjects of the listed messages, failing the
+	// test if a listed message ID is unknown.
+	subjectSetOf := func(resp listMessagesResponse) map[string]bool {
+		set := make(map[string]bool, len(resp.Messages))
+		for _, m := range resp.Messages {
+			subject, ok := subjectByID[m.MessageID]
+			if !ok {
+				t.Errorf("listed unknown message %s", m.MessageID)
+				continue
+			}
+			set[subject] = true
+		}
+		return set
+	}
+	want := func(subjects ...string) map[string]bool {
+		set := make(map[string]bool, len(subjects))
+		for _, s := range subjects {
+			set[s] = true
+		}
+		return set
+	}
+
+	// Single-sided counterpart filters pin the agent as the other side.
+	tests := []struct {
+		name  string
+		query string
+		want  map[string]bool
+	}{
+		{"recipient local counterpart", "recipient=peer@localhost", want("alice-to-peer")},
+		{"sender local counterpart", "sender=peer@localhost", want("peer-to-alice")},
+		{"recipient foreign counterpart", "recipient=bob@example.com", want("alice-to-bob")},
+		{"sender foreign counterpart", "sender=bob@example.com", want("bob-to-alice")},
+		// Explicit conversation: the agent pinned as one side.
+		{"explicit sent to counterpart", "sender=test@localhost&recipient=bob@example.com", want("alice-to-bob")},
+		{"explicit received from counterpart", "sender=bob@example.com&recipient=test@localhost", want("bob-to-alice")},
+		// Bare-name counterpart normalizes to the full local address.
+		{"bare recipient counterpart", "recipient=peer", want("alice-to-peer")},
+		// Sender-only with the agent itself still lists everything sent.
+		{"sender self", "sender=test@localhost", want("alice-to-peer", "alice-to-bob")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := listMessagesQuery(t, testServer.URL, agentKey, tt.query)
+			got := subjectSetOf(resp)
+			if resp.Total != len(tt.want) {
+				t.Errorf("expected total %d, got %d (subjects %v)", len(tt.want), resp.Total, got)
+			}
+			for s := range tt.want {
+				if !got[s] {
+					t.Errorf("expected %q in result, got %v", s, got)
+				}
+			}
+			for s := range got {
+				if !tt.want[s] {
+					t.Errorf("unexpected %q in result", s)
+				}
+			}
+		})
+	}
+
+	// A conversation where neither side is the authenticated agent stays
+	// rejected: the caller cannot inspect traffic it is not a participant in.
+	req, err := http.NewRequest(http.MethodGet,
+		testServer.URL+"/v1/messages?sender=bob@example.com&recipient=carol@example.com", nil)
+	if err != nil {
+		t.Fatalf("build list request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		rb, _ := io.ReadAll(resp.Body)
+		t.Errorf("neither-side conversation: expected status %d, got %d: %s",
+			http.StatusForbidden, resp.StatusCode, string(rb))
+	}
+}
+
 func TestIntegration_InvalidMessageID(t *testing.T) {
 	testServer := createTestServer(t)
 	defer testServer.Close()

@@ -207,6 +207,12 @@ _amtp.partner.com.      IN TXT "v=amtp1;gateway=https://partner.com:443"
   unregistered or foreign senders have no matching agent key; the admin key
   lets operators inspect such messages. Agent keys remain scoped to messages
   the agent sent or received.
+- **Conversation filters**: on `GET /v1/messages`, an agent may filter its
+  own traffic by the other side of a conversation —
+  `?recipient=bob@remote.com` lists messages the agent sent to bob and
+  `?sender=bob@remote.com` lists messages bob sent to the agent. The agent
+  is always pinned as one side of the query; filters where neither side is
+  the agent are rejected.
 
 ## 📊 **Monitoring and Observability**
 
