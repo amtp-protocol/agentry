@@ -53,7 +53,7 @@ export AMTP_TLS_KEY_FILE="/etc/ssl/private/company-a.com.key"
 
 # Authentication
 export AMTP_AUTH_REQUIRED=true
-export AMTP_AUTH_ADMIN_KEY_FILE="/etc/ssl/admin/admin.key"
+export AMTP_ADMIN_KEY_FILE="/etc/ssl/admin/admin.key"
 ```
 
 ### YAML Configuration
@@ -125,7 +125,7 @@ AMTP_TLS_ENABLED=true \
 AMTP_TLS_CERT_FILE="/etc/ssl/certs/company-a.com.crt" \
 AMTP_TLS_KEY_FILE="/etc/ssl/private/company-a.com.key" \
 AMTP_AUTH_REQUIRED=true \
-AMTP_AUTH_ADMIN_KEY_FILE="/etc/ssl/admin/admin.key" \
+AMTP_ADMIN_KEY_FILE="/etc/ssl/admin/admin.key" \
 ./agentry
 ```
 
@@ -511,7 +511,7 @@ export AMTP_TLS_KEY_FILE="/etc/ssl/private/company-a.com.key"
 
 # Security
 export AMTP_AUTH_REQUIRED=true
-export AMTP_AUTH_ADMIN_KEY_FILE="/etc/ssl/admin/company-a.key"
+export AMTP_ADMIN_KEY_FILE="/etc/ssl/admin/company-a.key"
 
 # Performance
 export AMTP_SERVER_ADDRESS=":8443"
