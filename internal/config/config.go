@@ -338,6 +338,13 @@ func (c *Config) validate() error {
 		return fmt.Errorf("message max size must be positive")
 	}
 
+	// A gateway that requires auth but has no admin key file would reject
+	// every /v1/admin request with 401 until restarted with one, so catch
+	// the misconfiguration at startup instead.
+	if c.Auth.RequireAuth && c.Auth.AdminKeyFile == "" {
+		return fmt.Errorf("auth.admin_key_file is required when auth.require_auth is enabled")
+	}
+
 	// Validate admin key file if specified
 	if c.Auth.AdminKeyFile != "" {
 		if _, err := os.Stat(c.Auth.AdminKeyFile); err != nil {

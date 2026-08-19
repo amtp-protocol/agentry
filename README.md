@@ -215,7 +215,9 @@ Options:
 > **Note**: The gateway refuses every `/v1/admin` request with `401
 > ADMIN_AUTH_NOT_CONFIGURED` until an admin key file is configured. Those
 > endpoints register agents and hand back plaintext API keys, so they are
-> never served anonymously.
+> never served anonymously. When `auth.require_auth` is enabled the gateway
+> goes further and refuses to start without `auth.admin_key_file`, so the
+> misconfiguration surfaces at deployment rather than as 401s later.
 
 **Examples:**
 

@@ -44,7 +44,10 @@ data:
         {{- end }}
       api_key_header: {{ .Values.auth.apiKeyHeader | quote }}
       admin_api_key_header: {{ .Values.auth.adminApiKeyHeader | quote }}
-      {{- if and .Values.auth.requireAuth (or .Values.auth.adminKeyExistingSecret .Values.auth.adminKey) }}
+      {{- if .Values.auth.requireAuth }}
+      {{- if not (or .Values.auth.adminKeyExistingSecret .Values.auth.adminKey) }}
+      {{- fail "auth.requireAuth is enabled but no admin key is configured: set auth.adminKey or auth.adminKeyExistingSecret (the gateway refuses to start without auth.admin_key_file when auth.require_auth is enabled)" }}
+      {{- end }}
       admin_key_file: "/etc/agentry/admin/admin.key"
       {{- end }}
     logging:
