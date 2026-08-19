@@ -209,8 +209,15 @@ Options:
   -config string
         Path to configuration file (YAML) - optional
   -admin-key-file string
-        Path to admin API key file - optional
+        Path to admin API key file - required for the /v1/admin API
 ```
+
+> **Note**: The gateway refuses every `/v1/admin` request with `401
+> ADMIN_AUTH_NOT_CONFIGURED` until an admin key file is configured. Those
+> endpoints register agents and hand back plaintext API keys, so they are
+> never served anonymously. When `auth.require_auth` is enabled the gateway
+> goes further and refuses to start without `auth.admin_key_file`, so the
+> misconfiguration surfaces at deployment rather than as 401s later.
 
 **Examples:**
 
@@ -276,7 +283,7 @@ Options:
 |----------|---------|-------------|
 | `AMTP_AUTH_REQUIRED` | `false` | Require authentication |
 | `AMTP_AUTH_API_KEY_HEADER` | `X-API-Key` | API key header name |
-| `AMTP_ADMIN_KEY_FILE` | - | Path to admin API key file (can also be set via `-admin-key-file` flag) |
+| `AMTP_ADMIN_KEY_FILE` | - | Path to admin API key file, required for the `/v1/admin` API (can also be set via `-admin-key-file` flag) |
 | `AMTP_ADMIN_API_KEY_HEADER` | `X-Admin-Key` | Header name for admin API authentication |
 | `AMTP_AUTH_API_KEY_SALT` | - | Salt for API key hashing |
 
@@ -338,7 +345,7 @@ export AMTP_IDEMPOTENCY_TTL="168h"  # 7 days
 # Authentication configuration
 export AMTP_AUTH_REQUIRED=false
 export AMTP_AUTH_API_KEY_HEADER="X-API-Key"
-export AMTP_ADMIN_KEY_FILE="/etc/agentry/admin.keys"  # Optional: for admin API access
+export AMTP_ADMIN_KEY_FILE="/etc/agentry/admin.keys"  # Required for admin API access
 export AMTP_AUTH_API_KEY_SALT="your_salt"  # Optional: for api_key hash salt
 
 # Logging

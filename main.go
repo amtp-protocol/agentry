@@ -83,6 +83,10 @@ func main() {
 		os.Exit(0)
 	}
 
+	if cfg.Auth.AdminKeyFile == "" {
+		log.Printf("WARNING: auth.admin_key_file is not configured; every /v1/admin request will be rejected with 401 ADMIN_AUTH_NOT_CONFIGURED")
+	}
+
 	// Create HTTP server
 	srv, err := server.New(cfg)
 	if err != nil {

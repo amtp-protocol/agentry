@@ -60,11 +60,12 @@ type inMemoryAgentStore struct {
 	// fieldUpdateError, when set, makes UpdateAgentFields fail so tests can
 	// verify the registry propagates the underlying storage error.
 	fieldUpdateError error
-	// getAgentCalls and listAgentsCalls count storage reads so tests can
-	// assert the auth path matches a key against a single listing instead of
-	// reading each agent individually.
+	// getAgentCalls, listAgentsCalls and keyLookupCalls count storage reads
+	// so tests can assert the auth path resolves a key with a single keyed
+	// lookup instead of loading every agent.
 	getAgentCalls   int
 	listAgentsCalls int
+	keyLookupCalls  int
 }
 
 func newInMemoryAgentStore() *inMemoryAgentStore {
@@ -108,6 +109,19 @@ func (s *inMemoryAgentStore) GetAgent(ctx context.Context, agentAddress string) 
 	}
 	agentCopy := *agent
 	return &agentCopy, nil
+}
+
+func (s *inMemoryAgentStore) GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*LocalAgent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keyLookupCalls++
+	for _, agent := range s.agents {
+		if agent.APIKey == apiKeyHash {
+			agentCopy := *agent
+			return &agentCopy, nil
+		}
+	}
+	return nil, fmt.Errorf("agent not found for api key")
 }
 
 func (s *inMemoryAgentStore) UpdateAgent(ctx context.Context, agent *LocalAgent) error {
@@ -455,11 +469,11 @@ func TestAuthenticateAgent(t *testing.T) {
 	}
 }
 
-// TestAuthenticateAgent_SingleListing verifies that AuthenticateAgent hashes
-// the presented key once and matches against a single agent listing, never
-// reading individual agents (the old scan-and-verify loop issued one
-// GetAgent per agent plus a redundant hash per iteration).
-func TestAuthenticateAgent_SingleListing(t *testing.T) {
+// TestAuthenticateAgent_SingleKeyedLookup verifies that AuthenticateAgent
+// hashes the presented key once and resolves it with a single keyed lookup,
+// never loading every agent. This runs before any credential is known good,
+// so a listing here would let unauthenticated requests scan the agent table.
+func TestAuthenticateAgent_SingleKeyedLookup(t *testing.T) {
 	registry := createTestRegistry()
 	ctx := context.Background()
 
@@ -481,11 +495,26 @@ func TestAuthenticateAgent_SingleListing(t *testing.T) {
 	if !ok || addr != "agent-0@localhost" {
 		t.Fatalf("expected agent-0@localhost, got ok=%v addr=%q", ok, addr)
 	}
-	if store.listAgentsCalls != 1 {
-		t.Errorf("expected exactly 1 agent listing, got %d", store.listAgentsCalls)
+	if store.keyLookupCalls != 1 {
+		t.Errorf("expected exactly 1 keyed lookup, got %d", store.keyLookupCalls)
+	}
+	if store.listAgentsCalls != 0 {
+		t.Errorf("expected 0 agent listings, got %d", store.listAgentsCalls)
 	}
 	if store.getAgentCalls != 0 {
 		t.Errorf("expected 0 per-agent reads, got %d", store.getAgentCalls)
+	}
+
+	// A key that belongs to nobody must cost the same single lookup.
+	store.keyLookupCalls = 0
+	if addr, ok := registry.AuthenticateAgent(ctx, "not-a-real-key"); ok {
+		t.Errorf("expected no match for an unknown key, got %q", addr)
+	}
+	if store.keyLookupCalls != 1 {
+		t.Errorf("expected exactly 1 keyed lookup for a failed attempt, got %d", store.keyLookupCalls)
+	}
+	if store.listAgentsCalls != 0 {
+		t.Errorf("expected 0 agent listings for a failed attempt, got %d", store.listAgentsCalls)
 	}
 }
 

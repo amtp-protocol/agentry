@@ -126,7 +126,11 @@ auth:
   apiKeyHeader: "X-API-Key"
   # -- Admin API key header name
   adminApiKeyHeader: "X-Admin-Key"
-  # -- Admin API key value (stored in a generated Secret; leave empty to use existingSecret)
+  # -- Admin API key value (stored in a generated Secret; leave empty to use existingSecret).
+  # Required to enable the /v1/admin API: without an admin key file the gateway
+  # rejects every admin request with 401 ADMIN_AUTH_NOT_CONFIGURED. When
+  # requireAuth is true, adminKey or adminKeyExistingSecret must be set;
+  # the chart fails to render and the gateway refuses to start otherwise.
   adminKey: ""
   # -- Admin API key value (provided via an existing Secret; takes precedence over adminKey)
   adminKeyExistingSecret: ""

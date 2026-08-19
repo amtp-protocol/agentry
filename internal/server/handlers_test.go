@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -70,10 +71,12 @@ type MockStorage struct {
 	// statusesError, when set, makes GetStatuses fail so handler tests can
 	// verify status failures surface as errors.
 	statusesError error
-	// agentGetCalls counts GetAgent calls so tests can assert the message
-	// query auth path matches keys against a single listing instead of
-	// reading each agent individually.
-	agentGetCalls int
+	// agentGetCalls, agentListCalls and agentKeyLookups count agent reads so
+	// tests can assert the message query auth path resolves a key with a
+	// single keyed lookup instead of loading every agent.
+	agentGetCalls   int
+	agentListCalls  int
+	agentKeyLookups int
 	// getMessageError, when set, makes GetMessage fail with a transient
 	// (non-not-found) storage error so handler tests can verify storage
 	// failures surface as 5xx instead of being flattened to 404.
@@ -211,6 +214,17 @@ func (m *MockStorage) GetAgent(ctx context.Context, agentAddress string) (*agent
 	return &agentCopy, nil
 }
 
+func (m *MockStorage) GetAgentByAPIKeyHash(ctx context.Context, apiKeyHash string) (*agents.LocalAgent, error) {
+	m.agentKeyLookups++
+	for _, agent := range m.agents {
+		if agent.APIKey == apiKeyHash {
+			agentCopy := *agent
+			return &agentCopy, nil
+		}
+	}
+	return nil, storage.ErrAgentNotFound
+}
+
 func (m *MockStorage) UpdateAgent(ctx context.Context, agent *agents.LocalAgent) error {
 	if agent == nil {
 		return fmt.Errorf("agent cannot be nil")
@@ -264,6 +278,7 @@ func (m *MockStorage) DeleteAgent(ctx context.Context, agentAddress string) erro
 }
 
 func (m *MockStorage) ListAgents(ctx context.Context) ([]*agents.LocalAgent, error) {
+	m.agentListCalls++
 	var list []*agents.LocalAgent
 	for _, agent := range m.agents {
 		agentCopy := *agent
@@ -451,6 +466,49 @@ func createTestServerWithAdminKey(t *testing.T, adminKey string) *Server {
 	// read path as production.
 	server.adminKeyValidator = middleware.NewAdminKeyValidator(keyFile)
 	return server
+}
+
+// testAdminKey is the admin key accepted by servers from
+// createAdminTestServer, held in a file created once per test binary.
+const testAdminKey = "test-admin-key"
+
+var testAdminKeyFile string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "agentry-admin-key")
+	if err != nil {
+		panic(err)
+	}
+	testAdminKeyFile = filepath.Join(dir, "admin.key")
+	if err := os.WriteFile(testAdminKeyFile, []byte(testAdminKey), 0o600); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// createAdminTestServer returns a test server whose admin routes are
+// reachable. AdminAuth fails closed without a key file and captures the auth
+// config when routes are built, so the key file is configured before the
+// router is rebuilt. Requests must carry testAdminKey (see adminReq).
+func createAdminTestServer(t *testing.T) *Server {
+	t.Helper()
+	server := createTestServer()
+	server.config.Auth.AdminKeyFile = testAdminKeyFile
+	server.config.Auth.AdminAPIKeyHeader = "X-Admin-Key"
+	server.adminKeyValidator = middleware.NewAdminKeyValidator(testAdminKeyFile)
+	server.router = gin.New()
+	server.setupRoutes()
+	return server
+}
+
+// adminReq builds a request carrying the admin key that servers from
+// createAdminTestServer accept.
+func adminReq(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("X-Admin-Key", testAdminKey)
+	return req
 }
 
 // registerTestAgent registers an agent in the given server and returns its
@@ -1604,14 +1662,19 @@ func TestHandleListMessages_NoAuth(t *testing.T) {
 	}
 }
 
-// TestHandleListMessages_AuthUsesSingleListing verifies that authenticating
-// an agent key on a message query endpoint hashes the key once and matches it
-// against a single agent listing, never reading individual agents (the old
-// scan-and-verify loop issued one GetAgent per registered agent).
-func TestHandleListMessages_AuthUsesSingleListing(t *testing.T) {
+// TestHandleListMessages_AuthUsesKeyedLookup verifies that authenticating an
+// agent key on a message query endpoint hashes the key once and resolves it
+// with a single keyed lookup, never listing or reading individual agents.
+// Authentication runs before the credential is known good, so a listing here
+// would let an unauthenticated caller scan the agents table at will.
+func TestHandleListMessages_AuthUsesKeyedLookup(t *testing.T) {
 	server := createTestServer()
 	mockStorage := server.storage.(*MockStorage)
 	key := registerTestAgent(t, server, "viewer")
+
+	mockStorage.agentGetCalls = 0
+	mockStorage.agentListCalls = 0
+	mockStorage.agentKeyLookups = 0
 
 	req := httptest.NewRequest("GET", "/v1/messages", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
@@ -1621,8 +1684,31 @@ func TestHandleListMessages_AuthUsesSingleListing(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
+	if mockStorage.agentKeyLookups != 1 {
+		t.Errorf("Expected exactly 1 keyed agent lookup, got %d", mockStorage.agentKeyLookups)
+	}
+	if mockStorage.agentListCalls != 0 {
+		t.Errorf("auth must not list agents, got %d ListAgents calls", mockStorage.agentListCalls)
+	}
 	if mockStorage.agentGetCalls != 0 {
 		t.Errorf("auth must not read individual agents, got %d GetAgent calls", mockStorage.agentGetCalls)
+	}
+
+	// A junk Bearer token must cost the same single lookup, not a listing.
+	mockStorage.agentKeyLookups = 0
+	req = httptest.NewRequest("GET", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer not-a-real-key")
+	w = httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("Expected status %d for an unknown key, got %d: %s", http.StatusForbidden, w.Code, w.Body.String())
+	}
+	if mockStorage.agentKeyLookups != 1 {
+		t.Errorf("Expected exactly 1 keyed lookup for a failed attempt, got %d", mockStorage.agentKeyLookups)
+	}
+	if mockStorage.agentListCalls != 0 {
+		t.Errorf("A failed attempt must not list agents, got %d ListAgents calls", mockStorage.agentListCalls)
 	}
 }
 
@@ -2424,7 +2510,9 @@ func TestHandleListMessages_MergedQueryUsesOrFilter(t *testing.T) {
 		t.Fatalf("seed received message: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/v1/messages?limit=5&offset=2", nil)
+	// limit=2 fills the page with the two seeded messages, so the handler
+	// still issues the separate CountMessages query this test inspects.
+	req := httptest.NewRequest("GET", "/v1/messages?limit=2&offset=2", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -2449,8 +2537,8 @@ func TestHandleListMessages_MergedQueryUsesOrFilter(t *testing.T) {
 	if len(filter.Recipients) != 1 || filter.Recipients[0] != "viewer@localhost" {
 		t.Errorf("Expected merged query recipients [viewer@localhost], got %v", filter.Recipients)
 	}
-	if filter.Limit != 5 {
-		t.Errorf("Expected limit 5 propagated to storage, got %d", filter.Limit)
+	if filter.Limit != 2 {
+		t.Errorf("Expected limit 2 propagated to storage, got %d", filter.Limit)
 	}
 	if filter.Offset != 2 {
 		t.Errorf("Expected offset 2 propagated to storage, got %d", filter.Offset)
@@ -2601,6 +2689,80 @@ func TestHandleListMessages_MergedQueryPagination(t *testing.T) {
 	}
 }
 
+// TestHandleListMessages_ShortPageSkipsCount verifies that a page shorter
+// than the limit reports the total from the page itself, without a second
+// full-set query.
+func TestHandleListMessages_ShortPageSkipsCount(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	now := time.Now().UTC()
+	for i := 0; i < 2; i++ {
+		if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+			MessageID:  fmt.Sprintf("019fbd30-0100-75aa-8cd4-de1f14e0110%d", i),
+			Timestamp:  now.Add(-time.Duration(i) * time.Minute),
+			Sender:     "viewer@localhost",
+			Recipients: []string{"peer@localhost"},
+		}); err != nil {
+			t.Fatalf("seed message: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=100", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.countFilters) != 0 {
+		t.Errorf("Expected no CountMessages query for a short page, got %d", len(mockStorage.countFilters))
+	}
+
+	var response struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Total != 2 {
+		t.Errorf("Expected total 2 from the page itself, got %d", response.Total)
+	}
+}
+
+// TestHandleListMessages_EmptyPagePastOffsetCounts verifies that an empty
+// page at a non-zero offset still asks storage for the total: the offset may
+// overshoot the filtered set, so it cannot be added to the page length.
+func TestHandleListMessages_EmptyPagePastOffsetCounts(t *testing.T) {
+	server := createTestServer()
+	mockStorage := server.storage.(*MockStorage)
+	key := registerTestAgent(t, server, "viewer")
+
+	req := httptest.NewRequest("GET", "/v1/messages?limit=100&offset=50", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+	if len(mockStorage.countFilters) != 1 {
+		t.Fatalf("Expected 1 CountMessages query for an empty page past the offset, got %d", len(mockStorage.countFilters))
+	}
+
+	var response struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Total != 0 {
+		t.Errorf("Expected total 0, got %d", response.Total)
+	}
+}
+
 // TestHandleListMessages_CountFailure verifies that a CountMessages failure
 // surfaces as an error response instead of being silently swallowed (the
 // previous total computation ignored storage errors and undercounted).
@@ -2611,7 +2773,18 @@ func TestHandleListMessages_CountFailure(t *testing.T) {
 
 	mockStorage.countError = fmt.Errorf("count exploded")
 
-	req := httptest.NewRequest("GET", "/v1/messages", nil)
+	if err := mockStorage.StoreMessage(context.Background(), &types.Message{
+		MessageID:  "019fbd30-0004-75aa-8cd4-de1f14e011ab",
+		Timestamp:  time.Now().UTC(),
+		Sender:     "viewer@localhost",
+		Recipients: []string{"peer@localhost"},
+	}); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+
+	// limit=1 fills the page, so the handler cannot infer the total from the
+	// page alone and must ask CountMessages.
+	req := httptest.NewRequest("GET", "/v1/messages?limit=1", nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -2875,7 +3048,7 @@ func TestHandleDiscoverAgentsByDomain_NotFound(t *testing.T) {
 
 // Test agent management handlers
 func TestHandleRegisterAgent_Success(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
 	agent := agents.LocalAgent{
 		Address:      "newagent",
@@ -2887,7 +3060,7 @@ func TestHandleRegisterAgent_Success(t *testing.T) {
 		t.Fatalf("Failed to marshal agent: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/v1/admin/agents", bytes.NewBuffer(body))
+	req := adminReq("POST", "/v1/admin/agents", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -2908,9 +3081,9 @@ func TestHandleRegisterAgent_Success(t *testing.T) {
 }
 
 func TestHandleRegisterAgent_InvalidJSON(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
-	req := httptest.NewRequest("POST", "/v1/admin/agents", bytes.NewBufferString("invalid json"))
+	req := adminReq("POST", "/v1/admin/agents", bytes.NewBufferString("invalid json"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -2931,7 +3104,7 @@ func TestHandleRegisterAgent_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleUnregisterAgent_Success(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	ctx := context.Background()
 
 	// First register an agent
@@ -2944,7 +3117,7 @@ func TestHandleUnregisterAgent_Success(t *testing.T) {
 		t.Fatalf("Failed to register agent: %v", err)
 	}
 
-	req := httptest.NewRequest("DELETE", "/v1/admin/agents/testagent", nil)
+	req := adminReq("DELETE", "/v1/admin/agents/testagent", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -2964,9 +3137,9 @@ func TestHandleUnregisterAgent_Success(t *testing.T) {
 }
 
 func TestHandleUnregisterAgent_NotFound(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
-	req := httptest.NewRequest("DELETE", "/v1/admin/agents/nonexistent@localhost", nil)
+	req := adminReq("DELETE", "/v1/admin/agents/nonexistent@localhost", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -2986,7 +3159,7 @@ func TestHandleUnregisterAgent_NotFound(t *testing.T) {
 }
 
 func TestHandleListAgents_Success(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	ctx := context.Background()
 
 	// Register test agents
@@ -3010,7 +3183,7 @@ func TestHandleListAgents_Success(t *testing.T) {
 		t.Fatalf("Failed to register agent2: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/v1/admin/agents", nil)
+	req := adminReq("GET", "/v1/admin/agents", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -3041,7 +3214,7 @@ func TestHandleListAgents_Success(t *testing.T) {
 // TestHandleRotateAgentKey_Success verifies a new key is issued and the
 // old key no longer authenticates.
 func TestHandleRotateAgentKey_Success(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	ctx := context.Background()
 
 	// Register an agent and capture the original API key.
@@ -3051,7 +3224,7 @@ func TestHandleRotateAgentKey_Success(t *testing.T) {
 	}
 	oldKey := agent.APIKey
 
-	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me/rotate-key", nil)
+	req := adminReq("POST", "/v1/admin/agents/rotate-me/rotate-key", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -3091,9 +3264,9 @@ func TestHandleRotateAgentKey_Success(t *testing.T) {
 // reported as 404 (do not retry), not a 400 that a retry script cannot tell
 // apart from a storage failure.
 func TestHandleRotateAgentKey_NotFound(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
-	req := httptest.NewRequest("POST", "/v1/admin/agents/nonexistent/rotate-key", nil)
+	req := adminReq("POST", "/v1/admin/agents/nonexistent/rotate-key", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -3114,7 +3287,7 @@ func TestHandleRotateAgentKey_NotFound(t *testing.T) {
 // outage propagating out of the rotation write is reported as 500 so the
 // caller retries, instead of being flattened into 400.
 func TestHandleRotateAgentKey_StorageError(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	mockStorage := server.storage.(*MockStorage)
 
 	agent := &agents.LocalAgent{Address: "rotate-me", DeliveryMode: "pull"}
@@ -3123,7 +3296,7 @@ func TestHandleRotateAgentKey_StorageError(t *testing.T) {
 	}
 	mockStorage.agentFieldsError = fmt.Errorf("connection refused")
 
-	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me/rotate-key", nil)
+	req := adminReq("POST", "/v1/admin/agents/rotate-me/rotate-key", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -3144,9 +3317,9 @@ func TestHandleRotateAgentKey_StorageError(t *testing.T) {
 // the registry, matching the sibling PATCH/DELETE endpoints, instead of
 // surfacing as a misleading "agent not found".
 func TestHandleRotateAgentKey_ForeignDomain(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
-	req := httptest.NewRequest("POST", "/v1/admin/agents/foo@evil.com/rotate-key", nil)
+	req := adminReq("POST", "/v1/admin/agents/foo@evil.com/rotate-key", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -3170,14 +3343,14 @@ func TestHandleRotateAgentKey_ForeignDomain(t *testing.T) {
 // TestHandleRotateAgentKey_FullLocalAddress verifies that a full local
 // address is accepted and normalized exactly like a bare name.
 func TestHandleRotateAgentKey_FullLocalAddress(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
 	agent := &agents.LocalAgent{Address: "rotate-me", DeliveryMode: "pull"}
 	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
 		t.Fatalf("register agent: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/v1/admin/agents/rotate-me@localhost/rotate-key", nil)
+	req := adminReq("POST", "/v1/admin/agents/rotate-me@localhost/rotate-key", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -3203,7 +3376,7 @@ func TestHandleRotateAgentKey_FullLocalAddress(t *testing.T) {
 // TestHandleUpdateAgent_Success verifies delivery mode and schemas can be
 // updated on an existing agent.
 func TestHandleUpdateAgent_Success(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	ctx := context.Background()
 
 	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
@@ -3212,7 +3385,7 @@ func TestHandleUpdateAgent_Success(t *testing.T) {
 	}
 
 	body := []byte(`{"delivery_mode":"push","push_target":"https://hooks.example.com/a","supported_schemas":["agntcy:upd.test.v1"]}`)
-	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req := adminReq("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -3260,7 +3433,7 @@ func TestHandleUpdateAgent_Success(t *testing.T) {
 // TestHandleUpdateAgent_PushWithoutTarget verifies push mode without a
 // target URL is rejected.
 func TestHandleUpdateAgent_PushWithoutTarget(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	ctx := context.Background()
 
 	agent := &agents.LocalAgent{Address: "upd-agent2", DeliveryMode: "pull"}
@@ -3269,7 +3442,7 @@ func TestHandleUpdateAgent_PushWithoutTarget(t *testing.T) {
 	}
 
 	body := []byte(`{"delivery_mode":"push"}`)
-	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent2", bytes.NewBuffer(body))
+	req := adminReq("PATCH", "/v1/admin/agents/upd-agent2", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -3292,7 +3465,7 @@ func TestHandleUpdateAgent_PushWithoutTarget(t *testing.T) {
 // record stays unchanged, so the delivery invariant holds for the combined
 // state rather than only the pre-update record.
 func TestHandleUpdateAgent_RemovePushTargetRejected(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	ctx := context.Background()
 
 	agent := &agents.LocalAgent{
@@ -3305,7 +3478,7 @@ func TestHandleUpdateAgent_RemovePushTargetRejected(t *testing.T) {
 	}
 
 	body := []byte(`{"push_target":""}`)
-	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent3", bytes.NewBuffer(body))
+	req := adminReq("PATCH", "/v1/admin/agents/upd-agent3", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -3336,10 +3509,10 @@ func TestHandleUpdateAgent_RemovePushTargetRejected(t *testing.T) {
 // reported as 404 (do not retry), not a 400 that a retry script cannot tell
 // apart from a storage failure.
 func TestHandleUpdateAgent_NotFound(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
 	body := []byte(`{"delivery_mode":"pull"}`)
-	req := httptest.NewRequest("PATCH", "/v1/admin/agents/ghost", bytes.NewBuffer(body))
+	req := adminReq("PATCH", "/v1/admin/agents/ghost", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -3361,7 +3534,7 @@ func TestHandleUpdateAgent_NotFound(t *testing.T) {
 // outage propagating out of the field-level update is reported as 500 so
 // the caller retries, instead of being flattened into 400.
 func TestHandleUpdateAgent_StorageError(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 	mockStorage := server.storage.(*MockStorage)
 
 	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
@@ -3371,7 +3544,7 @@ func TestHandleUpdateAgent_StorageError(t *testing.T) {
 	mockStorage.agentFieldsError = fmt.Errorf("connection refused")
 
 	body := []byte(`{"delivery_mode":"push","push_target":"https://hooks.example.com/a"}`)
-	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req := adminReq("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -3392,7 +3565,7 @@ func TestHandleUpdateAgent_StorageError(t *testing.T) {
 // fails the registry's own validation is a client error (400), not a storage
 // failure (5xx) — the "invalid supported schemas" classification branch.
 func TestHandleUpdateAgent_InvalidSchema(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
 	agent := &agents.LocalAgent{Address: "upd-agent", DeliveryMode: "pull"}
 	if err := server.agentRegistry.RegisterAgent(context.Background(), agent); err != nil {
@@ -3400,7 +3573,7 @@ func TestHandleUpdateAgent_InvalidSchema(t *testing.T) {
 	}
 
 	body := []byte(`{"supported_schemas":["not-a-schema"]}`)
-	req := httptest.NewRequest("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
+	req := adminReq("PATCH", "/v1/admin/agents/upd-agent", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
@@ -3421,10 +3594,10 @@ func TestHandleUpdateAgent_InvalidSchema(t *testing.T) {
 // domain is rejected by the registry's resolution layer as a client error
 // (400), not reported as a missing agent (404) or a storage failure (500).
 func TestHandleUpdateAgent_ForeignDomain(t *testing.T) {
-	server := createTestServer()
+	server := createAdminTestServer(t)
 
 	body := []byte(`{"delivery_mode":"pull"}`)
-	req := httptest.NewRequest("PATCH", "/v1/admin/agents/foo@evil.com", bytes.NewBuffer(body))
+	req := adminReq("PATCH", "/v1/admin/agents/foo@evil.com", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)

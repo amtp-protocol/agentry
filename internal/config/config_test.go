@@ -82,6 +82,25 @@ func TestConfigValidation_AdminAuth(t *testing.T) {
 			expectError: false,
 		},
 		{
+			name: "require_auth without admin key file",
+			config: &Config{
+				Server: ServerConfig{
+					Domain:  "test.localhost",
+					Address: ":8080",
+				},
+				Message: MessageConfig{
+					MaxSize: 10485760, // 10MB
+				},
+				Auth: AuthConfig{
+					RequireAuth:       true,
+					AdminKeyFile:      "",
+					AdminAPIKeyHeader: "X-Admin-Key",
+				},
+			},
+			expectError: true,
+			errorMsg:    "auth.admin_key_file is required when auth.require_auth is enabled",
+		},
+		{
 			name: "non-existent admin key file",
 			config: &Config{
 				Server: ServerConfig{

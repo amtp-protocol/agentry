@@ -17,6 +17,8 @@
 package middleware
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
@@ -196,9 +198,23 @@ func AdminAuth(cfg config.AuthConfig) gin.HandlerFunc {
 	// low-traffic, but each request still skips the filesystem read.
 	validator := NewAdminKeyValidator(cfg.AdminKeyFile)
 	return func(c *gin.Context) {
-		// If no admin key file is configured, allow access (backward compatibility)
+		// Fail closed when no admin key file is configured. The admin plane
+		// registers agents, rotates their keys and hands the plaintext back,
+		// so an unconfigured gateway must not serve it to anonymous callers.
+		// This matches the server's own admin-identity check, which likewise
+		// grants nothing without a configured key file.
 		if cfg.AdminKeyFile == "" {
-			c.Next()
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": gin.H{
+					"code":    "ADMIN_AUTH_NOT_CONFIGURED",
+					"message": "Administrative operations are unavailable: no admin key file is configured",
+					"details": gin.H{
+						"required_config": "auth.admin_key_file (AMTP_ADMIN_KEY_FILE)",
+						"endpoint":        c.Request.URL.Path,
+					},
+				},
+			})
+			c.Abort()
 			return
 		}
 
@@ -326,37 +342,55 @@ func isRateLimited(clientIP string) bool {
 //
 // This one-shot form reads the file on every call; long-lived callers on the
 // request path should use NewAdminKeyValidator, which caches the parsed key
-// set and re-reads only when the file changes.
+// set and re-reads it when the file changes or the cache ages out.
 func ValidateAdminKey(providedKey, keyFile string) bool {
 	return NewAdminKeyValidator(keyFile).Validate(providedKey)
 }
 
+// adminKeyCacheTTL bounds how long a parsed key file may be served from
+// cache. mtime and size alone cannot detect every rewrite — a restore from
+// backup, cp -p or rsync --times can reproduce both — so the entry ages out
+// and forces a re-read, capping how long a revoked key keeps working.
+const adminKeyCacheTTL = 5 * time.Second
+
 // AdminKeyValidator validates admin keys against a key file, caching the
-// parsed key set and re-reading the file only when its mtime or size
-// changes. The admin key check sits on the message query read path
-// (GET /v1/messages, GET /v1/messages/:id, GET /v1/messages/:id/status),
-// so a naive read-per-request turns agent polling into a blocking
-// filesystem read per request — including for requests that fail agent-key
-// auth. The cache makes the hot path a map lookup. Removing the file
-// invalidates the cache: validation fails rather than serving stale keys.
+// parsed key set and re-reading the file when its mtime or size changes or
+// the cache entry ages out. The admin key check sits on the message query
+// read path (GET /v1/messages, GET /v1/messages/:id,
+// GET /v1/messages/:id/status), so a naive read-per-request turns agent
+// polling into a blocking filesystem read per request — including for
+// requests that fail agent-key auth. The cache keeps the hot path off the
+// filesystem. Removing the file invalidates the cache: validation fails
+// rather than serving stale keys.
+//
+// Keys are cached as SHA-256 digests, not as the key strings, so comparison
+// is constant-time over a fixed width (see Validate).
 type AdminKeyValidator struct {
 	keyFile string
+	ttl     time.Duration
 
-	mu      sync.RWMutex
-	cached  map[string]struct{}
-	modTime time.Time
-	size    int64
+	mu       sync.RWMutex
+	cached   [][sha256.Size]byte
+	modTime  time.Time
+	size     int64
+	loadedAt time.Time
 }
 
 // NewAdminKeyValidator returns a validator for the given key file. The file
-// is read lazily on first use and re-read only when it changes.
+// is read lazily on first use and re-read when it changes or the cached key
+// set ages out.
 func NewAdminKeyValidator(keyFile string) *AdminKeyValidator {
-	return &AdminKeyValidator{keyFile: filepath.Clean(keyFile)}
+	return &AdminKeyValidator{keyFile: filepath.Clean(keyFile), ttl: adminKeyCacheTTL}
 }
 
-// Validate reports whether the provided key is present in the key file,
-// re-reading the file only when its mtime or size changed since the last
-// read. A missing or unreadable file yields false.
+// Validate reports whether the provided key is present in the key file. A
+// missing or unreadable file yields false.
+//
+// The comparison is deliberately not a map lookup: hashing the caller's key
+// into a bucket and memcmp-ing on a tophash hit leaks information about the
+// key through timing. Every configured key is compared, digest against
+// digest, with no early exit, so the work depends only on how many admin
+// keys are configured.
 func (v *AdminKeyValidator) Validate(providedKey string) bool {
 	if providedKey == "" {
 		return false
@@ -365,16 +399,21 @@ func (v *AdminKeyValidator) Validate(providedKey string) bool {
 	if err != nil {
 		return false
 	}
-	_, ok := keys[providedKey]
-	return ok
+
+	provided := sha256.Sum256([]byte(providedKey))
+	match := 0
+	for i := range keys {
+		match |= subtle.ConstantTimeCompare(keys[i][:], provided[:])
+	}
+	return match == 1
 }
 
-// keys returns the parsed key set, refreshing the cache when the file
-// changed since the previous read.
-func (v *AdminKeyValidator) keys() (map[string]struct{}, error) {
-	// Fast path: cache hit with an unchanged file — no filesystem read.
+// keys returns the cached key digests, refreshing them when the file changed
+// since the previous read or the cached set aged out.
+func (v *AdminKeyValidator) keys() ([][sha256.Size]byte, error) {
+	// Fast path: fresh cache entry over an unchanged file — no read.
 	v.mu.RLock()
-	if v.cached != nil && v.fileUnchanged() {
+	if v.cacheUsable() {
 		keys := v.cached
 		v.mu.RUnlock()
 		return keys, nil
@@ -386,23 +425,37 @@ func (v *AdminKeyValidator) keys() (map[string]struct{}, error) {
 	// just refreshed.
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.cached != nil && v.fileUnchanged() {
+	if v.cacheUsable() {
 		return v.cached, nil
 	}
 
+	// Stat before reading, never after: a rewrite landing between the two
+	// would otherwise pair the pre-write content with the post-write mtime
+	// and size, and the resulting cache entry would look valid forever. With
+	// this order the worst case is one redundant reload.
+	st, err := os.Stat(v.keyFile)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(v.keyFile)
 	if err != nil {
 		return nil, err
 	}
 	v.cached = parseAdminKeys(data)
-	v.recordFileState()
+	v.size = st.Size()
+	v.modTime = st.ModTime()
+	v.loadedAt = time.Now()
 	return v.cached, nil
 }
 
-// fileUnchanged reports whether the key file's mtime and size still match
-// the cached state. A stat failure (file removed/unreadable) is treated as
-// changed so the next load attempt surfaces the error.
-func (v *AdminKeyValidator) fileUnchanged() bool {
+// cacheUsable reports whether the cached key set may still be served: it
+// must be loaded, within its TTL, and backed by a file whose mtime and size
+// still match. A stat failure (file removed/unreadable) counts as changed so
+// the next load attempt surfaces the error.
+func (v *AdminKeyValidator) cacheUsable() bool {
+	if v.cached == nil || time.Since(v.loadedAt) >= v.ttl {
+		return false
+	}
 	st, err := os.Stat(v.keyFile)
 	if err != nil {
 		return false
@@ -410,26 +463,19 @@ func (v *AdminKeyValidator) fileUnchanged() bool {
 	return st.Size() == v.size && st.ModTime().Equal(v.modTime)
 }
 
-// recordFileState snapshots the file's mtime and size after a successful
-// read. Stat is taken after the read so a change landing mid-read is
-// reflected in the snapshot and triggers a reload on the next call.
-func (v *AdminKeyValidator) recordFileState() {
-	if st, err := os.Stat(v.keyFile); err == nil {
-		v.size = st.Size()
-		v.modTime = st.ModTime()
-	}
-}
-
 // parseAdminKeys extracts the keys from a key file: one key per line,
-// ignoring empty lines and comments.
-func parseAdminKeys(data []byte) map[string]struct{} {
-	keys := make(map[string]struct{})
+// ignoring empty lines and comments. Keys are returned as digests so that
+// Validate never has to compare variable-length secrets.
+func parseAdminKeys(data []byte) [][sha256.Size]byte {
+	// Non-nil even when empty: a nil result would read as "never loaded" and
+	// make an empty key file re-read on every request.
+	keys := make([][sha256.Size]byte, 0)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		keys[line] = struct{}{}
+		keys = append(keys, sha256.Sum256([]byte(line)))
 	}
 	return keys
 }

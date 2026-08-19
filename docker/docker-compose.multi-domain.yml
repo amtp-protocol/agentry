@@ -16,7 +16,7 @@ services:
       - AMTP_TLS_CERT_FILE=/etc/ssl/certs/company-a.com.crt
       - AMTP_TLS_KEY_FILE=/etc/ssl/private/company-a.com.key
       - AMTP_AUTH_REQUIRED=true
-      - AMTP_AUTH_ADMIN_KEY_FILE=/etc/ssl/admin/company-a.key
+      - AMTP_ADMIN_KEY_FILE=/etc/ssl/admin/company-a.key
       - AMTP_LOGGING_LEVEL=info
       - AMTP_LOGGING_FORMAT=json
     ports:
@@ -48,7 +48,7 @@ services:
       - AMTP_TLS_CERT_FILE=/etc/ssl/certs/subsidiary.com.crt
       - AMTP_TLS_KEY_FILE=/etc/ssl/private/subsidiary.com.key
       - AMTP_AUTH_REQUIRED=true
-      - AMTP_AUTH_ADMIN_KEY_FILE=/etc/ssl/admin/subsidiary.key
+      - AMTP_ADMIN_KEY_FILE=/etc/ssl/admin/subsidiary.key
       - AMTP_LOGGING_LEVEL=info
       - AMTP_LOGGING_FORMAT=json
     ports:
@@ -80,7 +80,7 @@ services:
       - AMTP_TLS_CERT_FILE=/etc/ssl/certs/partner.com.crt
       - AMTP_TLS_KEY_FILE=/etc/ssl/private/partner.com.key
       - AMTP_AUTH_REQUIRED=true
-      - AMTP_AUTH_ADMIN_KEY_FILE=/etc/ssl/admin/partner.key
+      - AMTP_ADMIN_KEY_FILE=/etc/ssl/admin/partner.key
       - AMTP_LOGGING_LEVEL=info
       - AMTP_LOGGING_FORMAT=json
     ports:

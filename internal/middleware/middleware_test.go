@@ -33,71 +33,34 @@ import (
 	"github.com/amtp-protocol/agentry/internal/config"
 )
 
-func TestAdminAuth_Disabled(t *testing.T) {
+func TestAdminAuth_NoKeyFile_FailsClosed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	// Create config with admin auth disabled
+	// No admin key file configured: there is no credential that could
+	// authorize an admin request, so every request must be rejected.
 	cfg := config.AuthConfig{
-		RequireAuth:       false, // Admin auth disabled
+		RequireAuth:       false,
 		AdminKeyFile:      "",
 		AdminAPIKeyHeader: "X-Admin-Key",
 	}
 
-	// Create test router
 	router := gin.New()
 	router.Use(AdminAuth(cfg))
-	router.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "success"})
-	})
-
-	// Test request without any auth header
-	req := httptest.NewRequest("GET", "/test", nil)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	// Should pass when auth is disabled
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status %d when auth disabled, got %d", http.StatusOK, w.Code)
-	}
-}
-
-func TestAdminAuth_NoKeyFile_BackwardCompatibility(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	// Create config with no admin key file (backward compatibility mode)
-	cfg := config.AuthConfig{
-		RequireAuth:       true, // This doesn't matter for admin auth
-		AdminKeyFile:      "",   // No key file - should allow access
-		AdminAPIKeyHeader: "X-Admin-Key",
-	}
-
-	// Create test router
-	router := gin.New()
-	router.Use(AdminAuth(cfg))
-	router.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "success"})
+	router.POST("/admin/agents/alice/rotate-key", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"api_key": "leaked"})
 	})
 
 	tests := []struct {
-		name           string
-		adminKey       string
-		expectedStatus int
+		name     string
+		adminKey string
 	}{
-		{
-			name:           "no admin key - should pass (backward compatibility)",
-			adminKey:       "",
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "any admin key - should pass (backward compatibility)",
-			adminKey:       "any-key",
-			expectedStatus: http.StatusOK,
-		},
+		{name: "no admin key", adminKey: ""},
+		{name: "arbitrary admin key", adminKey: "any-key"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "/test", nil)
+			req := httptest.NewRequest("POST", "/admin/agents/alice/rotate-key", nil)
 			if tt.adminKey != "" {
 				req.Header.Set("X-Admin-Key", tt.adminKey)
 			}
@@ -105,8 +68,14 @@ func TestAdminAuth_NoKeyFile_BackwardCompatibility(t *testing.T) {
 			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
 
-			if w.Code != tt.expectedStatus {
-				t.Errorf("Expected status %d, got %d", tt.expectedStatus, w.Code)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, w.Code)
+			}
+			if strings.Contains(w.Body.String(), "leaked") {
+				t.Errorf("Handler ran without admin authentication: %s", w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "ADMIN_AUTH_NOT_CONFIGURED") {
+				t.Errorf("Expected ADMIN_AUTH_NOT_CONFIGURED error code, got %s", w.Body.String())
 			}
 		})
 	}
@@ -1077,6 +1046,55 @@ func TestAdminKeyValidator_Basic(t *testing.T) {
 	}
 }
 
+// TestAdminKeyValidator_NearMisses verifies that comparing digests instead of
+// the raw strings still rejects keys that only nearly match: a prefix, an
+// extension, and a one-character change.
+func TestAdminKeyValidator_NearMisses(t *testing.T) {
+	path := writeAdminKeysFile(t, "correct-admin-key\nsecond-admin-key\n")
+	v := NewAdminKeyValidator(path)
+
+	for _, key := range []string{
+		"correct-admin-ke",   // prefix
+		"correct-admin-keys", // extension
+		"correct-admin-keX",  // one character changed
+		"Correct-admin-key",  // case
+		" correct-admin-key", // leading space
+	} {
+		if v.Validate(key) {
+			t.Errorf("Validate(%q) = true, want false", key)
+		}
+	}
+	for _, key := range []string{"correct-admin-key", "second-admin-key"} {
+		if !v.Validate(key) {
+			t.Errorf("Validate(%q) = false, want true", key)
+		}
+	}
+}
+
+// TestAdminKeyValidator_EmptyFile verifies that a key file with no usable
+// keys rejects everything and still caches, rather than re-reading the file
+// on every request.
+func TestAdminKeyValidator_EmptyFile(t *testing.T) {
+	path := writeAdminKeysFile(t, "# only a comment\n\n")
+	v := NewAdminKeyValidator(path)
+
+	if v.Validate("anything") {
+		t.Error("expected an empty key file to reject every key")
+	}
+
+	// Remove the file: a cached empty set must still be served, proving the
+	// first call cached instead of falling through to a read every time.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove key file: %v", err)
+	}
+	v.mu.RLock()
+	cached := v.cached != nil
+	v.mu.RUnlock()
+	if !cached {
+		t.Error("expected the empty key set to be cached")
+	}
+}
+
 // TestAdminKeyValidator_MissingFile verifies that a validator backed by an
 // unreadable or missing file rejects every key.
 func TestAdminKeyValidator_MissingFile(t *testing.T) {
@@ -1088,8 +1106,10 @@ func TestAdminKeyValidator_MissingFile(t *testing.T) {
 
 // TestAdminKeyValidator_CachesUnchangedFile verifies that once a file is
 // parsed, a validator does not re-read it while the mtime and size are
-// unchanged — even if the content is swapped underneath it. This is what
-// keeps the request path off the filesystem once the file is cached.
+// unchanged and the entry is within its TTL — even if the content is swapped
+// underneath it. This is what keeps the request path off the filesystem once
+// the file is cached; TestAdminKeyValidator_ReloadsAfterTTL covers the
+// expiry that bounds how long such a swap stays invisible.
 func TestAdminKeyValidator_CachesUnchangedFile(t *testing.T) {
 	path := writeAdminKeysFile(t, "key1")
 	v := NewAdminKeyValidator(path)
@@ -1179,6 +1199,45 @@ func TestAdminKeyValidator_ReloadsOnSizeChange(t *testing.T) {
 	}
 	if !v.Validate("key1-longer") {
 		t.Error("expected new key to validate after the file size changed")
+	}
+}
+
+// TestAdminKeyValidator_ReloadsAfterTTL verifies that the cache expires:
+// a replacement that preserves both mtime and size (cp -p, rsync --times,
+// restore-from-backup) is picked up once the cache entry ages out, instead
+// of being served stale for the lifetime of the process.
+func TestAdminKeyValidator_ReloadsAfterTTL(t *testing.T) {
+	path := writeAdminKeysFile(t, "key1")
+	v := NewAdminKeyValidator(path)
+	v.ttl = 10 * time.Millisecond
+
+	if !v.Validate("key1") {
+		t.Fatal("expected key1 to validate after initial load")
+	}
+
+	orig, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat key file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("key2"), 0o600); err != nil {
+		t.Fatalf("rewrite key file: %v", err)
+	}
+	if err := os.Chtimes(path, orig.ModTime(), orig.ModTime()); err != nil {
+		t.Fatalf("reset mtime: %v", err)
+	}
+
+	// Still cached: the stat is identical and the entry has not aged out.
+	if !v.Validate("key1") {
+		t.Error("expected key1 to stay valid while the cache entry is fresh")
+	}
+
+	time.Sleep(2 * v.ttl)
+
+	if v.Validate("key1") {
+		t.Error("expected the revoked key1 to be rejected once the cache expired")
+	}
+	if !v.Validate("key2") {
+		t.Error("expected key2 to validate once the cache expired")
 	}
 }
 
