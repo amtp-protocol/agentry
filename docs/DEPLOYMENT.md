@@ -139,7 +139,7 @@ AMTP_DOMAIN="company-a.com" \
 AMTP_SERVER_ADDRESS=":8443" \
 ./agentry &
 
-# Terminal 2: Gateway for subsidiary.com  
+# Terminal 2: Gateway for subsidiary.com
 AMTP_DOMAIN="subsidiary.com" \
 AMTP_SERVER_ADDRESS=":8444" \
 ./agentry &
@@ -361,6 +361,87 @@ company-a.com.          IN A    203.0.113.10
 subsidiary.com.         IN A    203.0.113.11
 partner.com.            IN A    203.0.113.12
 ```
+
+## Domain Signatures
+
+Messages from remote senders are authenticated by DKIM-style domain
+signatures. The sending gateway signs outbound messages with a private key;
+receiving gateways resolve the public key from DNS and verify.
+
+### Key Generation
+
+Generate an ES256 (P-256) key pair per domain (RS256 with ≥ 2048 bits is
+also supported):
+
+```bash
+# Private key (keep secret — mount via Secret, never bake into the image)
+openssl ecparam -name prime256v1 -genkey -noout -out private.pem
+
+# Public key, base64url (no padding) for the DNS record
+openssl ec -in private.pem -pubout -outform DER \
+  | basenc --base64url -w0 | tr -d '='
+```
+
+### DNS Key Record
+
+Publish the public key as a TXT record at
+`{keyid}._amtpkey.{domain}` (default keyid: `k1`):
+
+```dns
+k1._amtpkey.company-a.com.  IN TXT "v=amtpkey1;alg=ES256;p=<base64url-public-key>"
+```
+
+### Gateway Configuration
+
+```bash
+export AMTP_SIGNATURE_PRIVATE_KEY_FILE="/etc/agentry/signing/private.pem"
+export AMTP_SIGNATURE_KEY_ID="k1"                       # DNS label selector
+export AMTP_SIGNATURE_VERIFY_POLICY="flag"              # accept | flag | reject
+```
+
+`verify_policy` controls how **inbound remote** messages are handled:
+
+| Policy | Unsigned | Invalid | Key unresolvable |
+|--------|----------|---------|------------------|
+| `accept` | accepted, recorded `unsigned` | accepted, recorded `invalid` | accepted, recorded `key_unavailable` |
+| `flag` (default) | accepted + warning log | accepted + warning log | accepted + warning log |
+| `reject` | `403 SIGNATURE_REQUIRED` | `403 SIGNATURE_INVALID` | `503 SIGNATURE_KEY_UNAVAILABLE` |
+
+Local-domain senders are unaffected by this policy — they always
+authenticate with a Bearer agent API key (see [API.md](API.md)).
+
+### Kubernetes Secret Rollout
+
+```bash
+kubectl create secret generic agentry-signing-key \
+  --from-file=private.pem=/etc/agentry/signing/private.pem
+
+# Mount it read-only:
+#   volumeMounts:
+#     - name: signing-key
+#       mountPath: /etc/agentry/signing
+#       readOnly: true
+```
+
+### Key Rotation
+
+1. Generate the new key pair and publish its TXT record under a **new**
+   keyid (e.g. `k2`) while the old record is still live.
+2. Switch the gateway to the new key (`AMTP_SIGNATURE_KEY_ID=k2` + new key
+   file) and restart.
+3. Remove the old `k1` record once no in-flight messages still reference it.
+
+### Caveats
+
+- **DNSSEC**: the verifier does not validate DNSSEC itself; it trusts the
+  resolver. Run a DNSSEC-validating resolver and keep
+  `AMTP_DNS_RESOLVERS` pointed at it in production.
+- **Relays**: signatures cover the exact request body. Any intermediary
+  that re-serializes the JSON breaks the signature — route signed traffic
+  end-to-end without transformation.
+- **Key caching**: resolved key records are cached for
+  `AMTP_DNS_CACHE_TTL` (default 5m); removals take effect after the TTL
+  expires.
 
 ## Security Considerations
 

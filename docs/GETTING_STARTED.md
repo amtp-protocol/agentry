@@ -69,9 +69,21 @@ curl -X POST http://localhost:8080/v1/admin/agents \
 # }
 export AGENT_KEY=<api_key from the response>
 
-# Send a local message
+# Local senders must authenticate with their own agent API key, so register
+# the sending agent too (pull mode is enough; it never receives anything)
+curl -X POST http://localhost:8080/v1/admin/agents \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Key: $ADMIN_KEY" \
+  -d '{
+    "address": "test",
+    "delivery_mode": "pull"
+  }'
+export SENDER_KEY=<api_key from the response>
+
+# Send a local message (the sender authenticates with its agent API key)
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SENDER_KEY" \
   -d '{
     "sender": "test@localhost",
     "recipients": ["user@localhost"],
@@ -89,6 +101,7 @@ curl -H "X-Admin-Key: $ADMIN_KEY" http://localhost:8080/v1/admin/agents
 # Send to test domain (will fail gracefully for testing)
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SENDER_KEY" \
   -d '{
     "sender": "test@localhost",
     "recipients": ["user@test.com"],
@@ -152,6 +165,8 @@ See [DOMAIN_MANAGEMENT.md](DOMAIN_MANAGEMENT.md) for details.
 - **"bind: address already in use"**: Change port with `AMTP_SERVER_ADDRESS=:8081`
 - **"connection refused"**: Ensure server is running on correct port
 - **`401 ADMIN_AUTH_NOT_CONFIGURED`**: Start the gateway with `-admin-key-file` or `AMTP_ADMIN_KEY_FILE`
+- **`401 LOCAL_SENDER_AUTH_REQUIRED`**: Local-domain sends must carry `Authorization: Bearer <api_key>` where the key belongs to the agent matching the `sender` address — register the sender agent first
+- **`403 SIGNATURE_REQUIRED` / `SIGNATURE_INVALID`**: The receiving domain enforces signature verification (`verify_policy: reject`); see [DEPLOYMENT.md](DEPLOYMENT.md#domain-signatures) for key setup
 
 Debug mode:
 

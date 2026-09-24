@@ -74,6 +74,24 @@ go test ./internal/processing -bench=.
 go test ./tests -bench=.
 ```
 
+### Docker-Based E2E Tests
+
+Two dockerized stacks exercise the gateway end-to-end (see
+[DOCKER_TESTING.md](DOCKER_TESTING.md) for details):
+
+```bash
+# Multi-domain simulation: discovery, schemas, Bearer-authenticated sends,
+# workflow coordination across three gateways
+./scripts/test-simulation-docker.sh start
+
+# Domain-signature simulation: signed/forged/tampered delivery, key
+# unavailability, mixed verify policies (flag/reject)
+./scripts/test-signed-simulation.sh start
+```
+
+Both scripts are self-contained: they generate keys/config, build the
+images, run the assertions, and tear the stack down.
+
 ## Test Categories
 
 ### 1. Unit Tests
