@@ -32,6 +32,9 @@ type MetricsProvider interface {
 	IncMessagesInFlight()
 	DecMessagesInFlight()
 
+	// Sender verification metrics
+	RecordSenderVerification(result, policy string)
+
 	// Delivery metrics
 	RecordDelivery(status, domain string, duration time.Duration, attempts int)
 	RecordDeliveryRetry(domain, reason string)

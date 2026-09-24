@@ -192,6 +192,23 @@ schema:
   registryTimeout: ""
 
 # -----------------------------------------------------------------------------
+# Domain Signature Configuration
+# -----------------------------------------------------------------------------
+
+# -- Domain signature configuration. The private key is NEVER set inline here;
+# create a Secret with the PEM and reference it via privateKeyExistingSecret.
+signature:
+  # -- Key selector (DNS label, e.g. "k1" for k1._amtpkey.<domain>)
+  keyID: "k1"
+  # -- Remote-signature verification policy: accept, flag, or reject
+  verifyPolicy: "flag"
+  # -- Existing Secret containing the PEM private key. Required to enable
+  # outbound signing; when empty the gateway sends unsigned messages.
+  privateKeyExistingSecret: ""
+  # -- Key within the signing secret holding the PEM private key
+  privateKeySecretKey: "private.pem"
+
+# -----------------------------------------------------------------------------
 # Metrics Configuration
 # -----------------------------------------------------------------------------
 

@@ -18,6 +18,7 @@ package processing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -473,5 +474,121 @@ func TestProcessMessage_CoordinationResultCarriesWorkflowID(t *testing.T) {
 
 	if result.WorkflowID != "0198c5b2-0000-7000-8000-000000000001" {
 		t.Errorf("ProcessingResult.WorkflowID = %q, want the workflow ID from Initialize", result.WorkflowID)
+	}
+}
+
+// TestDispatch_PersistsEngineGeneratedMessage is a regression test: the
+// workflow engine dispatches messages with fresh identities (new message IDs
+// minted by buildTemplateMessage). Dispatch must persist the message and its
+// initial status before delivery, otherwise the status update at the end of
+// the immediate path fails with "message status not found" and the message
+// never appears in the recipient's inbox.
+func TestDispatch_PersistsEngineGeneratedMessage(t *testing.T) {
+	discovery := NewMockDiscovery()
+	deliveryEngine := NewMockDeliveryEngine()
+	storage := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+
+	msg := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01a0c2ec-092c-7fe4-ba35-83fbec804702",
+		IdempotencyKey: "26c05f7a-6611-44ee-8bbf-971301c9d0fb",
+		Timestamp:      time.Now().UTC(),
+		WorkflowID:     "wf-1234",
+		Sender:         "sales@company-a.local",
+		Recipients:     []string{"payment-processor@company-b.local"},
+		Subject:        "Process Order",
+		Schema:         "agntcy:finance.payment.v1",
+		Payload:        []byte(`{"order_id":"ORD-12345"}`),
+	}
+
+	if err := processor.Dispatch(context.Background(), msg); err != nil {
+		t.Fatalf("Dispatch failed: %v", err)
+	}
+
+	// The dispatched message must be retrievable by ID.
+	if _, err := storage.GetMessage(context.Background(), msg.MessageID); err != nil {
+		t.Errorf("dispatched message was not persisted: %v", err)
+	}
+
+	// Its status must exist and reflect the delivery outcome, not error out.
+	status, err := storage.GetStatus(context.Background(), msg.MessageID)
+	if err != nil {
+		t.Fatalf("dispatched message status was not persisted: %v", err)
+	}
+	if status.Status != types.StatusDelivered {
+		t.Errorf("dispatched message status = %q, want %q", status.Status, types.StatusDelivered)
+	}
+}
+
+// TestDispatch_FailureWhenStorageUnavailable verifies Dispatch surfaces
+// storage errors instead of silently dropping engine-generated messages.
+func TestDispatch_FailureWhenStorageUnavailable(t *testing.T) {
+	discovery := NewMockDiscovery()
+	deliveryEngine := NewMockDeliveryEngine()
+	storage := NewMockStorage()
+	storage.error = errors.New("storage unavailable")
+	processor := NewMessageProcessor(discovery, deliveryEngine, storage)
+
+	msg := &types.Message{
+		Version:    "1.0",
+		MessageID:  "018f3a2b-1c2d-7e3f-8a9b-0c1d2e3f4a5b",
+		Timestamp:  time.Now().UTC(),
+		Sender:     "sales@company-a.local",
+		Recipients: []string{"payment-processor@company-b.local"},
+		Subject:    "Process Order",
+	}
+
+	if err := processor.Dispatch(context.Background(), msg); err == nil {
+		t.Fatal("expected Dispatch to fail when storage is unavailable")
+	}
+}
+
+// TestDispatch_RedeliversStoredMessageWithoutReStoring is a regression test
+// for parallel and conditional coordination: the engine re-dispatches the
+// ORIGINAL message (same MessageID), which the ingest path already stored.
+// Dispatch must not try to store it again — with database storage that
+// violates the message ID uniqueness constraint and fails the whole workflow.
+func TestDispatch_RedeliversStoredMessageWithoutReStoring(t *testing.T) {
+	discovery := NewMockDiscovery()
+	deliveryEngine := NewMockDeliveryEngine()
+	store := NewMockStorage()
+	processor := NewMessageProcessor(discovery, deliveryEngine, store)
+
+	msg := &types.Message{
+		Version:    "1.0",
+		MessageID:  "018f3a2b-1c2d-7e3f-8a9b-0c1d2e3f4a5b",
+		Timestamp:  time.Now().UTC(),
+		WorkflowID: "wf-5678",
+		Sender:     "workflow-test@localhost",
+		Recipients: []string{"agent1@localhost", "agent2@localhost"},
+		Subject:    "Parallel Test",
+	}
+
+	// Simulate the ingest path having stored the message already.
+	if err := store.StoreMessageWithStatus(context.Background(), msg, &types.MessageStatus{
+		MessageID: msg.MessageID,
+		Status:    types.StatusQueued,
+		Recipients: []types.RecipientStatus{
+			{Address: "agent1@localhost", Status: types.StatusQueued, Timestamp: time.Now().UTC()},
+			{Address: "agent2@localhost", Status: types.StatusQueued, Timestamp: time.Now().UTC()},
+		},
+		Attempts:  0,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to seed stored message: %v", err)
+	}
+
+	if err := processor.Dispatch(context.Background(), msg); err != nil {
+		t.Fatalf("Dispatch of an already-stored message failed: %v", err)
+	}
+
+	status, err := store.GetStatus(context.Background(), msg.MessageID)
+	if err != nil {
+		t.Fatalf("status missing after Dispatch: %v", err)
+	}
+	if status.Status != types.StatusDelivered {
+		t.Errorf("status = %q, want %q", status.Status, types.StatusDelivered)
 	}
 }

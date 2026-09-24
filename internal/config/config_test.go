@@ -764,3 +764,145 @@ schema:
 		t.Errorf("Expected env path '%s' to override YAML path, got '%s'", envSchemaPath, cfg.Schema.LocalRegistry.BasePath)
 	}
 }
+
+func TestSignatureConfigDefaults(t *testing.T) {
+	cfg := getDefaultConfig()
+
+	if cfg.Signature.PrivateKeyFile != "" {
+		t.Errorf("Expected empty default private key file, got '%s'", cfg.Signature.PrivateKeyFile)
+	}
+	if cfg.Signature.KeyID != "k1" {
+		t.Errorf("Expected default key ID 'k1', got '%s'", cfg.Signature.KeyID)
+	}
+	if cfg.Signature.VerifyPolicy != "flag" {
+		t.Errorf("Expected default verify policy 'flag', got '%s'", cfg.Signature.VerifyPolicy)
+	}
+}
+
+func TestSignatureConfigYAML(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "config.yaml")
+	configContent := `server:
+  domain: "test.localhost"
+signature:
+  private_key_file: "/etc/agentry/signing/private.pem"
+  key_id: "k2"
+  verify_policy: "reject"`
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	cfg := getDefaultConfig()
+	if err := loadFromYAML(cfg, configFile); err != nil {
+		t.Fatalf("Failed to load YAML config: %v", err)
+	}
+
+	if cfg.Signature.PrivateKeyFile != "/etc/agentry/signing/private.pem" {
+		t.Errorf("Expected private key file, got '%s'", cfg.Signature.PrivateKeyFile)
+	}
+	if cfg.Signature.KeyID != "k2" {
+		t.Errorf("Expected key ID 'k2', got '%s'", cfg.Signature.KeyID)
+	}
+	if cfg.Signature.VerifyPolicy != "reject" {
+		t.Errorf("Expected verify policy 'reject', got '%s'", cfg.Signature.VerifyPolicy)
+	}
+}
+
+func TestSignatureConfigEnvOverride(t *testing.T) {
+	os.Setenv("AMTP_SIGNATURE_PRIVATE_KEY_FILE", "/env/key.pem")
+	os.Setenv("AMTP_SIGNATURE_KEY_ID", "k3")
+	os.Setenv("AMTP_SIGNATURE_VERIFY_POLICY", "accept")
+	defer func() {
+		os.Unsetenv("AMTP_SIGNATURE_PRIVATE_KEY_FILE")
+		os.Unsetenv("AMTP_SIGNATURE_KEY_ID")
+		os.Unsetenv("AMTP_SIGNATURE_VERIFY_POLICY")
+	}()
+
+	cfg := getDefaultConfig()
+	loadFromEnv(cfg)
+
+	if cfg.Signature.PrivateKeyFile != "/env/key.pem" {
+		t.Errorf("Expected private key file '/env/key.pem', got '%s'", cfg.Signature.PrivateKeyFile)
+	}
+	if cfg.Signature.KeyID != "k3" {
+		t.Errorf("Expected key ID 'k3', got '%s'", cfg.Signature.KeyID)
+	}
+	if cfg.Signature.VerifyPolicy != "accept" {
+		t.Errorf("Expected verify policy 'accept', got '%s'", cfg.Signature.VerifyPolicy)
+	}
+}
+
+func TestSignatureConfigValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      string
+		keyID       string
+		keyFile     string
+		expectError string
+	}{
+		{
+			name:    "valid defaults",
+			policy:  "flag",
+			keyID:   "k1",
+			keyFile: "",
+		},
+		{
+			name:    "valid accept policy",
+			policy:  "accept",
+			keyID:   "k1",
+			keyFile: "",
+		},
+		{
+			name:    "valid reject policy",
+			policy:  "reject",
+			keyID:   "k1",
+			keyFile: "",
+		},
+		{
+			name:        "invalid policy",
+			policy:      "strict",
+			keyID:       "k1",
+			keyFile:     "",
+			expectError: "verify_policy",
+		},
+		{
+			name:        "invalid key id",
+			policy:      "flag",
+			keyID:       "Bad_Key",
+			keyFile:     "",
+			expectError: "key_id",
+		},
+		{
+			name:        "key id with dot",
+			policy:      "flag",
+			keyID:       "a.b",
+			keyFile:     "",
+			expectError: "key_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := getDefaultConfig()
+			cfg.Server.Domain = "test.localhost"
+			cfg.TLS.Enabled = false
+			cfg.Signature.VerifyPolicy = tt.policy
+			cfg.Signature.KeyID = tt.keyID
+			cfg.Signature.PrivateKeyFile = tt.keyFile
+
+			err := cfg.validate()
+			if tt.expectError == "" {
+				if err != nil {
+					t.Fatalf("Expected no error, got: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("Expected error, got none")
+				}
+				if !strings.Contains(err.Error(), tt.expectError) {
+					t.Errorf("Expected error containing '%s', got: %v", tt.expectError, err)
+				}
+			}
+		})
+	}
+}

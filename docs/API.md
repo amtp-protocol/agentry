@@ -4,7 +4,9 @@
 
 | Endpoints | Required credential |
 |-----------|---------------------|
-| `POST /v1/messages`, `/health`, `/ready`, `/v1/capabilities`, `/v1/discovery` | None |
+| `POST /v1/messages` (local-domain sender) | Agent API key of the sender (`Authorization: Bearer`) |
+| `POST /v1/messages` (remote sender) | Domain signature, checked per `signature.verify_policy` |
+| `/health`, `/ready`, `/v1/capabilities`, `/v1/discovery` | None |
 | `GET /v1/messages...` | Agent API key or admin key |
 | `/v1/inbox/...` | Agent API key (own inbox only) |
 | `/v1/admin/...` | Admin key |
@@ -14,6 +16,23 @@ The table describes the default setup. With `AMTP_AUTH_REQUIRED=true` the gatewa
 - **Agent API key**: `Authorization: Bearer <agent-api-key>`, returned once when the agent is registered.
 - **Admin key**: `X-Admin-Key` header (name configurable via `AMTP_ADMIN_API_KEY_HEADER`), loaded from the admin key file. Until an admin key file is configured, every `/v1/admin` request is refused with `401 ADMIN_AUTH_NOT_CONFIGURED`. See [CONFIGURATION.md](CONFIGURATION.md).
 
+### Sender authentication matrix
+
+How `POST /v1/messages` authenticates its sender:
+
+| Sender | Mechanism | Failure response |
+|--------|-----------|------------------|
+| Local domain (same as gateway) | Bearer agent API key; the authenticated agent address must equal `sender` | `401 LOCAL_SENDER_AUTH_REQUIRED` (no key), `403 SENDER_CREDENTIAL_MISMATCH` (wrong key/sender) |
+| Remote domain | Domain signature (see below) | per `signature.verify_policy` |
+
+Remote-sender policies (`AMTP_SIGNATURE_VERIFY_POLICY`):
+
+| Policy | Unsigned | Invalid signature | Key unresolvable |
+|--------|----------|-------------------|------------------|
+| `accept` | accepted, recorded `unsigned` | accepted, recorded `invalid` | accepted, recorded `key_unavailable` |
+| `flag` (default) | accepted + warning log | accepted + warning log | accepted + warning log |
+| `reject` | `403 SIGNATURE_REQUIRED` | `403 SIGNATURE_INVALID` | `503 SIGNATURE_KEY_UNAVAILABLE` |
+
 ## Core Messaging
 
 ### Send Message
@@ -21,6 +40,7 @@ The table describes the default setup. With `AMTP_AUTH_REQUIRED=true` the gatewa
 ```http
 POST /v1/messages
 Content-Type: application/json
+Authorization: Bearer {agent_api_key}   # required for local-domain senders
 
 {
   "sender": "agent@sender.com",
@@ -33,11 +53,73 @@ Content-Type: application/json
 }
 ```
 
+Remote senders additionally attach a domain signature:
+
+```json
+{
+  "sender": "agent@sender.com",
+  "recipients": ["agent@receiver.com"],
+  "subject": "Test Message",
+  "payload": {"text": "Hello, World!"},
+  "signature": {
+    "algorithm": "ES256",
+    "keyid": "k1",
+    "value": "base64url-encoded-signature"
+  }
+}
+```
+
+**Signature format** (DKIM-style domain signatures):
+
+1. Build the canonical body: the full request object **without** the
+   `signature` member, canonicalized per RFC 8785 (JCS): members sorted by
+   name, no insignificant whitespace, UTF-8. The request body must be a
+   single JSON object with no duplicate members.
+2. Hash the canonical bytes with SHA-256.
+3. Sign the digest with the domain's private key — `ES256` (P-256, P1363
+   `r||s` signature) or `RS256` (RSA ≥ 2048 bits, PKCS#1 v1.5).
+4. Encode the signature with base64url (no padding) into
+   `signature.value`; `signature.keyid` selects the DNS key record.
+
+The public key is published as a DNS TXT record at
+`{keyid}._amtpkey.{sender-domain}`:
+
+```
+v=amtpkey1;alg=ES256;p=<base64url-encoded-public-key>
+```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for key generation and DNS rollout.
+
 ### Query Message Status
 
 ```http
 GET /v1/messages/{message_id}/status
 ```
+
+The response records how the sender was authenticated:
+
+```json
+{
+  "message_id": "...",
+  "status": "delivered",
+  "recipients": [...],
+  "sender_verification": {
+    "result": "verified",
+    "domain": "sender.com",
+    "policy": "reject"
+  }
+}
+```
+
+`sender_verification.result` is one of:
+
+| Result | Meaning |
+|--------|---------|
+| `verified` | Remote domain signature verified against the published key |
+| `unsigned` | Remote message carried no signature |
+| `invalid` | Signature present but verification failed (bad value, algorithm mismatch, tampered body) |
+| `key_unavailable` | Signing key could not be resolved from DNS |
+| `trusted_internal` | Local sender authenticated by agent API key (or internal workflow dispatch) |
 
 ### List Messages
 
@@ -61,11 +143,14 @@ GET /v1/messages/{message_id}
 - the **gateway admin key** (`X-Admin-Key` header): the admin may inspect
   any message.
 
-`POST /v1/messages` remains **public by design** (AMTP is a federated
-protocol where remote senders have no local key). Practical consequence: a
-client that submits a message but holds no registered local agent key cannot
-poll the delivery status of its own message. It must present a registered
-agent's key or the admin key to do so.
+`POST /v1/messages` authenticates its sender as described in the
+[authentication matrix](#sender-authentication-matrix) above: local-domain
+senders must present a registered agent's Bearer API key matching the
+`sender` field; remote senders are authenticated by their domain signature
+under the configured verification policy. A client that submits a message
+but holds no registered local agent key cannot poll the delivery status of
+its own message. It must present a registered agent's key or the admin key
+to do so.
 
 ## Local Agent Management
 

@@ -34,7 +34,7 @@ The DNS server provides TXT records for AMTP discovery, but to access gateways b
 
 # Now you can use domain names instead of localhost:port
 curl http://company-a.local:8080/health        # Instead of localhost:8080
-curl http://company-b.local:8081/health        # Instead of localhost:8081  
+curl http://company-b.local:8081/health        # Instead of localhost:8081
 curl http://partner.local:8082/health          # Instead of localhost:8082
 ```
 
@@ -79,6 +79,22 @@ docker-compose -f docker/docker-compose.schema-test.yml logs -f
 # Stop services
 docker-compose -f docker/docker-compose.schema-test.yml down -v
 ```
+
+### Build Proxy Configuration
+
+Image builds accept a `GOPROXY` build arg (and `APK_MIRROR` for the agentry
+image) so module and package downloads can go through a proxy or mirror when
+needed. By default no proxy is used (`direct`).
+
+To configure, copy `docker/.env.example` to `docker/.env` and set the values:
+
+```bash
+cp docker/.env.example docker/.env
+# edit docker/.env, e.g. GOPROXY=https://goproxy.cn,direct
+```
+
+Docker compose automatically reads `.env` from the directory containing the
+compose file and applies it to `${GOPROXY}` interpolation in build args.
 
 ## Architecture
 
@@ -179,7 +195,7 @@ Register agents with their supported schemas:
 curl -X POST http://company-a.local:8080/v1/admin/agents \
   -H "Content-Type: application/json" \
   -d '{
-    "address": "sales", 
+    "address": "sales",
     "delivery_mode": "pull",
     "supported_schemas": ["agntcy:commerce.*", "agntcy:finance.payment.*"]
   }'
@@ -200,11 +216,13 @@ curl http://company-a.local:8080/v1/capabilities/company-b.local
 ```
 
 ### 6. Message Sending with Schema Validation
-Send messages between domains with schema validation:
+Send messages between domains with schema validation. Local-domain senders
+must authenticate with their agent API key (returned at registration):
 
 ```bash
 curl -X POST http://company-a.local:8080/v1/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SALES_API_KEY" \
   -d '{
     "sender": "sales@company-a.local",
     "recipients": ["payment-processor@company-b.local"],
@@ -219,6 +237,37 @@ curl -X POST http://company-a.local:8080/v1/messages \
     }
   }'
 ```
+
+### 7. Domain Signatures (Signed Simulation)
+
+A second stack, `docker/docker-compose.signed-simulation.yml`, exercises
+DKIM-style domain signatures end-to-end: three gateways with per-domain
+signing keys, a dnsmasq instance publishing `_amtpkey` TXT records, and
+mixed verification policies (`flag` on company-a/partner, `reject` on
+company-b):
+
+```bash
+# Start the signed simulation and run all assertions
+./scripts/test-signed-simulation.sh start
+
+# Tear it down
+./scripts/test-signed-simulation.sh stop
+```
+
+The script generates fresh ECDSA P-256 keys per domain (into
+`/tmp/amtp-signed-keys`, never committed), writes the dnsmasq config,
+starts the stack, and asserts:
+
+1. A→B signed delivery is accepted and recorded as `verified` at B.
+2. A forged unsigned A-sender message is refused by B (`reject` policy → 403).
+3. The same forged message is accepted by Partner (`flag` policy → 200) and
+   recorded as `unsigned`.
+4. A tampered signed message (payload modified after signing) is refused by
+   B with 403.
+5. Removing the sender's key record from DNS makes B return 503
+   (`SIGNATURE_KEY_UNAVAILABLE`).
+
+Host ports: 8180 (company-a), 8181 (company-b), 8182 (partner).
 
 ## Troubleshooting
 
@@ -268,7 +317,10 @@ docker rmi $(docker images -q amtp-gateway)
 ## Files
 
 - `docker-compose.schema-test.yml` - Main Docker Compose configuration with schema support
+- `docker-compose.domain-simulation.yml` - Multi-domain simulation stack (used by `test-simulation-docker.sh`)
+- `docker-compose.signed-simulation.yml` - Domain-signature simulation stack (used by `test-signed-simulation.sh`)
 - `../scripts/test-simulation-docker.sh` - Comprehensive test script (domain + schema functionality)
+- `../scripts/test-signed-simulation.sh` - Domain-signature E2E test script
 - `../scripts/setup-hosts.sh` - Host file management script
 - `README-domain-simulation.md` - This documentation
 

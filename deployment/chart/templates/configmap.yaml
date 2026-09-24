@@ -65,6 +65,12 @@ data:
     metrics:
       enabled: true
     {{- end }}
+    signature:
+      key_id: {{ .Values.signature.keyID | quote }}
+      verify_policy: {{ .Values.signature.verifyPolicy | quote }}
+      {{- if include "agentry.signingKeyEnabled" . }}
+      private_key_file: "/etc/agentry/signing/private.pem"
+      {{- end }}
     {{- if .Values.schema.registryType }}
     schema:
       registry_type: {{ .Values.schema.registryType | quote }}

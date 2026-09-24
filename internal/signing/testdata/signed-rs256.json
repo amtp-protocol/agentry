@@ -1,0 +1,23 @@
+{
+  "idempotency_key": "01234567-89ab-4cde-8123-456789abcdef",
+  "message_id": "01987654-3210-7654-8765-432198765432",
+  "payload": {
+    "currency": "USD",
+    "order_id": "ORD-42",
+    "total": 125.5
+  },
+  "recipients": [
+    "payments@receiver.example"
+  ],
+  "schema": "agntcy:commerce.order.v1",
+  "sender": "orders@sender.example",
+  "signature": {
+    "algorithm": "RS256",
+    "keyid": "k1",
+    "value": "LWssqXzUimLLY_Hxki9wH6r2opCKB7vHogc4en9WPweLXQ3i3QZE47XXug-Kn1OFRSVIdVIJ-y3BlafCur01ZXMkCuyGBq0ukZ5GHPgpVAzf5Y59iVof8BLtfsP5lym66AX4sx1WJyKHEGnAINESlvzeNcwKRrb3YncWTksCXaghVFoc7yZYVruxvAbIeTyoDfYJlbgBbQLfKFAh9ODvwumCzM4q7FOUxZm3ZBJJwPHENjYr5GNSPN2rVTnhFU_C5v85MEOdy86ixAeOWgwJdgsZFrw82NV3EAIOtfqUz4yaXtypNqkczCJKDT_syiC8YejfeMJAsCkB8uOLSmUA0g"
+  },
+  "subject": "Invoice 42",
+  "timestamp": "2026-08-14T10:30:00Z",
+  "version": "1.0",
+  "workflow_id": ""
+}

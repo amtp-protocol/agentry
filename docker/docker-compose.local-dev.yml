@@ -7,6 +7,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: amtp-gateway-localhost
     environment:
       - AMTP_DOMAIN=localhost
@@ -28,6 +30,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: amtp-gateway-test
     environment:
       - AMTP_DOMAIN=test.local
@@ -49,6 +53,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: amtp-gateway-dev
     environment:
       - AMTP_DOMAIN=dev.local

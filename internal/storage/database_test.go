@@ -5,20 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/amtp-protocol/agentry/internal/agents"
-	"github.com/amtp-protocol/agentry/internal/types"
+	"unicode"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"gorm.io/datatypes"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+
+	"github.com/amtp-protocol/agentry/internal/agents"
+	"github.com/amtp-protocol/agentry/internal/types"
 )
 
 func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
@@ -1995,4 +1999,322 @@ func TestUpdateAgent_NilAgent(t *testing.T) {
 	if err == nil || err.Error() != "agent cannot be nil" {
 		t.Fatalf("expected agent cannot be nil error, got: %v", err)
 	}
+}
+
+// postgresOpen builds the GORM postgres dialector for the given DSN.
+func postgresOpen(dsn string) gorm.Dialector {
+	return postgres.Open(dsn)
+}
+
+// TestMessageStatusColumnsMatchDDL pins the GORM MessageStatus model to the
+// handwritten DDL in deployment/db/01-message.sql. The repository has two
+// descriptions of the message_statuses table — the SQL init script and the
+// GORM model used for reads/writes — and nothing at build time checks they
+// agree. This test parses the DDL for the message_statuses CREATE TABLE
+// column list and compares it against the columns GORM derives from the
+// model, so adding a column to one but not the other fails here instead of
+// in production.
+//
+// It runs without a database: GORM's DryRun mode compiles the model's INSERT
+// statement and reports its column list without executing anything.
+func TestMessageStatusColumnsMatchDDL(t *testing.T) {
+	ddl, err := loadMessageStatusDDL()
+	if err != nil {
+		t.Fatalf("load DDL: %v", err)
+	}
+
+	ddlColumns := extractDDLColumns(t, ddl)
+
+	// Derive the model's columns via a DryRun session over a sqlmock
+	// connection (driver choice is irrelevant — we only need GORM's
+	// schema parsing, never an actual database).
+	mockDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock: %v", err)
+	}
+	defer mockDB.Close()
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: mockDB}), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("open gorm: %v", err)
+	}
+	stmt := db.Statement
+	if err := stmt.Parse(&MessageStatus{}); err != nil {
+		t.Fatalf("parse model: %v", err)
+	}
+
+	modelColumns := map[string]bool{}
+	for dbName := range stmt.Schema.FieldsByDBName {
+		modelColumns[dbName] = true
+	}
+	// GORM adds a primary key column named "id" via the primarykey tag,
+	// which the DDL also declares; both sides include it.
+
+	// Every DDL column must exist in the model, and every model column
+	// (except GORM bookkeeping) must exist in the DDL.
+	for _, col := range ddlColumns {
+		if !modelColumns[col] {
+			t.Errorf("DDL declares column %q but the GORM MessageStatus model does not map it; update database_models.go", col)
+		}
+	}
+	for col := range modelColumns {
+		if !contains(ddlColumns, col) {
+			t.Errorf("GORM MessageStatus model maps column %q but the DDL does not declare it; update deployment/db/01-message.sql", col)
+		}
+	}
+}
+
+// loadMessageStatusDDL reads deployment/db/01-message.sql and returns the
+// CREATE TABLE ... message_statuses block.
+func loadMessageStatusDDL() (string, error) {
+	// The test lives in internal/storage; the SQL is at the repo root.
+	path := filepath.Join("..", "..", "deployment", "db", "01-message.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return string(raw), nil
+}
+
+// ddlCommentStripper removes `--` line comments before statement splitting:
+// comments can contain semicolons that would otherwise split statements
+// mid-definition.
+var lineCommentRe = regexp.MustCompile(`(?m)^\s*--.*$`)
+
+// extractDDLColumns pulls the column names out of the message_statuses
+// CREATE TABLE statement in the DDL text.
+func extractDDLColumns(t *testing.T, ddl string) []string {
+	t.Helper()
+
+	noComments := lineCommentRe.ReplaceAllString(ddl, "")
+	re := regexp.MustCompile(`(?is)CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+message_statuses\s*\((.*?)\)\s*;`)
+	match := re.FindStringSubmatch(noComments)
+	if match == nil {
+		t.Fatal("message_statuses CREATE TABLE statement not found in DDL")
+	}
+	body := match[1]
+
+	// Split top-level commas (no nested parens in this table's column defs
+	// except types like numeric(10,2) — handle by tracking depth).
+	var columns []string
+	depth := 0
+	current := strings.Builder{}
+	for _, r := range body {
+		switch r {
+		case '(':
+			depth++
+			current.WriteRune(r)
+		case ')':
+			depth--
+			current.WriteRune(r)
+		case ',':
+			if depth == 0 {
+				columns = append(columns, current.String())
+				current.Reset()
+			} else {
+				current.WriteRune(r)
+			}
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if strings.TrimSpace(current.String()) != "" {
+		columns = append(columns, current.String())
+	}
+
+	var names []string
+	for _, col := range columns {
+		def := strings.TrimSpace(col)
+		if def == "" {
+			continue
+		}
+		// Table-level constraints start with these keywords; skip them.
+		upper := strings.ToUpper(def)
+		if strings.HasPrefix(upper, "PRIMARY KEY") ||
+			strings.HasPrefix(upper, "FOREIGN KEY") ||
+			strings.HasPrefix(upper, "CONSTRAINT") ||
+			strings.HasPrefix(upper, "UNIQUE") ||
+			strings.HasPrefix(upper, "CHECK") {
+			continue
+		}
+		fields := strings.Fields(def)
+		names = append(names, strings.ToLower(fields[0]))
+	}
+	if len(names) == 0 {
+		t.Fatal("no columns parsed from message_statuses DDL")
+	}
+	return names
+}
+
+func contains(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
+// TestStoreMessageWithStatusPersistsVerification is a real-database test
+// gated on AMTP_TEST_POSTGRES_DSN. It verifies the atomic write persists
+// sender_verification JSONB and that GetStatus round-trips it. Skipped when
+// the DSN is not provided (unit CI has no Postgres).
+func TestStoreMessageWithStatusPersistsVerification(t *testing.T) {
+	dsn := os.Getenv("AMTP_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("AMTP_TEST_POSTGRES_DSN not set; skipping real-Postgres verification test")
+	}
+
+	db, err := gorm.Open(postgresOpen(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	// Use a dedicated schema so the test never touches shared state.
+	ctx := context.Background()
+	schemaName := fmt.Sprintf("sv_test_%d", time.Now().UnixNano())
+	if err := db.Exec(fmt.Sprintf("CREATE SCHEMA %s", schemaName)).Error; err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	defer db.Exec(fmt.Sprintf("DROP SCHEMA %s CASCADE", schemaName))
+
+	// Apply the repo's own DDL inside the fresh schema.
+	ddl, err := loadMessageStatusDDL()
+	if err != nil {
+		t.Fatalf("load DDL: %v", err)
+	}
+	noComments := lineCommentRe.ReplaceAllString(ddl, "")
+	// The DDL references the delivery_status enum and messages table; the
+	// full init chain (01..04) is applied by scripts/test-db.sh. For this
+	// focused test, apply the whole 01-message.sql inside the schema after
+	// setting the search_path.
+	if err := db.Exec(fmt.Sprintf("SET search_path TO %s", schemaName)).Error; err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	for _, stmt := range splitSQLStatements(noComments) {
+		if strings.TrimSpace(stmt) == "" {
+			continue
+		}
+		if err := db.Exec(stmt).Error; err != nil {
+			t.Fatalf("apply DDL statement %q: %v", firstWords(stmt, 8), err)
+		}
+	}
+
+	ds := &DatabaseStorage{db: db}
+
+	msg := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01936b1e-5000-7000-8000-000000000001",
+		IdempotencyKey: "01936b1e-5000-4000-8000-000000000002",
+		Sender:         "s@remote.test",
+		Recipients:     []string{"r@local.test"},
+		Payload:        []byte(`{}`),
+	}
+	status := &types.MessageStatus{
+		MessageID: msg.MessageID,
+		Status:    types.StatusQueued,
+		Recipients: []types.RecipientStatus{
+			{Address: "r@local.test", Status: types.StatusQueued},
+		},
+		SenderVerification: &types.SenderVerification{
+			Result: "verified",
+			Domain: "remote.test",
+			Policy: "flag",
+		},
+	}
+
+	if err := ds.StoreMessageWithStatus(ctx, msg, status); err != nil {
+		t.Fatalf("StoreMessageWithStatus: %v", err)
+	}
+
+	got, err := ds.GetStatus(ctx, msg.MessageID)
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if got.SenderVerification == nil {
+		t.Fatal("sender_verification not persisted")
+	}
+	if got.SenderVerification.Result != "verified" {
+		t.Errorf("result = %s, want verified", got.SenderVerification.Result)
+	}
+	if got.SenderVerification.Domain != "remote.test" {
+		t.Errorf("domain = %s, want remote.test", got.SenderVerification.Domain)
+	}
+}
+
+// splitSQLStatements splits a SQL script on semicolons that are not inside
+// string literals or comments (line comments are already stripped).
+func splitSQLStatements(script string) []string {
+	var statements []string
+	current := strings.Builder{}
+	inString := false
+	dollarTag := "" // active $tag$ delimiter, "" when not inside dollar quotes
+	runes := []rune(script)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		// Dollar-quoted strings: $tag$ ... $tag$. The opening tag may be
+		// $$, $body$, etc. Semicolons inside must not split statements.
+		if dollarTag == "" && r == '$' {
+			if tag, ok := matchDollarTag(runes, i); ok {
+				dollarTag = tag
+				current.WriteString(tag)
+				i += len(tag) - 1
+				continue
+			}
+		} else if dollarTag != "" && r == '$' {
+			if tag, ok := matchDollarTag(runes, i); ok && tag == dollarTag {
+				dollarTag = ""
+				current.WriteString(tag)
+				i += len(tag) - 1
+				continue
+			}
+		}
+		switch {
+		case r == '\\' && inString && i+1 < len(runes):
+			// Escaped quote inside a string literal: keep both runes.
+			current.WriteRune(r)
+			i++
+			current.WriteRune(runes[i])
+		case r == '\'' && dollarTag == "":
+			inString = !inString
+			current.WriteRune(r)
+		case r == ';' && !inString && dollarTag == "":
+			statements = append(statements, current.String())
+			current.Reset()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if strings.TrimSpace(current.String()) != "" {
+		statements = append(statements, current.String())
+	}
+	return statements
+}
+
+// matchDollarTag checks whether runes[at:] starts with a $...$ delimiter and
+// returns the full tag (e.g. "$$" or "$body$") when it does.
+func matchDollarTag(runes []rune, at int) (string, bool) {
+	if at >= len(runes) || runes[at] != '$' {
+		return "", false
+	}
+	end := at + 1
+	for end < len(runes) && (unicode.IsLetter(runes[end]) || unicode.IsDigit(runes[end]) || runes[end] == '_') {
+		end++
+	}
+	if end < len(runes) && runes[end] == '$' {
+		return string(runes[at : end+1]), true
+	}
+	return "", false
+}
+
+func firstWords(s string, n int) string {
+	fields := strings.Fields(s)
+	if len(fields) <= n {
+		return s
+	}
+	return strings.Join(fields[:n], " ")
 }

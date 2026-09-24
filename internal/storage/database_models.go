@@ -75,6 +75,10 @@ type MessageStatus struct {
 	CreatedAt   time.Time      `gorm:"type:timestamptz;not null;default:now()" json:"created_at"`
 	UpdatedAt   time.Time      `gorm:"type:timestamptz;not null;default:now()" json:"updated_at"`
 	DeliveredAt *time.Time     `gorm:"type:timestamptz" json:"delivered_at,omitempty"`
+	// SenderVerification records how the sender was authenticated (domain
+	// signature result, policy in effect). Nullable JSONB; absent for
+	// messages ingested before verification existed.
+	SenderVerification datatypes.JSON `gorm:"type:jsonb" json:"sender_verification,omitempty"`
 }
 
 // RecipientStatus recipient status model

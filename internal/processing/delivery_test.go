@@ -18,15 +18,24 @@ package processing
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/discovery"
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/signing"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
@@ -687,4 +696,298 @@ func BenchmarkDeliverBatch(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// newTestSigner generates a fresh ES256 signer for local-domain tests.
+func newTestSigner(t *testing.T, keyID string) *signing.Signer {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	signer, err := signing.LoadSigner(pemBytes, signing.AlgES256, keyID)
+	if err != nil {
+		t.Fatalf("load signer: %v", err)
+	}
+	return signer
+}
+
+// signerKeyRecord formats the signer's public key as a DNS TXT record.
+func signerKeyRecord(t *testing.T, s *signing.Signer) string {
+	t.Helper()
+	rec, err := s.PublicKeyRecord()
+	if err != nil {
+		t.Fatalf("public key record: %v", err)
+	}
+	txt, err := signing.FormatKeyRecord(rec)
+	if err != nil {
+		t.Fatalf("format key record: %v", err)
+	}
+	return txt
+}
+
+// captureServer records the raw body of every request it receives.
+type captureServer struct {
+	server   *httptest.Server
+	mu       sync.Mutex
+	bodies   [][]byte
+	failOnce int // number of initial requests to fail with 500
+	handled  int
+}
+
+func newCaptureServer(failOnce int) *captureServer {
+	cs := &captureServer{failOnce: failOnce}
+	cs.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		cs.mu.Lock()
+		cs.bodies = append(cs.bodies, body)
+		n := cs.handled
+		cs.handled++
+		cs.mu.Unlock()
+		if n < cs.failOnce {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"try again"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"accepted"}`))
+	}))
+	return cs
+}
+
+func (cs *captureServer) close() { cs.server.Close() }
+
+func (cs *captureServer) bodyCount() int {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return len(cs.bodies)
+}
+
+func (cs *captureServer) body(i int) []byte {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.bodies[i]
+}
+
+// setupSignedDelivery wires a delivery engine against a capture server for a
+// remote recipient domain, with the given signer (nil = unsigned).
+func setupSignedDelivery(t *testing.T, signer *signing.Signer, failOnce int) (*DeliveryEngine, *captureServer) {
+	t.Helper()
+	cs := newCaptureServer(failOnce)
+	t.Cleanup(cs.close)
+
+	mockDiscovery := NewMockDiscovery()
+	mockDiscovery.SetCapabilities("remote.example", &discovery.AMTPCapabilities{
+		Version: "1.0", Gateway: cs.server.URL, MaxSize: 10485760,
+		Features: []string{"immediate-path"}, DiscoveredAt: time.Now(), TTL: 5 * time.Minute,
+	})
+
+	config := createTestDeliveryConfig()
+	config.AllowHTTP = true
+	config.RetryDelay = 10 * time.Millisecond
+	config.LocalDomain = "local.example"
+	engine := NewDeliveryEngine(mockDiscovery, NewMockAgentRegistry(), config)
+	engine.SetSigner(signer)
+	return engine, cs
+}
+
+// TestDeliverMessage_SignedWireBytes verifies that a local-domain sender's
+// delivery carries a verifiable signature over the exact wire bytes.
+func TestDeliverMessage_SignedWireBytes(t *testing.T) {
+	signer := newTestSigner(t, "k1")
+	engine, cs := setupSignedDelivery(t, signer, 0)
+
+	message := createTestMessage()
+	message.Sender = "agent@local.example"
+	message.WorkflowID = "01937a58-0000-7000-8000-000000000001"
+
+	result, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example")
+	if err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+	if result.Status != types.StatusDelivered {
+		t.Fatalf("status = %s, want delivered", result.Status)
+	}
+
+	raw := cs.body(0)
+
+	// The wire body must include workflow_id (previously omitted).
+	var top map[string]interface{}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("unmarshal delivered body: %v", err)
+	}
+	if top["workflow_id"] != message.WorkflowID {
+		t.Errorf("workflow_id = %v, want %s", top["workflow_id"], message.WorkflowID)
+	}
+	if top["version"] != "1.0" {
+		t.Errorf("version = %v, want 1.0", top["version"])
+	}
+	recips, ok := top["recipients"].([]interface{})
+	if !ok || len(recips) != 1 || recips[0] != "recipient@remote.example" {
+		t.Errorf("recipients = %v, want single remote recipient", top["recipients"])
+	}
+
+	// The signature must verify against the signer's public key record.
+	resolver := &fixedKeyResolver{txts: []string{signerKeyRecord(t, signer)}}
+	verifier := signing.NewVerifier(resolver)
+	verification, err := verifier.VerifyBody(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("VerifyBody: %v", err)
+	}
+	if verification.Result != signing.ResultVerified {
+		t.Errorf("verification result = %s, want verified", verification.Result)
+	}
+}
+
+// fixedKeyResolver returns the same TXT strings for any owner.
+type fixedKeyResolver struct {
+	txts []string
+}
+
+func (r *fixedKeyResolver) ResolveKeyTXT(_ context.Context, _, _ string) ([]string, error) {
+	return r.txts, nil
+}
+
+// TestDeliverMessage_UnsignedWithoutSigner verifies deliveries stay unsigned
+// when no signer is configured.
+func TestDeliverMessage_UnsignedWithoutSigner(t *testing.T) {
+	engine, cs := setupSignedDelivery(t, nil, 0)
+
+	message := createTestMessage()
+	message.Sender = "agent@local.example"
+
+	result, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example")
+	if err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+	if result.Status != types.StatusDelivered {
+		t.Fatalf("status = %s, want delivered", result.Status)
+	}
+
+	var top map[string]interface{}
+	if err := json.Unmarshal(cs.body(0), &top); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, exists := top["signature"]; exists {
+		t.Error("delivery carried a signature although no signer is configured")
+	}
+}
+
+// TestDeliverMessage_RetriesReuseBytes verifies every retry sends the exact
+// same bytes (same signature, no re-signing drift).
+func TestDeliverMessage_RetriesReuseBytes(t *testing.T) {
+	signer := newTestSigner(t, "k1")
+	engine, cs := setupSignedDelivery(t, signer, 2) // first two attempts fail
+
+	message := createTestMessage()
+	message.Sender = "agent@local.example"
+
+	result, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example")
+	if err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+	if result.Status != types.StatusDelivered {
+		t.Fatalf("status = %s, want delivered", result.Status)
+	}
+	if result.Attempts != 3 {
+		t.Errorf("attempts = %d, want 3", result.Attempts)
+	}
+	if cs.bodyCount() != 3 {
+		t.Fatalf("server saw %d requests, want 3", cs.bodyCount())
+	}
+	for i := 1; i < 3; i++ {
+		if string(cs.body(i)) != string(cs.body(0)) {
+			t.Errorf("retry %d sent different bytes than attempt 0", i)
+		}
+	}
+}
+
+// TestDeliverMessage_RefusesRelayResigning verifies a message that already
+// carries a remote-origin signature is refused rather than re-signed.
+func TestDeliverMessage_RefusesRelayResigning(t *testing.T) {
+	signer := newTestSigner(t, "k1")
+	engine, _ := setupSignedDelivery(t, signer, 0)
+
+	message := createTestMessage()
+	message.Sender = "agent@other.example" // not our domain
+	message.Signature = &types.MessageSignature{
+		Algorithm: "ES256",
+		KeyID:     "k9",
+		Value:     "bm90LXZhbGlk",
+	}
+
+	result, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example")
+	if err == nil {
+		t.Fatal("expected relay refusal error")
+	}
+	if result == nil || result.Status != types.StatusFailed {
+		t.Fatalf("result = %+v, want failed status", result)
+	}
+	if result.ErrorCode != "RELAY_UNSUPPORTED" {
+		t.Errorf("error code = %s, want RELAY_UNSUPPORTED", result.ErrorCode)
+	}
+}
+
+// TestDeliverMessage_DoesNotSignRemoteSender verifies the gateway does not
+// sign for a sender domain it does not own, even with a signer configured.
+func TestDeliverMessage_DoesNotSignRemoteSender(t *testing.T) {
+	signer := newTestSigner(t, "k1")
+	engine, cs := setupSignedDelivery(t, signer, 0)
+
+	message := createTestMessage()
+	message.Sender = "agent@other.example" // remote sender, no signature
+
+	result, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example")
+	if err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+	if result.Status != types.StatusDelivered {
+		t.Fatalf("status = %s, want delivered", result.Status)
+	}
+
+	var top map[string]interface{}
+	if err := json.Unmarshal(cs.body(0), &top); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, exists := top["signature"]; exists {
+		t.Error("gateway signed a message for a sender domain it does not own")
+	}
+}
+
+// TestDeliverMessage_WireParityWithVector guards against field drift: the
+// delivered body must round-trip through the signing package's wire builder
+// byte-for-byte.
+func TestDeliverMessage_WireParityWithVector(t *testing.T) {
+	engine, cs := setupSignedDelivery(t, nil, 0)
+
+	message := createTestMessage()
+	message.Sender = "agent@local.example"
+	message.InReplyTo = "01234567-89ab-7def-8123-456789abcdee"
+	message.ResponseType = "final"
+
+	if _, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example"); err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+
+	want, err := signing.MarshalWireBody(mustBuildWire(t, message, "recipient@remote.example"))
+	if err != nil {
+		t.Fatalf("marshal wire body: %v", err)
+	}
+	if string(cs.body(0)) != string(want) {
+		t.Errorf("delivered bytes differ from wire builder output:\n got: %s\nwant: %s", cs.body(0), want)
+	}
+}
+
+func mustBuildWire(t *testing.T, message *types.Message, recipient string) map[string]interface{} {
+	t.Helper()
+	body, err := signing.BuildWireBody(message, recipient)
+	if err != nil {
+		t.Fatalf("BuildWireBody: %v", err)
+	}
+	return body
 }
