@@ -107,6 +107,11 @@ spec:
               mountPath: /etc/agentry/admin
               readOnly: true
             {{- end }}
+            {{- if include "agentry.signingKeyEnabled" . }}
+            - name: signing-key
+              mountPath: /etc/agentry/signing
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -126,6 +131,14 @@ spec:
             items:
               - key: {{ .Values.auth.adminKeySecretKey }}
                 path: admin.key
+        {{- end }}
+        {{- if include "agentry.signingKeyEnabled" . }}
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.signature.privateKeyExistingSecret }}
+            items:
+              - key: {{ .Values.signature.privateKeySecretKey }}
+                path: private.pem
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}

@@ -76,16 +76,47 @@ type MessageSignature struct {
 	Value     string `json:"value" validate:"required"`
 }
 
+// SenderVerification is the structured outcome of authenticating the sender
+// of an inbound message, recorded on the message status (protocol Section
+// 9.3.4). Result is one of: verified, unsigned, invalid, key_unavailable,
+// trusted_internal. Domain is the normalized sender domain for remote
+// senders, or the local domain for trusted internal dispatch. Policy is the
+// verification policy in effect when the message was accepted. Reason
+// carries a short diagnostic for non-verified results.
+type SenderVerification struct {
+	Result string `json:"result"`
+	Domain string `json:"domain,omitempty"`
+	Policy string `json:"policy,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Sender verification results recorded on SenderVerification.Result.
+const (
+	// VerificationVerified: remote domain signature verified.
+	VerificationVerified = "verified"
+	// VerificationUnsigned: no signature present on a remote message.
+	VerificationUnsigned = "unsigned"
+	// VerificationInvalid: signature present but verification failed.
+	VerificationInvalid = "invalid"
+	// VerificationKeyUnavailable: signing key could not be retrieved.
+	VerificationKeyUnavailable = "key_unavailable"
+	// VerificationTrustedInternal: message originated inside this gateway
+	// (local sender authenticated by API key, or internal workflow
+	// dispatch) and needs no domain signature.
+	VerificationTrustedInternal = "trusted_internal"
+)
+
 // MessageStatus represents the delivery status of a message
 type MessageStatus struct {
-	MessageID   string            `json:"message_id"`
-	Status      DeliveryStatus    `json:"status"`
-	Recipients  []RecipientStatus `json:"recipients"`
-	Attempts    int               `json:"attempts"`
-	NextRetry   *time.Time        `json:"next_retry,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-	DeliveredAt *time.Time        `json:"delivered_at,omitempty"`
+	MessageID          string              `json:"message_id"`
+	Status             DeliveryStatus      `json:"status"`
+	Recipients         []RecipientStatus   `json:"recipients"`
+	Attempts           int                 `json:"attempts"`
+	NextRetry          *time.Time          `json:"next_retry,omitempty"`
+	CreatedAt          time.Time           `json:"created_at"`
+	UpdatedAt          time.Time           `json:"updated_at"`
+	DeliveredAt        *time.Time          `json:"delivered_at,omitempty"`
+	SenderVerification *SenderVerification `json:"sender_verification,omitempty"`
 }
 
 // RecipientStatus represents the delivery status for a specific recipient
@@ -126,9 +157,11 @@ func (s DeliveryStatus) Valid() bool {
 
 // SendMessageRequest represents the API request to send a message
 type SendMessageRequest struct {
+	Version        string                 `json:"version,omitempty"`
 	MessageID      string                 `json:"message_id,omitempty" validate:"omitempty,uuidv7"`
 	IdempotencyKey string                 `json:"idempotency_key,omitempty" validate:"omitempty,max=255"`
 	Timestamp      string                 `json:"timestamp,omitempty" validate:"omitempty,datetime"`
+	Signature      *MessageSignature      `json:"signature,omitempty"`
 	Sender         string                 `json:"sender" validate:"required,email"`
 	Recipients     []string               `json:"recipients" validate:"required,min=1,dive,email"`
 	Subject        string                 `json:"subject,omitempty"`

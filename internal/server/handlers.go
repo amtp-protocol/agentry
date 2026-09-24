@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/middleware"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/signing"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/pkg/uuid"
@@ -104,13 +106,71 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	}
 	var req types.SendMessageRequest
 
-	// Parse request body
-	if err := c.ShouldBindJSON(&req); err != nil {
+	// Read the raw body once. Signature verification needs the exact bytes
+	// the sender signed, and the strict decoder below rejects the ambiguous
+	// JSON forms (duplicate members, trailing data) that encoding/json
+	// silently tolerates.
+	maxBody := s.config.Message.MaxSize
+	if maxBody <= 0 {
+		maxBody = 10 * 1024 * 1024
+	}
+	limited := io.LimitReader(c.Request.Body, maxBody+1)
+	rawBody, err := io.ReadAll(limited)
+	if err != nil {
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+			"Failed to read request body", map[string]interface{}{
+				"parse_error": err.Error(),
+			})
+		return
+	}
+	if int64(len(rawBody)) > maxBody {
+		s.respondWithError(c, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE",
+			"Request body exceeds the maximum allowed size", map[string]interface{}{
+				"max_size": maxBody,
+			})
+		return
+	}
+
+	// Strict decode: exactly one JSON object, no duplicate members, no
+	// trailing data. This is the same constraint the signature profile
+	// (RFC 8785 canonicalization) depends on, so it applies to every
+	// request, signed or not.
+	if _, err := signing.DecodeBody(rawBody); err != nil {
 		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
 			"Invalid request format", map[string]interface{}{
 				"parse_error": err.Error(),
 			})
 		return
+	}
+
+	// Bind the raw bytes into the request struct.
+	if err := json.Unmarshal(rawBody, &req); err != nil {
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+			"Invalid request format", map[string]interface{}{
+				"parse_error": err.Error(),
+			})
+		return
+	}
+
+	// Protocol version: absent means 1.0 (the only version this gateway
+	// speaks); anything else is refused before any further processing.
+	if req.Version != "" && req.Version != "1.0" {
+		s.respondWithError(c, http.StatusBadRequest, "UNSUPPORTED_VERSION",
+			"Unsupported protocol version", map[string]interface{}{
+				"version": req.Version,
+			})
+		return
+	}
+
+	// Timestamp, when present, must be a parseable RFC 3339 instant.
+	if req.Timestamp != "" {
+		if _, err := time.Parse(time.RFC3339, req.Timestamp); err != nil {
+			s.respondWithError(c, http.StatusBadRequest, "INVALID_TIMESTAMP",
+				"Timestamp must be an RFC 3339 date-time", map[string]interface{}{
+					"timestamp": req.Timestamp,
+				})
+			return
+		}
 	}
 
 	// Validate request
@@ -175,6 +235,16 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		return
 	}
 
+	// Authenticate the sender BEFORE any state changes (workflow
+	// interception, storage, delivery). Local senders must present a valid
+	// agent API key; remote senders are authenticated by their domain
+	// signature according to the configured verification policy. The
+	// outcome is recorded on the message status (protocol Section 9.3.4).
+	verification, ok := s.authenticateSender(c, message, rawBody)
+	if !ok {
+		return
+	}
+
 	// Intercept workflow responses.
 	//
 	// If this gateway created the workflow (shared-DB deployment) or is the sole
@@ -230,9 +300,10 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 
 	// Process message using the message processor
 	processingOptions := processing.ProcessingOptions{
-		ImmediatePath: message.Coordination == nil || !isSenderLocal,
-		Timeout:       30 * time.Second,
-		MaxRetries:    3,
+		ImmediatePath:      message.Coordination == nil || !isSenderLocal,
+		Timeout:            30 * time.Second,
+		MaxRetries:         3,
+		SenderVerification: verification,
 	}
 
 	result, err := s.processor.ProcessMessage(c.Request.Context(), message, processingOptions)
@@ -1298,6 +1369,175 @@ func (s *Server) verifyAgentAccess(c *gin.Context, agentAddress string) bool {
 // local agent. POST /v1/messages is intentionally public — AMTP is a
 // federated protocol where remote senders have no local key — so without the
 // fallback such messages would be permanently unreadable.
+// authenticateSender authenticates the sender of an inbound message and
+// returns the verification record to persist on the message status.
+//
+// Local senders (same domain as this gateway) must present a Bearer agent
+// API key; the authenticated address must equal the message sender. Remote
+// senders are verified by their domain signature according to
+// config.Signature.VerifyPolicy:
+//
+//	accept — take the message as-is, recording the verification outcome;
+//	flag   — like accept, plus a warning log when verification fails;
+//	reject — refuse unsigned/invalid messages (403) and messages whose
+//	         signing key cannot be resolved (503).
+//
+// The second return value reports whether the request may proceed; when
+// false the handler has already written the error response.
+func (s *Server) authenticateSender(c *gin.Context, message *types.Message, rawBody []byte) (*types.SenderVerification, bool) {
+	senderDomain := ""
+	if parts := strings.SplitN(message.Sender, "@", 2); len(parts) == 2 {
+		senderDomain = parts[1]
+	}
+	isLocal := strings.EqualFold(senderDomain, s.config.Server.Domain)
+
+	if isLocal {
+		return s.authenticateLocalSender(c, message)
+	}
+	return s.verifyRemoteSender(c, message, rawBody, senderDomain)
+}
+
+// authenticateLocalSender enforces Bearer API-key auth for local senders.
+func (s *Server) authenticateLocalSender(c *gin.Context, message *types.Message) (*types.SenderVerification, bool) {
+	authHeader := c.GetHeader("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") || strings.TrimPrefix(authHeader, "Bearer ") == "" {
+		s.recordSenderVerification("auth_required", "reject")
+		s.respondWithError(c, http.StatusUnauthorized, "LOCAL_SENDER_AUTH_REQUIRED",
+			"Local senders must authenticate with a Bearer agent API key", map[string]interface{}{
+				"sender": message.Sender,
+			})
+		return nil, false
+	}
+	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
+
+	address, ok := s.agentRegistry.AuthenticateAgent(c.Request.Context(), apiKey)
+	if !ok || address != message.Sender {
+		s.recordSenderVerification("credential_mismatch", "reject")
+		s.respondWithError(c, http.StatusForbidden, "SENDER_CREDENTIAL_MISMATCH",
+			"API key does not match the message sender", map[string]interface{}{
+				"sender": message.Sender,
+			})
+		return nil, false
+	}
+	s.agentRegistry.UpdateLastAccess(c.Request.Context(), address)
+
+	s.recordSenderVerification(types.VerificationTrustedInternal, "accept")
+	return &types.SenderVerification{
+		Result: types.VerificationTrustedInternal,
+		Domain: s.config.Server.Domain,
+		Policy: s.config.Signature.VerifyPolicy,
+	}, true
+}
+
+// recordSenderVerification increments the sender-verification counter.
+// result is the verification outcome and policy is the applied decision.
+func (s *Server) recordSenderVerification(result, policy string) {
+	if s.metrics != nil {
+		s.metrics.RecordSenderVerification(result, policy)
+	}
+}
+
+// verifyRemoteSender verifies a remote sender's domain signature against
+// the configured policy.
+func (s *Server) verifyRemoteSender(c *gin.Context, message *types.Message, rawBody []byte, senderDomain string) (*types.SenderVerification, bool) {
+	policy := s.config.Signature.VerifyPolicy
+
+	// Without a verifier (hand-assembled test servers only) remote
+	// verification is impossible; behave as "unsigned" under the policy.
+	if s.verifier == nil {
+		return s.decideUnsigned(c, message, senderDomain, policy, "verifier not configured")
+	}
+
+	verification, err := s.verifier.VerifyBody(c.Request.Context(), rawBody)
+	if err != nil && (verification == nil || verification.Result != signing.ResultKeyUnavailable) {
+		// Verification itself failed (malformed signature object, bad
+		// base64, ...). Treat as invalid under the policy. A key-resolution
+		// failure is NOT a signature defect, so it falls through to the
+		// switch below and maps to 503 under reject.
+		if policy == "flag" {
+			s.logger.Warnf("signature verification error from domain %s: %v", senderDomain, err)
+		}
+		return s.decideInvalid(c, message, senderDomain, policy)
+	}
+
+	switch verification.Result {
+	case signing.ResultVerified:
+		s.recordSenderVerification(types.VerificationVerified, "accept")
+		return &types.SenderVerification{
+			Result: types.VerificationVerified,
+			Domain: senderDomain,
+			Policy: policy,
+		}, true
+
+	case signing.ResultUnsigned:
+		return s.decideUnsigned(c, message, senderDomain, policy, "no signature member")
+
+	case signing.ResultKeyUnavailable:
+		if policy == "reject" {
+			s.recordSenderVerification(types.VerificationKeyUnavailable, "reject")
+			s.respondWithError(c, http.StatusServiceUnavailable, "SIGNING_KEY_UNAVAILABLE",
+				"Cannot resolve the sender's signing key", map[string]interface{}{
+					"sender_domain": senderDomain,
+				})
+			return nil, false
+		}
+		s.recordSenderVerification(types.VerificationKeyUnavailable, policy)
+		if policy == "flag" {
+			s.logger.Warnf("sender verification: key unavailable for domain %s", senderDomain)
+		}
+		return &types.SenderVerification{
+			Result: types.VerificationKeyUnavailable,
+			Domain: senderDomain,
+			Policy: policy,
+		}, true
+
+	default: // invalid and anything unexpected
+		return s.decideInvalid(c, message, senderDomain, policy)
+	}
+}
+
+// decideUnsigned applies the policy to a message without a signature.
+func (s *Server) decideUnsigned(c *gin.Context, message *types.Message, senderDomain, policy, reason string) (*types.SenderVerification, bool) {
+	s.recordSenderVerification(types.VerificationUnsigned, policy)
+	if policy == "reject" {
+		s.respondWithError(c, http.StatusForbidden, "SIGNATURE_REJECTED",
+			"Message has no domain signature", map[string]interface{}{
+				"sender_domain": senderDomain,
+			})
+		return nil, false
+	}
+	if policy == "flag" {
+		s.logger.Warnf("unsigned message from domain %s: %s", senderDomain, reason)
+	}
+	return &types.SenderVerification{
+		Result: types.VerificationUnsigned,
+		Domain: senderDomain,
+		Policy: policy,
+		Reason: reason,
+	}, true
+}
+
+// decideInvalid applies the policy to a message whose signature check
+// failed.
+func (s *Server) decideInvalid(c *gin.Context, message *types.Message, senderDomain, policy string) (*types.SenderVerification, bool) {
+	s.recordSenderVerification(types.VerificationInvalid, policy)
+	if policy == "reject" {
+		s.respondWithError(c, http.StatusForbidden, "SIGNATURE_REJECTED",
+			"Domain signature verification failed", map[string]interface{}{
+				"sender_domain": senderDomain,
+			})
+		return nil, false
+	}
+	if policy == "flag" {
+		s.logger.Warnf("invalid signature from domain %s", senderDomain)
+	}
+	return &types.SenderVerification{
+		Result: types.VerificationInvalid,
+		Domain: senderDomain,
+		Policy: policy,
+	}, true
+}
+
 func (s *Server) authenticateAgent(c *gin.Context) (agentAddr string, isAdmin bool, ok bool) {
 	authHeader := c.GetHeader("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {

@@ -61,3 +61,20 @@ schema:
   # local_registry:
   #   base_path: "./schemas"
 
+
+# Domain signature configuration
+# Generate a key pair with: agentry-admin keygen --domain <your-domain> --out private.pem
+# then publish the printed TXT record at <key_id>._amtpkey.<your-domain>.
+signature:
+  # Path to the PEM private key. Empty (default) disables outbound signing;
+  # the gateway then sends unsigned messages and verifies inbound signatures
+  # according to verify_policy.
+  private_key_file: ""
+  # Key selector (DNS label) used as the signature keyid.
+  key_id: "k1"
+  # Policy for remote messages without a valid signature:
+  #   accept - accept and record the verification result
+  #   flag   - accept, record, and log a warning (default)
+  #   reject - refuse unsigned/invalid messages (403) and retryable
+  #            key-unavailable failures (503)
+  verify_policy: "flag"

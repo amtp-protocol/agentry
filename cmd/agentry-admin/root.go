@@ -54,7 +54,7 @@ func buildRootCmd(c *Client) *cobra.Command {
 	pf.BoolVarP(&c.Verbose, "verbose", "v", false, "Verbose output")
 	pf.StringVar(&c.AdminKeyFile, "admin-key-file", "", "Admin API key file for administrative operations")
 
-	root.AddCommand(newSchemaCmd(c), newAgentCmd(c), newInboxCmd(c))
+	root.AddCommand(newSchemaCmd(c), newAgentCmd(c), newInboxCmd(c), newKeygenCmd(c))
 
 	return root
 }

@@ -54,6 +54,11 @@ type ProcessingOptions struct {
 	ImmediatePath bool
 	Timeout       time.Duration
 	MaxRetries    int
+	// SenderVerification records the outcome of authenticating the inbound
+	// sender (domain signature check or local Bearer auth). It is persisted
+	// on the message's initial status so downstream readers can see how the
+	// sender was authenticated. Nil means no verification was performed.
+	SenderVerification *types.SenderVerification
 }
 
 // NewMessageProcessor creates a new message processor
@@ -71,11 +76,6 @@ func (mp *MessageProcessor) ProcessMessage(ctx context.Context, message *types.M
 	// Check idempotency
 	if result := mp.checkIdempotency(message.IdempotencyKey); result != nil {
 		return result, nil
-	}
-
-	// Store message
-	if err := mp.storage.StoreMessage(ctx, message); err != nil {
-		return nil, fmt.Errorf("failed to store message: %w", err)
 	}
 
 	// Initialize processing result
@@ -97,17 +97,20 @@ func (mp *MessageProcessor) ProcessMessage(ctx context.Context, message *types.M
 		}
 	}
 
-	// Store initial status
+	// Store the message and its initial status (carrying the sender
+	// verification outcome) in one atomic write so a crash between the two
+	// stores can never leave a message without a status row.
 	initialStatus := &types.MessageStatus{
-		MessageID:  message.MessageID,
-		Status:     types.StatusQueued,
-		Recipients: result.Recipients,
-		Attempts:   0,
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
+		MessageID:          message.MessageID,
+		Status:             types.StatusQueued,
+		Recipients:         result.Recipients,
+		Attempts:           0,
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+		SenderVerification: options.SenderVerification,
 	}
-	if err := mp.storage.StoreStatus(ctx, message.MessageID, initialStatus); err != nil {
-		return nil, fmt.Errorf("failed to store initial status: %w", err)
+	if err := mp.storage.StoreMessageWithStatus(ctx, message, initialStatus); err != nil {
+		return nil, fmt.Errorf("failed to store message with status: %w", err)
 	}
 
 	// Store idempotency result
