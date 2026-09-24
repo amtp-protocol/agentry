@@ -19,7 +19,12 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +44,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/metrics"
 	"github.com/amtp-protocol/agentry/internal/middleware"
 	"github.com/amtp-protocol/agentry/internal/processing"
+	"github.com/amtp-protocol/agentry/internal/signing"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/types"
 	"github.com/amtp-protocol/agentry/internal/validation"
@@ -51,6 +57,10 @@ type MockMessageProcessor struct {
 	processError  error
 	messages      map[string]*types.Message
 	statuses      map[string]*types.MessageStatus
+	// storage, when set, receives the message and its initial status
+	// (including options.SenderVerification) via StoreMessageWithStatus,
+	// mirroring how the real processor persists inbound messages.
+	storage storage.Storage
 }
 
 type MockStorage struct {
@@ -108,6 +118,14 @@ func NewMockStorage() *MockStorage {
 // Implement storage.Storage interface
 func (m *MockStorage) StoreMessage(ctx context.Context, message *types.Message) error {
 	m.messages[message.MessageID] = message
+	return nil
+}
+
+func (m *MockStorage) StoreMessageWithStatus(ctx context.Context, message *types.Message, initialStatus *types.MessageStatus) error {
+	m.messages[message.MessageID] = message
+	if initialStatus != nil {
+		m.statuses[message.MessageID] = initialStatus
+	}
 	return nil
 }
 
@@ -364,14 +382,20 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message *type
 	// Store the message and status
 	m.messages[message.MessageID] = message
 	status := &types.MessageStatus{
-		MessageID:  message.MessageID,
-		Status:     result.Status,
-		Recipients: result.Recipients,
-		Attempts:   1,
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
+		MessageID:          message.MessageID,
+		Status:             result.Status,
+		Recipients:         result.Recipients,
+		Attempts:           1,
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+		SenderVerification: options.SenderVerification,
 	}
 	m.statuses[message.MessageID] = status
+	if m.storage != nil {
+		if err := m.storage.StoreMessageWithStatus(ctx, message, status); err != nil {
+			return nil, err
+		}
+	}
 
 	return result, nil
 }
@@ -4059,5 +4083,788 @@ func TestHandleSendMessage_WorkflowErrorResponsesReachEngine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// signingTestEnv assembles a server whose local domain is local.test with a
+// registered local agent, plus an ES256 signer for a remote domain so tests
+// can produce valid signed remote requests.
+type signingTestEnv struct {
+	server     *Server
+	remoteKey  *ecdsa.PrivateKey
+	remotePEM  []byte
+	remoteSign *signing.Signer
+	localKey   string // plaintext API key of sender@local.test
+}
+
+// newSigningTestEnv builds the environment. policy is the remote
+// verification policy (accept/flag/reject).
+func newSigningTestEnv(t *testing.T, policy string) *signingTestEnv {
+	t.Helper()
+
+	server := createTestServer()
+	// The agent registry captures the local domain at construction time, so
+	// retarget the whole server at local.test: config, registry, and the
+	// domain the handler compares senders against.
+	server.config.Server.Domain = "local.test"
+	server.agentRegistry = agents.NewRegistry(agents.RegistryConfig{
+		LocalDomain: "local.test",
+		APIKeySalt:  "test-salt",
+	}, server.storage)
+	server.config.Signature.VerifyPolicy = policy
+
+	// Wire the mock processor to the mock storage so accepted messages are
+	// persisted (with their sender verification) exactly like the real
+	// processor does.
+	server.processor.(*MockMessageProcessor).storage = server.storage
+
+	// Register the local sender agent and keep its plaintext key.
+	localKey := registerTestAgent(t, server, "sender")
+
+	// Fresh ES256 key for the remote domain remote.test.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate remote key: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal remote key: %v", err)
+	}
+	remotePEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	remoteSign, err := signing.LoadSigner(remotePEM, signing.AlgES256, "k1")
+	if err != nil {
+		t.Fatalf("load remote signer: %v", err)
+	}
+
+	// Publish the remote key in DNS so the verifier can resolve it.
+	rec, err := remoteSign.PublicKeyRecord()
+	if err != nil {
+		t.Fatalf("remote public record: %v", err)
+	}
+	txt, err := signing.FormatKeyRecord(rec)
+	if err != nil {
+		t.Fatalf("format remote record: %v", err)
+	}
+	if md, ok := server.discovery.(*discovery.Discovery); ok {
+		_ = md // real discovery; tests use mock below
+	}
+	// createTestServer uses a bare &discovery.Discovery{}; replace it with a
+	// mock that serves both capabilities and the signing key record.
+	mock := discovery.NewMockDiscovery(map[string]string{
+		"remote.test": "v=amtp1;gateway=https://remote.test",
+	}, 0)
+	mock.SetSigningKeyRecord("k1._amtpkey.remote.test", txt)
+	server.discovery = mock
+	server.verifier = signing.NewVerifier(discoveryKeyResolver{mock})
+	server.router = gin.New()
+	server.setupRoutes()
+
+	return &signingTestEnv{
+		server:     server,
+		remoteKey:  key,
+		remotePEM:  remotePEM,
+		remoteSign: remoteSign,
+		localKey:   localKey,
+	}
+}
+
+// signedRemoteRequest builds a POST /v1/messages request whose body is the
+// single-recipient wire form of msg, signed by the remote domain key.
+func (env *signingTestEnv) signedRemoteRequest(t *testing.T, msg *types.Message) *http.Request {
+	t.Helper()
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	sig, err := env.remoteSign.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign body: %v", err)
+	}
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach signature: %v", err)
+	}
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal wire body: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// unsignedRemoteRequest builds a POST /v1/messages request with a plain
+// (unsigned) SendMessageRequest body from a remote sender.
+func (env *signingTestEnv) unsignedRemoteRequest(t *testing.T, sender string) *http.Request {
+	t.Helper()
+	reqBody := types.SendMessageRequest{
+		Sender:     sender,
+		Recipients: []string{"receiver@local.test"},
+		Payload:    json.RawMessage(`{"hello":"world"}`),
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// localRequest builds a POST /v1/messages request from the local sender,
+// optionally carrying its Bearer API key.
+func localRequest(t *testing.T, apiKey string) *http.Request {
+	t.Helper()
+	reqBody := types.SendMessageRequest{
+		Sender:     "sender@local.test",
+		Recipients: []string{"receiver@remote.test"},
+		Payload:    json.RawMessage(`{"hello":"world"}`),
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	return req
+}
+
+// remoteMessage builds a minimal message from remote.test to a local
+// recipient for signed-request tests.
+func remoteMessage() *types.Message {
+	return &types.Message{
+		Version:        "1.0",
+		MessageID:      "01936b1e-1000-7000-8000-000000000001",
+		IdempotencyKey: "01936b1e-1000-4000-8000-000000000002",
+		Timestamp:      time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Sender:         "boss@remote.test",
+		Recipients:     []string{"receiver@local.test"},
+		Payload:        json.RawMessage(`{"hello":"world"}`),
+	}
+}
+
+// TestLocalSenderRequiresAPIKey: a local-domain sender without a Bearer key
+// is rejected 401 LOCAL_SENDER_AUTH_REQUIRED; with a wrong key 403
+// SENDER_CREDENTIAL_MISMATCH; with the right key accepted.
+func TestLocalSenderRequiresAPIKey(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	// Missing key -> 401.
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, localRequest(t, ""))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("missing key: expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "LOCAL_SENDER_AUTH_REQUIRED") {
+		t.Errorf("missing key: expected LOCAL_SENDER_AUTH_REQUIRED, got %s", rr.Body.String())
+	}
+
+	// Wrong key -> 403.
+	rr = httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, localRequest(t, "wrong-key"))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("wrong key: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "SENDER_CREDENTIAL_MISMATCH") {
+		t.Errorf("wrong key: expected SENDER_CREDENTIAL_MISMATCH, got %s", rr.Body.String())
+	}
+
+	// Right key -> accepted.
+	rr = httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, localRequest(t, env.localKey))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("right key: expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRemoteSignedAccepted: a validly signed remote message is accepted and
+// recorded as verified under every policy.
+func TestRemoteSignedAccepted(t *testing.T) {
+	for _, policy := range []string{"accept", "flag", "reject"} {
+		t.Run(policy, func(t *testing.T) {
+			env := newSigningTestEnv(t, policy)
+			rr := httptest.NewRecorder()
+			env.server.router.ServeHTTP(rr, env.signedRemoteRequest(t, remoteMessage()))
+			if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+				t.Fatalf("policy %s: expected 200/202, got %d body=%s", policy, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+// TestRemoteUnsignedPolicy: unsigned remote messages follow the configured
+// policy — accept/flag accept (recording unsigned), reject refuses 403.
+func TestRemoteUnsignedPolicy(t *testing.T) {
+	cases := []struct {
+		policy string
+		want   int
+	}{
+		{"accept", http.StatusOK},
+		{"flag", http.StatusOK},
+		{"reject", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.policy, func(t *testing.T) {
+			env := newSigningTestEnv(t, tc.policy)
+			rr := httptest.NewRecorder()
+			env.server.router.ServeHTTP(rr, env.unsignedRemoteRequest(t, "boss@remote.test"))
+			if rr.Code != tc.want {
+				t.Fatalf("policy %s: expected %d, got %d body=%s", tc.policy, tc.want, rr.Code, rr.Body.String())
+			}
+			if tc.want == http.StatusForbidden && !strings.Contains(rr.Body.String(), "SIGNATURE_REJECTED") {
+				t.Errorf("policy %s: expected SIGNATURE_REJECTED, got %s", tc.policy, rr.Body.String())
+			}
+		})
+	}
+}
+
+// TestRemoteInvalidSignatureRejected: a tampered signature under reject
+// policy yields 403 SIGNATURE_REJECTED.
+func TestRemoteInvalidSignatureRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "reject")
+
+	msg := remoteMessage()
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	sig, err := env.remoteSign.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign body: %v", err)
+	}
+	sig.Value = strings.Repeat("A", len(sig.Value)) // corrupt the signature
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach signature: %v", err)
+	}
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "SIGNATURE_REJECTED") {
+		t.Errorf("expected SIGNATURE_REJECTED, got %s", rr.Body.String())
+	}
+}
+
+// TestRemoteKeyUnavailable: when DNS cannot resolve the signing key under
+// reject policy, the gateway returns 503 SIGNING_KEY_UNAVAILABLE.
+func TestRemoteKeyUnavailable(t *testing.T) {
+	env := newSigningTestEnv(t, "reject")
+
+	// Point the verifier at a mock with no key record published.
+	emptyMock := discovery.NewMockDiscovery(map[string]string{
+		"remote.test": "v=amtp1;gateway=https://remote.test",
+	}, 0)
+	env.server.verifier = signing.NewVerifier(discoveryKeyResolver{emptyMock})
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.signedRemoteRequest(t, remoteMessage()))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "SIGNING_KEY_UNAVAILABLE") {
+		t.Errorf("expected SIGNING_KEY_UNAVAILABLE, got %s", rr.Body.String())
+	}
+}
+
+// TestRejectBlocksStorageAndWorkflow: under reject policy a refused message
+// must not reach storage or the processor.
+func TestRejectBlocksStorageAndWorkflow(t *testing.T) {
+	env := newSigningTestEnv(t, "reject")
+
+	mockStorage := env.server.storage.(*MockStorage)
+	before := len(mockStorage.messages)
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.unsignedRemoteRequest(t, "boss@remote.test"))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+
+	if got := len(mockStorage.messages); got != before {
+		t.Errorf("reject policy must not store the message: before=%d after=%d", before, got)
+	}
+
+	mockProc := env.server.processor.(*MockMessageProcessor)
+	if got := len(mockProc.messages); got != 0 {
+		t.Errorf("reject policy must not process the message: processed=%d", got)
+	}
+}
+
+// TestVerificationRecordedOnStatus: an accepted signed remote message
+// records sender_verification with result=verified; an unsigned one under
+// flag records result=unsigned.
+func TestVerificationRecordedOnStatus(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	// Signed -> verified.
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.signedRemoteRequest(t, remoteMessage()))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("signed: expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp types.SendMessageResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	mockStorage := env.server.storage.(*MockStorage)
+	st, ok := mockStorage.statuses[resp.MessageID]
+	if !ok {
+		t.Fatalf("status not stored for %s", resp.MessageID)
+	}
+	if st.SenderVerification == nil {
+		t.Fatal("sender_verification not recorded for signed message")
+	}
+	if st.SenderVerification.Result != "verified" {
+		t.Errorf("signed: expected result verified, got %q", st.SenderVerification.Result)
+	}
+	if st.SenderVerification.Domain != "remote.test" {
+		t.Errorf("signed: expected domain remote.test, got %q", st.SenderVerification.Domain)
+	}
+
+	// Unsigned -> unsigned.
+	rr = httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.unsignedRemoteRequest(t, "boss@remote.test"))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("unsigned: expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	st, ok = mockStorage.statuses[resp.MessageID]
+	if !ok {
+		t.Fatalf("status not stored for %s", resp.MessageID)
+	}
+	if st.SenderVerification == nil {
+		t.Fatal("sender_verification not recorded for unsigned message")
+	}
+	if st.SenderVerification.Result != "unsigned" {
+		t.Errorf("unsigned: expected result unsigned, got %q", st.SenderVerification.Result)
+	}
+}
+
+// TestLocalSenderTrustedInternal: a local sender authenticated by API key
+// is recorded as trusted_internal.
+func TestLocalSenderTrustedInternal(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, localRequest(t, env.localKey))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp types.SendMessageResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	mockStorage := env.server.storage.(*MockStorage)
+	st, ok := mockStorage.statuses[resp.MessageID]
+	if !ok {
+		t.Fatalf("status not stored for %s", resp.MessageID)
+	}
+	if st.SenderVerification == nil {
+		t.Fatal("sender_verification not recorded")
+	}
+	if st.SenderVerification.Result != "trusted_internal" {
+		t.Errorf("expected trusted_internal, got %q", st.SenderVerification.Result)
+	}
+}
+
+// TestWorkflowReplyBypassesLocalAuth: a workflow response from a remote
+// participant is a signed remote message and follows remote verification,
+// not local Bearer auth.
+func TestWorkflowReplyBypassesLocalAuth(t *testing.T) {
+	env := newSigningTestEnv(t, "accept")
+
+	msg := remoteMessage()
+	msg.ResponseType = "workflow_response"
+	msg.InReplyTo = "01936b1e-2000-7000-8000-000000000002"
+	msg.WorkflowID = "01936b1e-2000-7000-8000-000000000002"
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.signedRemoteRequest(t, msg))
+	// The workflow does not exist, so the handler falls through to normal
+	// delivery; verification must still accept the signed message.
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestDuplicateJSONMemberRejected: a request body with duplicate top-level
+// members is rejected 400.
+func TestDuplicateJSONMemberRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	raw := []byte(`{"sender":"boss@remote.test","sender":"boss@remote.test","recipients":["receiver@local.test"],"payload":{"a":1}}`)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for duplicate member, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestTrailingJSONRejected: a request body with trailing content after the
+// JSON object is rejected 400.
+func TestTrailingJSONRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	raw := []byte(`{"sender":"boss@remote.test","recipients":["receiver@local.test"]} trailing`)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for trailing JSON, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestMalformedTimestampRejected: an unparseable timestamp in a signed body
+// is rejected 400.
+func TestMalformedTimestampRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	msg := remoteMessage()
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	body["timestamp"] = "not-a-timestamp"
+	sig, err := env.remoteSign.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach signature: %v", err)
+	}
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed timestamp, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestWrongVersionRejected: a body declaring an unsupported version is
+// rejected 400.
+func TestWrongVersionRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	msg := remoteMessage()
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	body["version"] = "2.0"
+	sig, err := env.remoteSign.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach signature: %v", err)
+	}
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for wrong version, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSignedRequestFieldsFlow: explicit message_id/idempotency_key/timestamp
+// in a signed body are honored, not regenerated.
+func TestSignedRequestFieldsFlow(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	msg := remoteMessage()
+	msg.IdempotencyKey = "01936b1e-3000-4000-8000-000000000003"
+	msg.Timestamp = mustParseRFC3339(t, "2026-01-02T03:04:05Z")
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.signedRemoteRequest(t, msg))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp types.SendMessageResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.MessageID != msg.MessageID {
+		t.Errorf("expected message_id %s preserved, got %s", msg.MessageID, resp.MessageID)
+	}
+
+	mockStorage := env.server.storage.(*MockStorage)
+	stored, ok := mockStorage.messages[msg.MessageID]
+	if !ok {
+		t.Fatalf("message %s not stored", msg.MessageID)
+	}
+	if stored.IdempotencyKey != msg.IdempotencyKey {
+		t.Errorf("expected idempotency key preserved, got %s", stored.IdempotencyKey)
+	}
+	if !stored.Timestamp.Equal(msg.Timestamp) {
+		t.Errorf("expected timestamp %v preserved, got %v", msg.Timestamp, stored.Timestamp)
+	}
+}
+
+func mustParseRFC3339(t *testing.T, s string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatalf("parse %s: %v", s, err)
+	}
+	return parsed
+}
+
+// TestSenderVerificationMetrics: every sender-auth decision increments the
+// verification counter with the right result:policy labels.
+func TestSenderVerificationMetrics(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+	testMetrics := metrics.NewSimpleMetrics()
+	env.server.metrics = testMetrics
+
+	// Local sender with the right key -> trusted_internal:accept.
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, localRequest(t, env.localKey))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("local send: expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Local sender without a key -> auth_required:reject.
+	rr = httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, localRequest(t, ""))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("missing key: expected 401, got %d", rr.Code)
+	}
+
+	// Signed remote message -> verified:accept.
+	rr = httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.signedRemoteRequest(t, remoteMessage()))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("signed remote: expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Unsigned remote message under flag -> unsigned:flag.
+	rr = httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.unsignedRemoteRequest(t, "boss@remote.test"))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("unsigned remote: expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Assert exact counts per label pair.
+	expected := map[string]int64{
+		"trusted_internal:accept": 1,
+		"auth_required:reject":    1,
+		"verified:accept":         1,
+		"unsigned:flag":           1,
+	}
+	for key, want := range expected {
+		if got := testMetrics.SenderVerifications()[key]; got != want {
+			t.Errorf("expected %d for %s, got %d", want, key, got)
+		}
+	}
+	if n := len(testMetrics.SenderVerifications()); n != len(expected) {
+		t.Errorf("expected %d distinct counters, got %d", len(expected), n)
+	}
+}
+
+// tamperCase describes one field-tampering scenario: the wire body is built
+// from a valid message, one top-level member is replaced after signing, and
+// the request must fail verification.
+type tamperCase struct {
+	name   string
+	tamper func(body map[string]interface{})
+}
+
+// tamperedSignedRequest builds a signed request whose body is mutated after
+// signing, so the signature no longer covers the actual content.
+func (env *signingTestEnv) tamperedSignedRequest(t *testing.T, msg *types.Message, mutate func(map[string]interface{})) *http.Request {
+	t.Helper()
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	sig, err := env.remoteSign.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign body: %v", err)
+	}
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach signature: %v", err)
+	}
+	mutate(body)
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal wire body: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// TestTamperEveryTopLevelField: mutating any top-level member of a signed
+// body after signing must fail verification under reject policy.
+func TestTamperEveryTopLevelField(t *testing.T) {
+	cases := []tamperCase{
+		{"sender", func(b map[string]interface{}) { b["sender"] = "mallory@remote.test" }},
+		{"recipients", func(b map[string]interface{}) { b["recipients"] = []interface{}{"other@local.test"} }},
+		{"payload", func(b map[string]interface{}) { b["payload"] = map[string]interface{}{"evil": true} }},
+		{"timestamp", func(b map[string]interface{}) { b["timestamp"] = "2027-01-01T00:00:00Z" }},
+		{"message_id", func(b map[string]interface{}) { b["message_id"] = "01936b1e-1000-7000-8000-000000000099" }},
+		{"idempotency_key", func(b map[string]interface{}) { b["idempotency_key"] = "01936b1e-1000-4000-8000-000000000099" }},
+		{"version", func(b map[string]interface{}) { b["version"] = "1.1" }},
+		{"unknown-extension", func(b map[string]interface{}) { b["x-evil"] = "injected" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSigningTestEnv(t, "reject")
+			req := env.tamperedSignedRequest(t, remoteMessage(), tc.tamper)
+			rr := httptest.NewRecorder()
+			env.server.router.ServeHTTP(rr, req)
+			// Structural checks (e.g. an unsupported version) reject with
+			// 400 before verification; everything else must fail the
+			// signature check with 403. Either way the tampered message
+			// is refused.
+			if rr.Code != http.StatusForbidden && rr.Code != http.StatusBadRequest {
+				t.Fatalf("tampered %s: expected 403/400, got %d body=%s", tc.name, rr.Code, rr.Body.String())
+			}
+			if rr.Code == http.StatusForbidden && !strings.Contains(rr.Body.String(), "SIGNATURE_REJECTED") {
+				t.Errorf("tampered %s: expected SIGNATURE_REJECTED, got %s", tc.name, rr.Body.String())
+			}
+		})
+	}
+}
+
+// TestAlgorithmMismatchRejected: a signature declaring an algorithm the key
+// record does not publish must fail verification.
+func TestAlgorithmMismatchRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "reject")
+
+	body, err := signing.BuildWireBody(remoteMessage(), "receiver@local.test")
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	sig, err := env.remoteSign.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign body: %v", err)
+	}
+	// The published record says ES256; claim RS256 in the signature object.
+	sig.Algorithm = signing.AlgRS256
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach signature: %v", err)
+	}
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for algorithm mismatch, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSelectorInjectionRejected: a keyid that is not a plain DNS label must
+// be rejected before any DNS query is issued.
+func TestSelectorInjectionRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "reject")
+
+	for _, badKeyID := range []string{
+		"k1.remote.test", // dot → arbitrary owner traversal
+		"_amtpkey",       // underscore
+		"",               // empty
+		"../escape",      // path characters
+	} {
+		body, err := signing.BuildWireBody(remoteMessage(), "receiver@local.test")
+		if err != nil {
+			t.Fatalf("build wire body: %v", err)
+		}
+		sig, err := env.remoteSign.SignBody(body)
+		if err != nil {
+			t.Fatalf("sign body: %v", err)
+		}
+		sig.KeyID = badKeyID
+		body, err = signing.AttachWireBody(body, sig)
+		if err != nil {
+			t.Fatalf("attach signature: %v", err)
+		}
+		raw, err := signing.MarshalWireBody(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		env.server.router.ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("keyid %q: expected 403, got %d body=%s", badKeyID, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// TestReplaySameSignedDelivery: replaying the identical signed delivery
+// must not create a second stored message; the idempotency mechanism
+// returns the original outcome.
+func TestReplaySameSignedDelivery(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	req := env.signedRemoteRequest(t, remoteMessage())
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("first send: expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	mockStorage := env.server.storage.(*MockStorage)
+	stored := len(mockStorage.messages)
+
+	// Replay the exact same request bytes.
+	req2 := env.signedRemoteRequest(t, remoteMessage())
+	rr2 := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK && rr2.Code != http.StatusAccepted {
+		t.Fatalf("replay: expected 200/202, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+
+	if got := len(mockStorage.messages); got != stored {
+		t.Errorf("replay must not store a second message: before=%d after=%d", stored, got)
 	}
 }

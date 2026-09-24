@@ -5,6 +5,16 @@
 
 set -euo pipefail
 
+# Docker Compose compatibility: prefer the legacy docker-compose binary when
+# installed; otherwise fall back to the docker compose plugin (v2).
+if command -v docker-compose &> /dev/null; then
+    :
+elif docker compose version &> /dev/null; then
+    docker-compose() {
+        docker compose "$@"
+    }
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

@@ -577,3 +577,55 @@ func BenchmarkSimpleMetrics_ConcurrentAccess(b *testing.B) {
 		}
 	})
 }
+
+func TestSimpleMetrics_RecordSenderVerification(t *testing.T) {
+	metrics := NewSimpleMetrics()
+
+	metrics.RecordSenderVerification("verified", "accept")
+	metrics.RecordSenderVerification("verified", "accept")
+	metrics.RecordSenderVerification("unsigned", "flag")
+	metrics.RecordSenderVerification("invalid", "reject")
+	metrics.RecordSenderVerification("key_unavailable", "reject")
+
+	// Verify counts per result:policy key.
+	expected := map[string]int64{
+		"verified:accept":        2,
+		"unsigned:flag":          1,
+		"invalid:reject":         1,
+		"key_unavailable:reject": 1,
+	}
+	for key, want := range expected {
+		if got := metrics.senderVerifications[key]; got != want {
+			t.Errorf("Expected %d verifications for %s, got %d", want, key, got)
+		}
+	}
+
+	// Total distinct keys must match: no duplicate aggregation.
+	if len(metrics.senderVerifications) != len(expected) {
+		t.Errorf("Expected %d distinct verification keys, got %d", len(expected), len(metrics.senderVerifications))
+	}
+}
+
+func TestSimpleMetrics_RecordSenderVerification_ToJSON(t *testing.T) {
+	metrics := NewSimpleMetrics()
+
+	metrics.RecordSenderVerification("verified", "accept")
+
+	data, err := metrics.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON failed: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("Failed to parse JSON: %v", err)
+	}
+
+	msgs, ok := parsed["messages"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected messages section in JSON output")
+	}
+	if _, ok := msgs["sender_verifications"]; !ok {
+		t.Errorf("Expected sender_verifications in messages section")
+	}
+}

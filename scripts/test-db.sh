@@ -12,6 +12,13 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # Source common utilities
 source "$SCRIPT_DIR/utils.sh"
 
+# Admin key for the /v1/admin endpoints. The db-test compose mounts this
+# file into the gateway; regenerate it freely.
+mkdir -p /tmp/amtp-keys
+if [ ! -s /tmp/amtp-keys/admin.key ]; then
+    openssl rand -hex 32 > /tmp/amtp-keys/admin.key
+fi
+
 # Function to test message lifecycle
 test_message_lifecycle() {
     log_step "Testing message lifecycle with database storage enabled..."
@@ -21,7 +28,8 @@ test_message_lifecycle() {
     # Cleanup: Try to delete the agent first in case it exists from a previous run
     # This ensures the test is idempotent and works even if the database persists
     log_info "Cleaning up any existing agent..."
-    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X DELETE -s "http://$domain/v1/admin/agents/user" > /dev/null 2>&1 || true
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X DELETE -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/agents/user" > /dev/null 2>&1 || true
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X DELETE -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/agents/test" > /dev/null 2>&1 || true
 
     # Generate a unique subject to trace this specific test run
     local unique_subject="Local Test Message $(date +%s)"
@@ -29,11 +37,12 @@ test_message_lifecycle() {
     # Register a agent to receive messages
     local register_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST -s "http://$domain/v1/admin/agents" \
             -H "Content-Type: application/json" \
+            -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" \
             -d '{
                 "address": "user",
                 "delivery_mode": "pull"
             }')
-    
+
     local api_key=$(echo "$register_response" | jq -r '.agent.api_key // empty')
     if [ -z "$api_key" ]; then
         log_error "❌ Failed to register agent. Response: $register_response"
@@ -41,9 +50,27 @@ test_message_lifecycle() {
     fi
     log_success "✓ Agent registered successfully"
 
+    # Register the local test sender (local senders must authenticate with
+    # their agent API key)
+    local sender_register_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST -s "http://$domain/v1/admin/agents" \
+            -H "Content-Type: application/json" \
+            -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" \
+            -d '{
+                "address": "test",
+                "delivery_mode": "pull"
+            }')
+
+    local sender_api_key=$(echo "$sender_register_response" | jq -r '.agent.api_key // empty')
+    if [ -z "$sender_api_key" ]; then
+        log_error "❌ Failed to register sender agent. Response: $sender_register_response"
+        return 1
+    fi
+    log_success "✓ Sender agent registered successfully"
+
     # Send a message to the agent
     local message_id=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST "http://$domain/v1/messages" \
             -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $sender_api_key" \
             -d '{
                     "sender": "test@localhost",
                     "recipients": ["user@localhost"],
@@ -103,10 +130,17 @@ test_schema_lifecycle() {
     schema_id="agntcy:test-domain.user.v1"
     encoded_schema_id="agntcy:test-domain.user.v1"
 
+    # Cleanup: Try to delete the schema first in case it exists from a previous
+    # run. This ensures the test is idempotent and works even if the database
+    # persists.
+    log_info "Cleaning up any existing schema..."
+    docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X DELETE -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/schemas/$encoded_schema_id" > /dev/null 2>&1 || true
+
     # Register a schema
     log_info "1. Registering schema..."
     local register_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST -s "http://$domain/v1/admin/schemas" \
             -H "Content-Type: application/json" \
+            -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" \
             -d '{
                 "id": "'"$schema_id"'",
                 "definition": {
@@ -127,7 +161,7 @@ test_schema_lifecycle() {
 
     # Retrieve the schema
     log_info "2. Retrieving schema..."
-    local get_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s "http://$domain/v1/admin/schemas/$encoded_schema_id")
+    local get_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/schemas/$encoded_schema_id")
 
     if ! echo "$get_response" | grep -q "$schema_id"; then
         log_error "❌ Failed to retrieve schema or schema ID mismatch. Response: $get_response"
@@ -137,7 +171,7 @@ test_schema_lifecycle() {
 
     # List schemas
     log_info "3. Listing schemas..."
-    local list_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s "http://$domain/v1/admin/schemas?domain=test-domain")
+    local list_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/schemas?domain=test-domain")
     # Verify the response contains the expected domain and entity fields that make up the schema ID
     if ! echo "$list_response" | grep -q "\"domain\":\"test-domain\"" || ! echo "$list_response" | grep -q "\"entity\":\"user\""; then
         log_error "❌ Failed to list schemas or find registered schema. Response: $list_response"
@@ -147,7 +181,7 @@ test_schema_lifecycle() {
 
     # Check schema stats via admin endpoint
     log_info "4. Checking schema stats..."
-    local stats_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s "http://$domain/v1/admin/schemas/stats")
+    local stats_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/schemas/stats")
     local total_schemas=$(echo "$stats_response" | jq -r '.stats.total_schemas // 0')
     if [ "$total_schemas" -lt 1 ]; then
         log_error "❌ Schema stats show zero schemas. Response: $stats_response"
@@ -157,7 +191,7 @@ test_schema_lifecycle() {
 
     # Delete the schema
     log_info "5. Deleting schema..."
-    local delete_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X DELETE -s "http://$domain/v1/admin/schemas/$encoded_schema_id")
+    local delete_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X DELETE -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/schemas/$encoded_schema_id")
 
     if echo "$delete_response" | grep -q "error"; then
         log_error "❌ Failed to delete schema. Response: $delete_response"
@@ -167,7 +201,7 @@ test_schema_lifecycle() {
 
     # Verify deletion
     log_info "6. Verifying deletion..."
-    local verify_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -o /dev/null -w "%{http_code}" "http://$domain/v1/admin/schemas/$encoded_schema_id")
+    local verify_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -o /dev/null -w "%{http_code}" -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/schemas/$encoded_schema_id")
 
     if [ "$verify_response" != "404" ]; then
         log_error "❌ Schema still exists after deletion (HTTP $verify_response)"
@@ -182,14 +216,46 @@ test_workflow_lifecycle() {
 
     domain="agentry:8080"
 
+    # Register the workflow participants (local senders must authenticate
+    # with their agent API keys)
+    local wf_agents=("workflow-test" "agent1" "agent2")
+    local wf_keys=""
+    for agent in "${wf_agents[@]}"; do
+        # Cleanup any leftover registration from a previous run
+        docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X DELETE -s -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" "http://$domain/v1/admin/agents/$agent" > /dev/null 2>&1 || true
+        local reg=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -X POST -s "http://$domain/v1/admin/agents" \
+                -H "Content-Type: application/json" \
+                -H "X-Admin-Key: $(cat /tmp/amtp-keys/admin.key)" \
+                -d '{
+                    "address": "'"$agent"'",
+                    "delivery_mode": "pull"
+                }')
+        local key=$(echo "$reg" | jq -r '.agent.api_key // empty')
+        if [ -z "$key" ]; then
+            log_error "Failed to register workflow agent $agent. Response: $reg"
+            exit 1
+        fi
+        wf_keys="$wf_keys$agent:$key\n"
+    done
+    local workflow_test_key=$(printf "$wf_keys" | grep '^workflow-test:' | cut -d: -f2-)
+    local agent1_key=$(printf "$wf_keys" | grep '^agent1:' | cut -d: -f2-)
+    local agent2_key=$(printf "$wf_keys" | grep '^agent2:' | cut -d: -f2-)
+    log_info "Workflow agents registered."
+
+    # Generate a unique subject to trace this specific test run (the
+    # idempotency key is derived from the message content, so identical
+    # content across runs would be rejected as a duplicate)
+    local unique_subject="Parallel Test $(date +%s)"
+
     # Send a message that initiates a workflow
     log_info "Creating workflow (parallel coordination)..."
     local response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -X POST "http://$domain/v1/messages" \
             -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $workflow_test_key" \
             -d '{
                 "sender": "workflow-test@localhost",
                 "recipients": ["agent1@localhost", "agent2@localhost"],
-                "subject": "Parallel Test",
+                "subject": "'"$unique_subject"'",
                 "coordination": {
                     "type": "parallel",
                     "timeout": 30
@@ -209,6 +275,7 @@ test_workflow_lifecycle() {
     log_info "Simulating agent 1 response..."
     local reply1_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -X POST "http://$domain/v1/messages" \
             -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $agent1_key" \
             -d '{
                 "sender": "agent1@localhost",
                 "recipients": ["workflow-test@localhost"],
@@ -229,6 +296,7 @@ test_workflow_lifecycle() {
     log_info "Simulating agent 2 response..."
     local reply2_response=$(docker-compose -f "$PROJECT_ROOT/docker/docker-compose.db-test.yml" exec -T test-client curl -s -X POST "http://$domain/v1/messages" \
             -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $agent2_key" \
             -d '{
                 "sender": "agent2@localhost",
                 "recipients": ["workflow-test@localhost"],
