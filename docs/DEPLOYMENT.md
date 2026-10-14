@@ -405,7 +405,7 @@ export AMTP_SIGNATURE_VERIFY_POLICY="flag"              # accept | flag | reject
 |--------|----------|---------|------------------|
 | `accept` | accepted, recorded `unsigned` | accepted, recorded `invalid` | accepted, recorded `key_unavailable` |
 | `flag` (default) | accepted + warning log | accepted + warning log | accepted + warning log |
-| `reject` | `403 SIGNATURE_REQUIRED` | `403 SIGNATURE_INVALID` | `503 SIGNATURE_KEY_UNAVAILABLE` |
+| `reject` | `403 SIGNATURE_REJECTED` | `403 SIGNATURE_REJECTED` | `503 SIGNING_KEY_UNAVAILABLE` |
 
 Local-domain senders are unaffected by this policy — they always
 authenticate with a Bearer agent API key (see [API.md](API.md)).

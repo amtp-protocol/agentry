@@ -31,7 +31,11 @@ Remote-sender policies (`AMTP_SIGNATURE_VERIFY_POLICY`):
 |--------|----------|-------------------|------------------|
 | `accept` | accepted, recorded `unsigned` | accepted, recorded `invalid` | accepted, recorded `key_unavailable` |
 | `flag` (default) | accepted + warning log | accepted + warning log | accepted + warning log |
-| `reject` | `403 SIGNATURE_REQUIRED` | `403 SIGNATURE_INVALID` | `503 SIGNATURE_KEY_UNAVAILABLE` |
+| `reject` | `403 SIGNATURE_REJECTED` | `403 SIGNATURE_REJECTED` | `503 SIGNING_KEY_UNAVAILABLE` |
+
+The unsigned and invalid cases share the code `403 SIGNATURE_REJECTED`; apart
+from the details, `error.message` distinguishes them ("Message has no domain
+signature" vs "Domain signature verification failed").
 
 ## Core Messaging
 
@@ -74,7 +78,11 @@ Remote senders additionally attach a domain signature:
 1. Build the canonical body: the full request object **without** the
    `signature` member, canonicalized per RFC 8785 (JCS): members sorted by
    name, no insignificant whitespace, UTF-8. The request body must be a
-   single JSON object with no duplicate members.
+   single JSON object with no duplicate members. No two members of any object
+   may differ only in case — such a body is refused
+   `400 INVALID_REQUEST_FORMAT`, because implementations bind members to
+   fields case-insensitively while a verifier reads exact names, which would
+   let one member be verified and another stored.
 2. Hash the canonical bytes with SHA-256.
 3. Sign the digest with the domain's private key — `ES256` (P-256, P1363
    `r||s` signature) or `RS256` (RSA ≥ 2048 bits, PKCS#1 v1.5).
@@ -89,6 +97,27 @@ v=amtpkey1;alg=ES256;p=<base64url-encoded-public-key>
 ```
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for key generation and DNS rollout.
+
+#### Send response
+
+The response echoes how the sender was authenticated, so a caller does not
+have to poll the status endpoint to tell "accepted" from "authenticated":
+
+```json
+{
+  "message_id": "01936b1e-1000-7000-8000-000000000001",
+  "status": "delivered",
+  "recipients": [...],
+  "sender_verification": {
+    "result": "verified",
+    "domain": "sender.com",
+    "policy": "reject"
+  }
+}
+```
+
+A successful `status` is **not** by itself proof that the sender was
+authenticated — see [Replay and Trust Guarantees](#replay-and-trust-guarantees).
 
 ### Query Message Status
 

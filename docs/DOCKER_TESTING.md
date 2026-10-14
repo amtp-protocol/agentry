@@ -265,7 +265,7 @@ starts the stack, and asserts:
 4. A tampered signed message (payload modified after signing) is refused by
    B with 403.
 5. Removing the sender's key record from DNS makes B return 503
-   (`SIGNATURE_KEY_UNAVAILABLE`).
+   (`SIGNING_KEY_UNAVAILABLE`).
 
 Host ports: 8180 (company-a), 8181 (company-b), 8182 (partner).
 

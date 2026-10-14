@@ -50,6 +50,10 @@ config.yml
 *.key
 *.pem
 *.crt
+# Test fixtures must be committed: the signing conformance vectors include
+# generated key pairs, and without them the signing tests fail on a clean
+# checkout while passing locally.
+!internal/signing/testdata/*.pem
 
 # Temporary files
 tmp/

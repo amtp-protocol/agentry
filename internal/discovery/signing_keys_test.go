@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -221,9 +223,34 @@ func TestSigningKeyCacheNormalization(t *testing.T) {
 	}
 }
 
-func TestSigningKeyCacheOversizedTXT(t *testing.T) {
+// TestSigningKeyCacheLongTXTKept: a record longer than one DNS
+// character-string (255 bytes) is normal — LookupTXT concatenates the
+// character-strings of a record — so the length filter must not drop it.
+// Which record is usable is decided by signing.SelectKeyRecord, not by
+// length here.
+func TestSigningKeyCacheLongTXTKept(t *testing.T) {
 	long := "v=amtpkey1;alg=ES256;p=" + strings.Repeat("A", 300)
-	res := &countingResolver{txts: []string{long, "v=amtpkey1;alg=ES256;p=AAA"}}
+	payload := "v=amtpkey1;alg=ES256;p=AAA"
+	res := &countingResolver{txts: []string{long, payload}}
+	cache := newCacheWith(res, time.Hour)
+
+	txts, err := cache.ResolveKeyTXT(context.Background(), "sender.example", "k1")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if len(txts) != 2 {
+		t.Fatalf("records longer than 255 bytes must not be filtered, got %d: %v", len(txts), txts)
+	}
+	if txts[1] != payload {
+		t.Errorf("record order/contents changed: %v", txts)
+	}
+}
+
+// TestSigningKeyCacheOversizedTXT: only a record beyond the whole-record
+// bound is dropped before parsing.
+func TestSigningKeyCacheOversizedTXT(t *testing.T) {
+	huge := "v=amtpkey1;alg=ES256;p=" + strings.Repeat("A", maxSigningKeyTXTBytes)
+	res := &countingResolver{txts: []string{huge, "v=amtpkey1;alg=ES256;p=AAA"}}
 	cache := newCacheWith(res, time.Hour)
 
 	txts, err := cache.ResolveKeyTXT(context.Background(), "sender.example", "k1")
@@ -232,6 +259,31 @@ func TestSigningKeyCacheOversizedTXT(t *testing.T) {
 	}
 	if len(txts) != 1 || txts[0] != "v=amtpkey1;alg=ES256;p=AAA" {
 		t.Errorf("oversized TXT not filtered: %v", txts)
+	}
+}
+
+// TestShippedKeyVectorsSurviveFilter is a regression test: the RSA TXT vector
+// shipped with the signing package is 416 bytes, longer than 255, so the old
+// per-character-string limit discarded it and every RS256-signed message
+// failed with key_unavailable (HTTP 503 under reject). Both shipped vectors
+// must survive the filter and parse.
+func TestShippedKeyVectorsSurviveFilter(t *testing.T) {
+	for _, name := range []string{"dns-es256.txt", "dns-rs256.txt"} {
+		raw, err := os.ReadFile(filepath.Join("..", "signing", "testdata", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		// The vectors are wrapped across lines; a resolver concatenates the
+		// character-strings of a record into one string.
+		record := strings.Join(strings.Fields(string(raw)), "")
+
+		got := filterSigningKeyTXT([]string{record})
+		if len(got) != 1 {
+			t.Fatalf("%s (%d bytes) was filtered out: got %d records", name, len(record), len(got))
+		}
+		if _, err := signing.SelectKeyRecord(got); err != nil {
+			t.Errorf("%s does not parse as a key record: %v", name, err)
+		}
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -4518,6 +4519,208 @@ func TestDuplicateJSONMemberRejected(t *testing.T) {
 	env.server.router.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for duplicate member, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestCaseVariantSenderRejected: a body carrying both "sender" and "Sender"
+// is refused 400 under every policy.
+//
+// The two members survive decoding as distinct JSON keys, while struct
+// binding matches field names case-insensitively and keeps the last one. A
+// signature over one sender would therefore be stored as the other — a
+// verified message attributed to a domain the sender does not control.
+func TestCaseVariantSenderRejected(t *testing.T) {
+	for _, policy := range []string{"reject", "flag", "accept"} {
+		t.Run(policy, func(t *testing.T) {
+			env := newSigningTestEnv(t, policy)
+
+			raw := []byte(`{"sender":"boss@remote.test","Sender":"mallory@remote.test",` +
+				`"recipients":["receiver@local.test"],"payload":{"a":1}}`)
+			req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+			req.Header.Set("Content-Type", "application/json")
+
+			rr := httptest.NewRecorder()
+			env.server.router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for case-variant members, got %d body=%s", rr.Code, rr.Body.String())
+			}
+
+			// An ambiguous body must not reach storage or the processor.
+			if got := len(env.server.storage.(*MockStorage).messages); got != 0 {
+				t.Errorf("case-variant body stored %d messages, want 0", got)
+			}
+			if got := len(env.server.processor.(*MockMessageProcessor).messages); got != 0 {
+				t.Errorf("case-variant body processed %d messages, want 0", got)
+			}
+		})
+	}
+}
+
+// TestSignedCaseVariantSenderRejected reproduces the reported attack: the
+// attacker signs a body whose "sender" is its OWN domain (so the signature
+// verifies against the attacker's published key) while an aliased "Sender"
+// member carries the victim's address.
+//
+// The verifier reads the exact "sender" key and resolves the attacker's key,
+// so verification succeeds; struct binding keeps the last member, so the
+// message is stored — and its recorded sender_verification names the victim's
+// domain as verified. Rejecting the ambiguity is what stops this.
+func TestSignedCaseVariantSenderRejected(t *testing.T) {
+	env := newSigningTestEnv(t, "reject")
+
+	// remote.test is the domain the environment holds a signing key for.
+	msg := remoteMessage()
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	// The alias is present before signing, so the signature covers both
+	// members and verification would otherwise succeed.
+	body["Sender"] = "boss@victim.test"
+
+	sig, err := env.remoteSign.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign body: %v", err)
+	}
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach signature: %v", err)
+	}
+	// Member order is the sender's choice, not the gateway's: putting the
+	// alias last is what makes a case-insensitive binder keep it. Marshaling
+	// the map would sort the keys and hide the effect.
+	raw := encodeJSONWithOrder(t, body, "sender", "Sender")
+
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for aliased sender, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := len(env.server.storage.(*MockStorage).messages); got != 0 {
+		t.Errorf("aliased signed body stored %d messages, want 0", got)
+	}
+}
+
+// encodeJSONWithOrder serializes body with the listed members first, in the
+// given order, followed by the remaining members in sorted order. The sender
+// chooses the member order of the bytes it signs, so a test that exercises an
+// order-dependent binding hazard has to control it explicitly.
+func encodeJSONWithOrder(t *testing.T, body map[string]interface{}, order ...string) []byte {
+	t.Helper()
+
+	parts := make([]string, 0, len(body))
+	placed := make(map[string]bool, len(body))
+	for _, key := range order {
+		val, ok := body[key]
+		if !ok {
+			t.Fatalf("encodeJSONWithOrder: member %q is not in the body", key)
+		}
+		parts = append(parts, encodeMember(t, key, val))
+		placed[key] = true
+	}
+	rest := make([]string, 0, len(body))
+	for key := range body {
+		if !placed[key] {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	for _, key := range rest {
+		parts = append(parts, encodeMember(t, key, body[key]))
+	}
+	return []byte("{" + strings.Join(parts, ",") + "}")
+}
+
+func encodeMember(t *testing.T, key string, val interface{}) string {
+	t.Helper()
+	name, err := json.Marshal(key)
+	if err != nil {
+		t.Fatalf("marshal member name %q: %v", key, err)
+	}
+	value, err := json.Marshal(val)
+	if err != nil {
+		t.Fatalf("marshal member %q: %v", key, err)
+	}
+	return string(name) + ":" + string(value)
+}
+
+// TestSignedRemoteMessageSignaturePersisted: the sender's signature is
+// carried onto the stored message. Losing it discards the origin evidence and
+// also lets a signed message be forwarded unsigned, because the delivery
+// engine's RELAY_UNSUPPORTED guard keys off message.Signature.
+func TestSignedRemoteMessageSignaturePersisted(t *testing.T) {
+	env := newSigningTestEnv(t, "flag")
+
+	rr := httptest.NewRecorder()
+	env.server.router.ServeHTTP(rr, env.signedRemoteRequest(t, remoteMessage()))
+	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp types.SendMessageResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	stored, ok := env.server.storage.(*MockStorage).messages[resp.MessageID]
+	if !ok {
+		t.Fatalf("message %s not stored", resp.MessageID)
+	}
+	if stored.Signature == nil {
+		t.Fatal("stored message lost its domain signature")
+	}
+	if stored.Signature.KeyID != "k1" {
+		t.Errorf("stored signature keyid = %q, want k1", stored.Signature.KeyID)
+	}
+	if stored.Signature.Value == "" {
+		t.Error("stored signature has no value")
+	}
+}
+
+// TestSendResponseReportsSenderVerification: the response echoes how the
+// sender was authenticated, so a caller can tell "accepted" from
+// "authenticated". Under the default flag policy an unsigned message is
+// accepted with a success status, which on its own implies nothing about the
+// sender.
+func TestSendResponseReportsSenderVerification(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(*signingTestEnv, *testing.T) *http.Request
+		want  string
+	}{
+		{"signed", func(env *signingTestEnv, t *testing.T) *http.Request {
+			return env.signedRemoteRequest(t, remoteMessage())
+		}, types.VerificationVerified},
+		{"unsigned", func(env *signingTestEnv, t *testing.T) *http.Request {
+			return env.unsignedRemoteRequest(t, "boss@remote.test")
+		}, types.VerificationUnsigned},
+		{"local", func(env *signingTestEnv, t *testing.T) *http.Request {
+			return localRequest(t, env.localKey)
+		}, types.VerificationTrustedInternal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSigningTestEnv(t, "flag")
+
+			rr := httptest.NewRecorder()
+			env.server.router.ServeHTTP(rr, tc.build(env, t))
+			if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+				t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+			}
+
+			var resp types.SendMessageResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if resp.SenderVerification == nil {
+				t.Fatal("response does not report sender_verification")
+			}
+			if resp.SenderVerification.Result != tc.want {
+				t.Errorf("result = %q, want %q", resp.SenderVerification.Result, tc.want)
+			}
+		})
 	}
 }
 

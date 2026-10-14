@@ -181,6 +181,14 @@ type SendMessageResponse struct {
 	WorkflowID string            `json:"workflow_id,omitempty"`
 	Status     string            `json:"status"`
 	Recipients []RecipientStatus `json:"recipients"`
+	// SenderVerification reports how the sender was authenticated. Under the
+	// default "flag" policy an unsigned or unverifiable remote message is
+	// still accepted, so a successful Status alone does NOT mean the sender
+	// was authenticated. Callers that make trust decisions must check Result
+	// ("verified" for a remote domain signature, "trusted_internal" for a
+	// local Bearer-authenticated sender). A verified signature proves the
+	// sending domain; it is not authorization to execute an action.
+	SenderVerification *SenderVerification `json:"sender_verification,omitempty"`
 }
 
 // ErrorResponse represents an API error response

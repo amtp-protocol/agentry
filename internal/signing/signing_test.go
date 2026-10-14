@@ -1067,3 +1067,159 @@ func TestDetectPEMAlgorithm(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeBodyCaseVariantMembersRejected: members of one object that differ
+// only in case are rejected at any depth.
+//
+// The ambiguity is exploitable, not cosmetic: encoding/json binds object
+// members to struct fields case-insensitively and lets the last one win, while
+// the verifier reads exact keys. A body carrying both "sender" and "Sender"
+// therefore verifies the signature of one domain while the handler stores the
+// other as the message sender.
+func TestDecodeBodyCaseVariantMembersRejected(t *testing.T) {
+	// Pin the underlying hazard so this test fails loudly if a future Go
+	// release changes the binding rule the rejection is protecting against.
+	var req struct {
+		Sender string `json:"sender"`
+	}
+	raw := []byte(`{"sender":"boss@victim.test","Sender":"attacker@remote.test"}`)
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.Sender != "attacker@remote.test" {
+		t.Fatalf("premise changed: struct binding gave %q, want the last member to win", req.Sender)
+	}
+
+	if _, err := DecodeBody(raw); err == nil {
+		t.Fatal("DecodeBody accepted members differing only in case")
+	}
+
+	for _, raw := range []string{
+		`{"a":1,"A":2}`,
+		`{"sender":"a@x.test","SENDER":"b@y.test"}`,
+		`{"a":1,"A":1}`,                   // identical values are still ambiguous
+		`{"x":{"a":1,"A":2}}`,             // nested object
+		`{"a":[{"k":1,"K":2}]}`,           // object inside an array
+		`{"a":1,"b":{"c":{"d":1,"D":2}}}`, // deep
+	} {
+		if _, err := DecodeBody([]byte(raw)); err == nil {
+			t.Errorf("DecodeBody(%q) = nil, want error", raw)
+		}
+	}
+
+	// Names that merely share a prefix or differ by a separator are distinct
+	// and must stay valid.
+	for _, raw := range []string{
+		`{"a":1,"ab":2}`,
+		`{"a":1,"a_":2}`,
+		`{"a":1,"a-b":2}`,
+		`{"a":1,"b":2}`,
+	} {
+		if _, err := DecodeBody([]byte(raw)); err != nil {
+			t.Errorf("DecodeBody(%q) = %v, want nil", raw, err)
+		}
+	}
+}
+
+// TestDecodeBodyNumericContainers: numbers are converted to float64 at every
+// position, including inside arrays. json.Number is not a type the JCS
+// formatter accepts, so while only object members were rewritten, a payload
+// such as [1,2] could be neither signed nor verified.
+func TestDecodeBodyNumericContainers(t *testing.T) {
+	body, err := DecodeBody([]byte(`{"root":5,"arr":[1,2.5],"objs":[{"n":3}],"deep":{"list":[4,[5]]}}`))
+	if err != nil {
+		t.Fatalf("DecodeBody: %v", err)
+	}
+	seen := 0
+	walkNumbers(t, "body", body, &seen)
+	if seen != 6 {
+		t.Errorf("inspected %d numbers, want 6; the walk is not covering every position", seen)
+	}
+}
+
+// walkNumbers reports any json.Number left in v, counting the numbers it
+// actually inspected so a walk that covers nothing is detectable.
+func walkNumbers(t *testing.T, path string, v interface{}, seen *int) {
+	t.Helper()
+	switch tv := v.(type) {
+	case json.Number:
+		t.Errorf("%s = json.Number(%s), want float64", path, tv.String())
+	case float64:
+		*seen = *seen + 1
+	case map[string]interface{}:
+		for k, val := range tv {
+			walkNumbers(t, path+"."+k, val, seen)
+		}
+	case []interface{}:
+		for i, val := range tv {
+			walkNumbers(t, fmt.Sprintf("%s[%d]", path, i), val, seen)
+		}
+	}
+}
+
+// TestBuildWireBodyNumericPayload covers the outbound payload path, which
+// decodes the payload separately from the request body. Scalar roots and
+// numeric array elements must both survive conversion, and the resulting body
+// must be signable and verifiable end to end.
+func TestBuildWireBodyNumericPayload(t *testing.T) {
+	signer, err := LoadSigner(loadVector(t, "es256.pem"), AlgES256, vectorSelector)
+	if err != nil {
+		t.Fatalf("LoadSigner: %v", err)
+	}
+	verifier := NewVerifier(&staticResolver{txts: []string{loadDNSRecord(t, "dns-es256.txt")}})
+
+	for _, payload := range []string{`[1,2]`, `5`, `{"n":1}`, `[{"n":1},2]`, `[[3]]`} {
+		t.Run(payload, func(t *testing.T) {
+			msg := &types.Message{
+				Version:        "1.0",
+				MessageID:      "01936b1e-1000-7000-8000-000000000001",
+				IdempotencyKey: "01936b1e-1000-4000-8000-000000000002",
+				Timestamp:      time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+				Sender:         vectorSender,
+				Recipients:     []string{vectorRecipient},
+				Payload:        json.RawMessage(payload),
+			}
+			body, err := BuildWireBody(msg, msg.Recipients[0])
+			if err != nil {
+				t.Fatalf("BuildWireBody: %v", err)
+			}
+			sig, err := signer.SignBody(body)
+			if err != nil {
+				t.Fatalf("SignBody: %v", err)
+			}
+			signed, err := AttachWireBody(body, sig)
+			if err != nil {
+				t.Fatalf("AttachWireBody: %v", err)
+			}
+			raw, err := MarshalWireBody(signed)
+			if err != nil {
+				t.Fatalf("MarshalWireBody: %v", err)
+			}
+			verification, err := verifier.VerifyBody(context.Background(), raw)
+			if err != nil {
+				t.Fatalf("VerifyBody: %v", err)
+			}
+			if verification.Result != ResultVerified {
+				t.Errorf("result = %s, want verified", verification.Result)
+			}
+		})
+	}
+}
+
+// TestBuildWireBodyRejectsCaseVariantPayload: the same strict rules apply to
+// the payload, so a payload the receiver would refuse fails at the sender,
+// where the error is actionable, instead of at the remote gateway.
+func TestBuildWireBodyRejectsCaseVariantPayload(t *testing.T) {
+	msg := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01936b1e-1000-7000-8000-000000000001",
+		IdempotencyKey: "01936b1e-1000-4000-8000-000000000002",
+		Timestamp:      time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Sender:         vectorSender,
+		Recipients:     []string{vectorRecipient},
+		Payload:        json.RawMessage(`{"a":1,"A":2}`),
+	}
+	if _, err := BuildWireBody(msg, msg.Recipients[0]); err == nil {
+		t.Fatal("BuildWireBody accepted a payload with members differing only in case")
+	}
+}

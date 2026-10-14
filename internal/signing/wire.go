@@ -17,10 +17,8 @@
 package signing
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/amtp-protocol/agentry/internal/types"
@@ -126,18 +124,17 @@ func MarshalWireBody(body map[string]interface{}) ([]byte, error) {
 }
 
 // decodeRawJSON converts a json.RawMessage into the generic value tree the
-// JCS formatter consumes. It rejects numbers outside double range (e.g.
-// 1e400) — RawMessage preserves the literal, but the canonical form of such
-// a number is undefined, so a body containing one cannot be signed.
+// JCS formatter consumes. It applies the same strict rules as DecodeBody
+// (duplicate members, members differing only in case, trailing data) so a
+// payload the receiver would refuse is caught here, when the sender can
+// still get a clear error instead of a remote rejection. It also rejects
+// numbers outside double range (e.g. 1e400) — RawMessage preserves the
+// literal, but the canonical form of such a number is undefined, so a body
+// containing one cannot be signed.
 func decodeRawJSON(raw json.RawMessage) (interface{}, error) {
-	var v interface{}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&v); err != nil {
-		return nil, err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, fmt.Errorf("trailing data after payload JSON")
+	v, err := decodeStrict(raw)
+	if err != nil {
+		return nil, fmt.Errorf("payload JSON: %w", err)
 	}
 	if err := checkNumbers(v); err != nil {
 		return nil, err

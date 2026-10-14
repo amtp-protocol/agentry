@@ -166,7 +166,7 @@ See [DOMAIN_MANAGEMENT.md](DOMAIN_MANAGEMENT.md) for details.
 - **"connection refused"**: Ensure server is running on correct port
 - **`401 ADMIN_AUTH_NOT_CONFIGURED`**: Start the gateway with `-admin-key-file` or `AMTP_ADMIN_KEY_FILE`
 - **`401 LOCAL_SENDER_AUTH_REQUIRED`**: Local-domain sends must carry `Authorization: Bearer <api_key>` where the key belongs to the agent matching the `sender` address — register the sender agent first
-- **`403 SIGNATURE_REQUIRED` / `SIGNATURE_INVALID`**: The receiving domain enforces signature verification (`verify_policy: reject`); see [DEPLOYMENT.md](DEPLOYMENT.md#domain-signatures) for key setup
+- **`403 SIGNATURE_REJECTED`**: The receiving domain enforces signature verification (`verify_policy: reject`) and the message was unsigned or its signature did not verify; see [DEPLOYMENT.md](DEPLOYMENT.md#domain-signatures) for key setup
 
 Debug mode:
 

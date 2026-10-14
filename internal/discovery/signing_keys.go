@@ -32,10 +32,15 @@ import (
 // (Section 3.2.3 of the protocol: <selector>._amtpkey.<sender-domain>).
 const signingKeyPrefix = "_amtpkey"
 
-// maxSigningKeyTXTBytes bounds a single TXT string we are willing to parse;
-// DNS TXT strings are inherently <=255 bytes, but a hostile or broken
-// resolver could return more.
-const maxSigningKeyTXTBytes = 255
+// maxSigningKeyTXTBytes bounds a whole TXT record we are willing to parse.
+//
+// This is deliberately not 255: DNS caps one character-string at 255 bytes,
+// but net.Resolver.LookupTXT concatenates the character-strings of a record
+// into a single string, so a valid record legitimately exceeds that. A
+// 2048-bit RSA public key is ~415 bytes and a 4096-bit one ~735; 4 KiB fits
+// every key size this gateway supports while still bounding what a hostile
+// resolver can hand us.
+const maxSigningKeyTXTBytes = 4096
 
 // negativeCacheTTL caps how long a failed lookup is remembered, so a DNS
 // blip cannot stampede, while a genuinely missing record is retried soon.
@@ -178,15 +183,20 @@ func (m *MockDiscovery) lookupSigningKeyTXT(_ context.Context, owner string) ([]
 	return nil, nil
 }
 
-// filterSigningKeyTXT drops oversized strings and strips the quotes DNS
-// servers sometimes add.
+// filterSigningKeyTXT drops unreasonably large strings and strips the quotes
+// DNS servers sometimes add. The bound applies to a whole record, not to one
+// DNS character-string: LookupTXT concatenates a record's character-strings,
+// so RSA records in particular exceed 255 bytes. Whether a surviving string
+// is actually a usable key record is decided by signing.SelectKeyRecord, not
+// by length here.
 func filterSigningKeyTXT(txts []string) []string {
 	out := make([]string, 0, len(txts))
 	for _, txt := range txts {
+		txt = strings.Trim(txt, "\"")
 		if len(txt) > maxSigningKeyTXTBytes {
 			continue
 		}
-		out = append(out, strings.Trim(txt, "\""))
+		out = append(out, txt)
 	}
 	return out
 }

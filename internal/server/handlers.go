@@ -224,6 +224,11 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		InReplyTo:      req.InReplyTo,
 		WorkflowID:     req.WorkflowID,
 		Attachments:    req.Attachments,
+		// Carried through so the origin of a remote signed message survives
+		// storage. The delivery engine refuses to re-sign a message that
+		// already carries a signature (see RELAY_UNSUPPORTED); dropping this
+		// field would let a signed message be forwarded unsigned.
+		Signature: req.Signature,
 	}
 
 	// Validate the complete message
@@ -342,6 +347,10 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 		WorkflowID: result.WorkflowID,
 		Status:     status,
 		Recipients: result.Recipients,
+		// Echo the outcome so the caller can distinguish "accepted" from
+		// "authenticated" without a second request: under accept/flag the
+		// HTTP status is the same whether or not the signature verified.
+		SenderVerification: verification,
 	}
 
 	// Record message processing metrics
