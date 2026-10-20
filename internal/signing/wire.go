@@ -139,7 +139,7 @@ func decodeRawJSON(raw json.RawMessage) (interface{}, error) {
 	if err := checkNumbers(v); err != nil {
 		return nil, err
 	}
-	return convertTree(v), nil
+	return convertValue(v), nil
 }
 
 // attachmentsToWire converts typed attachments to the generic tree.

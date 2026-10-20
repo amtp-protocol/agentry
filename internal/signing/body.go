@@ -205,12 +205,6 @@ func convertValue(v interface{}) interface{} {
 	}
 }
 
-// convertTree converts a json.Number tree rooted at any value type (object,
-// array, or scalar) and returns the converted value.
-func convertTree(v interface{}) interface{} {
-	return convertValue(v)
-}
-
 // ExtractSenderDomain returns the normalized domain of the body's "sender"
 // member. It is the verification-side counterpart of the handler's address
 // validation: by the time verification runs, structure validation has
