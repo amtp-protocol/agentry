@@ -18,6 +18,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -45,6 +46,10 @@ const maxSigningKeyTXTBytes = 4096
 // negativeCacheTTL caps how long a failed lookup is remembered, so a DNS
 // blip cannot stampede, while a genuinely missing record is retried soon.
 const negativeCacheTTL = 30 * time.Second
+
+// signingKeyLookupTimeout bounds a shared lookup, which runs detached from
+// the cancellation of the request that started it.
+const signingKeyLookupTimeout = 10 * time.Second
 
 // SigningKeyCache looks up and caches domain signing-key TXT records.
 // Positive results are cached for the configured TTL; failures (DNS error
@@ -106,10 +111,16 @@ func (c *SigningKeyCache) ResolveKeyTXT(ctx context.Context, domain, selector st
 		return nil, err
 	}
 
-	v, err, _ := c.group.Do(key, func() (interface{}, error) {
-		txts, err := c.resolver.lookupSigningKeyTXT(ctx, owner)
+	// The shared lookup must not inherit one caller's cancellation: that
+	// would fail every waiter on the key and cache the context error.
+	ch := c.group.DoChan(key, func() (interface{}, error) {
+		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), signingKeyLookupTimeout)
+		defer cancel()
+		txts, err := c.resolver.lookupSigningKeyTXT(lookupCtx, owner)
 		if err != nil {
-			c.putNegative(key, err)
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				c.putNegative(key, err)
+			}
 			return nil, err
 		}
 		txts = filterSigningKeyTXT(txts)
@@ -121,10 +132,15 @@ func (c *SigningKeyCache) ResolveKeyTXT(ctx context.Context, domain, selector st
 		c.putPositive(key, txts)
 		return txts, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]string), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return v.([]string), nil
 }
 
 func (c *SigningKeyCache) getCached(key string) ([]string, bool) {

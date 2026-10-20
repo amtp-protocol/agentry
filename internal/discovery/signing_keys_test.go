@@ -483,3 +483,72 @@ func TestDiscoveryLookupSigningKeyTXTError(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+// ctxResolver blocks until released, honoring the lookup context.
+type ctxResolver struct {
+	started chan struct{}
+	release chan struct{}
+	err     error
+	lookups atomic.Int64
+}
+
+func (r *ctxResolver) lookupSigningKeyTXT(ctx context.Context, owner string) ([]string, error) {
+	if r.lookups.Add(1) == 1 {
+		close(r.started)
+	}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	return []string{"v=amtpkey1;alg=ES256;p=AAA"}, nil
+}
+
+func TestSigningKeyCacheCancelledCallerDoesNotFailWaiters(t *testing.T) {
+	res := &ctxResolver{started: make(chan struct{}), release: make(chan struct{})}
+	cache := newCacheWith(res, time.Hour)
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := cache.ResolveKeyTXT(firstCtx, "sender.example", "k1")
+		firstErr <- err
+	}()
+	<-res.started
+
+	secondErr := make(chan error, 1)
+	go func() {
+		_, err := cache.ResolveKeyTXT(context.Background(), "sender.example", "k1")
+		secondErr <- err
+	}()
+
+	cancelFirst()
+	if err := <-firstErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled caller err = %v, want context.Canceled", err)
+	}
+	close(res.release)
+	if err := <-secondErr; err != nil {
+		t.Fatalf("concurrent waiter failed after another caller cancelled: %v", err)
+	}
+	if got := res.lookups.Load(); got != 1 {
+		t.Errorf("resolver called %d times, want 1", got)
+	}
+}
+
+func TestSigningKeyCacheContextErrorNotCached(t *testing.T) {
+	res := &countingResolver{err: fmt.Errorf("lookup: %w", context.DeadlineExceeded)}
+	cache := newCacheWith(res, time.Hour)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if _, err := cache.ResolveKeyTXT(ctx, "sender.example", "k1"); err == nil {
+			t.Fatalf("lookup #%d must fail", i)
+		}
+	}
+	if got := res.lookups.Load(); got != 2 {
+		t.Errorf("resolver called %d times, want 2 (context errors must not be negatively cached)", got)
+	}
+}
