@@ -293,6 +293,83 @@ func (ds *DatabaseStorage) CountMessages(ctx context.Context, filter MessageFilt
 	return count, nil
 }
 
+// StoreMessageWithStatus atomically stores a message, its initial status
+// (including sender verification), and per-recipient statuses in a single
+// transaction, so a crash can never leave a message without a status row.
+func (ds *DatabaseStorage) StoreMessageWithStatus(ctx context.Context, message *types.Message, initialStatus *types.MessageStatus) error {
+	if message == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+	if message.MessageID == "" {
+		return fmt.Errorf("message ID cannot be empty")
+	}
+	if initialStatus == nil {
+		return fmt.Errorf("status cannot be nil")
+	}
+	if initialStatus.MessageID == "" {
+		return fmt.Errorf("status message ID cannot be empty")
+	}
+
+	dbMessage, err := ds.convertToDBMessage(message)
+	if err != nil {
+		return fmt.Errorf("failed to convert message: %w", err)
+	}
+
+	var verificationJSON datatypes.JSON
+	if initialStatus.SenderVerification != nil {
+		raw, err := json.Marshal(initialStatus.SenderVerification)
+		if err != nil {
+			return fmt.Errorf("failed to marshal sender verification: %w", err)
+		}
+		verificationJSON = datatypes.JSON(raw)
+	}
+
+	return ds.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(dbMessage).Error; err != nil {
+			return fmt.Errorf("failed to create message in database: %w", err)
+		}
+
+		messageStatus := MessageStatus{
+			MessageID:          initialStatus.MessageID,
+			Status:             DeliveryStatus(initialStatus.Status),
+			Attempts:           initialStatus.Attempts,
+			NextRetry:          initialStatus.NextRetry,
+			DeliveredAt:        initialStatus.DeliveredAt,
+			SenderVerification: verificationJSON,
+			CreatedAt:          initialStatus.CreatedAt,
+			UpdatedAt:          initialStatus.UpdatedAt,
+		}
+		if err := tx.Create(&messageStatus).Error; err != nil {
+			return fmt.Errorf("failed to create message status: %w", err)
+		}
+
+		if len(initialStatus.Recipients) > 0 {
+			recipientStatuses := make([]RecipientStatus, 0, len(initialStatus.Recipients))
+			for _, rs := range initialStatus.Recipients {
+				recipientStatuses = append(recipientStatuses, RecipientStatus{
+					MessageID:      initialStatus.MessageID,
+					Address:        rs.Address,
+					Status:         DeliveryStatus(rs.Status),
+					Timestamp:      rs.Timestamp,
+					Attempts:       rs.Attempts,
+					ErrorCode:      rs.ErrorCode,
+					ErrorMessage:   rs.ErrorMessage,
+					DeliveryMode:   rs.DeliveryMode,
+					LocalDelivery:  rs.LocalDelivery,
+					InboxDelivered: rs.InboxDelivered,
+					Acknowledged:   rs.Acknowledged,
+					AcknowledgedAt: rs.AcknowledgedAt,
+				})
+			}
+			if err := tx.Create(&recipientStatuses).Error; err != nil {
+				return fmt.Errorf("failed to create recipient statuses: %w", err)
+			}
+		}
+
+		return nil
+	})
+}
+
 // StoreStatus stores message status
 func (ds *DatabaseStorage) StoreStatus(ctx context.Context, messageID string, status *types.MessageStatus) error {
 	if messageID == "" {
@@ -311,6 +388,17 @@ func (ds *DatabaseStorage) StoreStatus(ctx context.Context, messageID string, st
 			NextRetry:   status.NextRetry,
 			DeliveredAt: status.DeliveredAt,
 			UpdatedAt:   time.Now().UTC(),
+		}
+		// Preserve the recorded sender verification on updates; it is
+		// established once at ingest and must not be cleared by later
+		// status writes. A non-nil value in the incoming status (e.g. the
+		// atomic initial write) overrides.
+		if status.SenderVerification != nil {
+			raw, err := json.Marshal(status.SenderVerification)
+			if err != nil {
+				return fmt.Errorf("failed to marshal sender verification: %w", err)
+			}
+			messageStatus.SenderVerification = datatypes.JSON(raw)
 		}
 
 		if err := tx.Where("message_id = ?", messageID).
@@ -1141,6 +1229,15 @@ func (ds *DatabaseStorage) convertToTypesMessageStatus(messageStatus *MessageSta
 		CreatedAt:   messageStatus.CreatedAt,
 		UpdatedAt:   messageStatus.UpdatedAt,
 		DeliveredAt: messageStatus.DeliveredAt,
+	}
+
+	// Decode sender verification when present.
+	if len(messageStatus.SenderVerification) > 0 {
+		var verification types.SenderVerification
+		if err := json.Unmarshal(messageStatus.SenderVerification, &verification); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal sender verification: %w", err)
+		}
+		status.SenderVerification = &verification
 	}
 
 	// Convert recipient statuses

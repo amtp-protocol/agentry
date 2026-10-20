@@ -74,6 +74,44 @@ func (ms *MemoryStorage) StoreMessage(ctx context.Context, message *types.Messag
 	return nil
 }
 
+// StoreMessageWithStatus atomically stores a message and its initial
+// status under a single critical section, so a crash between the two writes
+// can never leave a message without a status entry.
+func (ms *MemoryStorage) StoreMessageWithStatus(ctx context.Context, message *types.Message, initialStatus *types.MessageStatus) error {
+	if message == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+	if message.MessageID == "" {
+		return fmt.Errorf("message ID cannot be empty")
+	}
+	if initialStatus == nil {
+		return fmt.Errorf("status cannot be nil")
+	}
+	if initialStatus.MessageID == "" {
+		return fmt.Errorf("status message ID cannot be empty")
+	}
+
+	// Validate capacity before mutating either map so the operation is
+	// all-or-nothing.
+	ms.messagesMux.RLock()
+	capacityExceeded := ms.config.MaxMessages > 0 && len(ms.messages) >= ms.config.MaxMessages
+	_, alreadyStored := ms.messages[message.MessageID]
+	ms.messagesMux.RUnlock()
+	if capacityExceeded && !alreadyStored {
+		return fmt.Errorf("storage capacity exceeded: max %d messages", ms.config.MaxMessages)
+	}
+
+	// Single critical section covering both maps. Lock ordering is messages
+	// then statuses.
+	ms.messagesMux.Lock()
+	ms.statusesMux.Lock()
+	ms.messages[message.MessageID] = cloneMessage(message)
+	ms.statuses[initialStatus.MessageID] = cloneStatus(initialStatus)
+	ms.statusesMux.Unlock()
+	ms.messagesMux.Unlock()
+	return nil
+}
+
 // GetMessage retrieves a message by ID
 func (ms *MemoryStorage) GetMessage(ctx context.Context, messageID string) (*types.Message, error) {
 	if messageID == "" {
@@ -672,6 +710,10 @@ func cloneStatus(s *types.MessageStatus) *types.MessageStatus {
 	if s.DeliveredAt != nil {
 		t := *s.DeliveredAt
 		c.DeliveredAt = &t
+	}
+	if s.SenderVerification != nil {
+		v := *s.SenderVerification
+		c.SenderVerification = &v
 	}
 	return &c
 }

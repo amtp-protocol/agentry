@@ -18,11 +18,17 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -784,5 +790,96 @@ func TestSetupRoutes(t *testing.T) {
 				t.Errorf("Route %s %s not found", route.method, route.path)
 			}
 		})
+	}
+}
+
+// baseSigningTestConfig returns a minimal valid config for signer-loading
+// tests.
+func baseSigningTestConfig() *config.Config {
+	return &config.Config{
+		Server: config.ServerConfig{
+			Address: ":8080",
+			Domain:  "test.example.com",
+		},
+		Message: config.MessageConfig{MaxSize: 10485760},
+		Logging: config.LoggingConfig{Level: "info", Format: "json"},
+		DNS: config.DNSConfig{
+			MockMode: true,
+			CacheTTL: 5 * time.Minute,
+		},
+		Auth: config.AuthConfig{RequireAuth: false},
+	}
+}
+
+// TestNew_BadSigningKeyFailsStartup verifies a configured but invalid
+// private key fails server startup instead of silently sending unsigned.
+func TestNew_BadSigningKeyFailsStartup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	keyFile := filepath.Join(t.TempDir(), "bad.pem")
+	if err := os.WriteFile(keyFile, []byte("not a pem"), 0600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	cfg := baseSigningTestConfig()
+	cfg.Signature.PrivateKeyFile = keyFile
+	cfg.Signature.KeyID = "k1"
+	cfg.Signature.VerifyPolicy = "flag"
+
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected startup failure for invalid private key")
+	} else if !strings.Contains(err.Error(), "signature private key") {
+		t.Errorf("error should mention the signature key, got: %v", err)
+	}
+}
+
+// TestNew_MissingSigningKeyFileFailsStartup verifies an unreadable key file
+// path fails startup.
+func TestNew_MissingSigningKeyFileFailsStartup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := baseSigningTestConfig()
+	cfg.Signature.PrivateKeyFile = filepath.Join(t.TempDir(), "missing.pem")
+	cfg.Signature.KeyID = "k1"
+	cfg.Signature.VerifyPolicy = "flag"
+
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected startup failure for missing private key file")
+	}
+}
+
+// TestNew_ValidSigningKeyEnablesSigning verifies a generated key loads and
+// the server starts.
+func TestNew_ValidSigningKeyEnablesSigning(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "private.pem")
+
+	// Generate through the admin tool's own generator semantics: fresh P-256.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(keyFile, pemBytes, 0600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cfg := baseSigningTestConfig()
+	cfg.Signature.PrivateKeyFile = keyFile
+	cfg.Signature.KeyID = "k1"
+	cfg.Signature.VerifyPolicy = "flag"
+
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("expected startup success with valid key, got: %v", err)
+	}
+	if srv == nil {
+		t.Fatal("expected server, got nil")
 	}
 }

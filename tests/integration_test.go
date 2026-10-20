@@ -18,7 +18,12 @@ package tests
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,7 +36,9 @@ import (
 	"time"
 
 	"github.com/amtp-protocol/agentry/internal/config"
+	"github.com/amtp-protocol/agentry/internal/discovery"
 	"github.com/amtp-protocol/agentry/internal/server"
+	"github.com/amtp-protocol/agentry/internal/signing"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
@@ -180,7 +187,11 @@ func registerLocalAgent(t *testing.T, baseURL string) string {
 // sendTestMessage posts a message via the send endpoint and returns the
 // assigned message ID. An explicit timestamp makes the newest-first ordering
 // of the message store deterministic for pagination assertions.
-func sendTestMessage(t *testing.T, baseURL, sender, recipient, subject, timestamp string) string {
+// sendTestMessage posts a message via the send endpoint and returns the
+// message ID. apiKey is the sender's Bearer credential; local senders must
+// present one (the handler enforces local-sender auth), remote senders
+// authenticate by domain signature instead and pass "".
+func sendTestMessage(t *testing.T, baseURL, apiKey, sender, recipient, subject, timestamp string) string {
 	t.Helper()
 	sendRequest := types.SendMessageRequest{
 		Sender:     sender,
@@ -193,7 +204,15 @@ func sendTestMessage(t *testing.T, baseURL, sender, recipient, subject, timestam
 	if err != nil {
 		t.Fatalf("marshal send request: %v", err)
 	}
-	resp, err := http.Post(baseURL+"/v1/messages", "application/json", bytes.NewBuffer(body))
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/messages", bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatalf("build send request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("send message: %v", err)
 	}
@@ -212,6 +231,25 @@ func sendTestMessage(t *testing.T, baseURL, sender, recipient, subject, timestam
 		t.Fatal("send response has empty message ID")
 	}
 	return sendResponse.MessageID
+}
+
+// sendAsLocalAgent submits a message as a registered local agent,
+// authenticating with its Bearer API key. Local senders must present a key
+// matching the sender address, so every local-sender test goes through here.
+func sendAsLocalAgent(t *testing.T, baseURL, apiKey, sender, recipient, subject, timestamp string) string {
+	t.Helper()
+	if apiKey == "" {
+		t.Fatal("local agent send requires an API key")
+	}
+	return sendTestMessage(t, baseURL, apiKey, sender, recipient, subject, timestamp)
+}
+
+// sendRemoteUnsigned submits a message from a foreign-domain sender with no
+// credentials. Only remote-compatibility scenarios (unsigned senders from
+// other domains under the default flag policy) may use this path.
+func sendRemoteUnsigned(t *testing.T, baseURL, sender, recipient, subject, timestamp string) string {
+	t.Helper()
+	return sendTestMessage(t, baseURL, "", sender, recipient, subject, timestamp)
 }
 
 // listMessageItem is the per-message shape returned by GET /v1/messages.
@@ -271,7 +309,7 @@ func TestIntegration_ListMessagesPagination(t *testing.T) {
 	// Listing agent plus a peer so the agent has both sent and received
 	// traffic.
 	agentKey := registerLocalAgent(t, testServer.URL)
-	registerLocalAgentWithAddress(t, testServer.URL, "peer")
+	peerKey := registerLocalAgentWithAddress(t, testServer.URL, "peer")
 
 	// Seed messages with strictly decreasing timestamps so the expected
 	// newest-first order is deterministic. Even indices are sent by the
@@ -284,10 +322,12 @@ func TestIntegration_ListMessagesPagination(t *testing.T) {
 	for i := 0; i < total; i++ {
 		ts := base.Add(time.Duration(total-1-i) * time.Minute).Format(time.RFC3339)
 		sender, recipient := "test@localhost", "peer@localhost"
+		key := agentKey
 		if i%2 == 1 {
 			sender, recipient = "peer@localhost", "test@localhost"
+			key = peerKey
 		}
-		msgID := sendTestMessage(t, testServer.URL, sender, recipient,
+		msgID := sendAsLocalAgent(t, testServer.URL, key, sender, recipient,
 			fmt.Sprintf("pagination-%d", i), ts)
 		newestFirst = append(newestFirst, msgID)
 	}
@@ -461,7 +501,7 @@ func TestIntegration_AdminCanInspectUnregisteredSenderMessage(t *testing.T) {
 
 	// Submit a message from an unregistered sender to an unregistered
 	// recipient in a foreign domain.
-	msgID := sendTestMessage(t, testServer.URL,
+	msgID := sendRemoteUnsigned(t, testServer.URL,
 		"unregistered@example.com", "remote-peer@example.com",
 		"admin-inspect", time.Now().UTC().Format(time.RFC3339))
 
@@ -615,7 +655,13 @@ func TestIntegration_MessageLifecycle(t *testing.T) {
 		t.Fatalf("Failed to marshal send request: %v", err)
 	}
 
-	resp, err := http.Post(testServer.URL+"/v1/messages", "application/json", bytes.NewBuffer(sendBody))
+	sendReq, err := http.NewRequest(http.MethodPost, testServer.URL+"/v1/messages", bytes.NewBuffer(sendBody))
+	if err != nil {
+		t.Fatalf("Failed to build send request: %v", err)
+	}
+	sendReq.Header.Set("Content-Type", "application/json")
+	sendReq.Header.Set("Authorization", "Bearer "+agentKey)
+	resp, err := http.DefaultClient.Do(sendReq)
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
@@ -743,7 +789,12 @@ func TestIntegration_MultipleRecipients(t *testing.T) {
 		t.Fatalf("Failed to marshal send request: %v", err)
 	}
 
-	resp, err := http.Post(testServer.URL+"/v1/messages", "application/json", bytes.NewBuffer(sendBody))
+	sendReq, err := http.NewRequest(http.MethodPost, testServer.URL+"/v1/messages", bytes.NewBuffer(sendBody))
+	if err != nil {
+		t.Fatalf("Failed to build send request: %v", err)
+	}
+	sendReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(sendReq)
 	if err != nil {
 		t.Fatalf("Failed to send message: %v", err)
 	}
@@ -1296,7 +1347,7 @@ func TestIntegration_ListMessagesCounterpartFilters(t *testing.T) {
 	// The listing agent plus a local counterpart; foreign counterparts are
 	// resolved via the mock gateway.
 	agentKey := registerLocalAgent(t, testServer.URL)
-	registerLocalAgentWithAddress(t, testServer.URL, "peer")
+	peerKey := registerLocalAgentWithAddress(t, testServer.URL, "peer")
 
 	// Seed one message per conversation direction. Keep a map from message ID
 	// to subject so the returned listing can be attributed.
@@ -1311,8 +1362,17 @@ func TestIntegration_ListMessagesCounterpartFilters(t *testing.T) {
 	}
 	subjectByID := make(map[string]string, len(seed))
 	for _, m := range seed {
-		msgID := sendTestMessage(t, testServer.URL, m.sender, m.recipient, m.subject,
-			now.Add(time.Duration(-len(subjectByID))*time.Minute).Format(time.RFC3339))
+		ts := now.Add(time.Duration(-len(subjectByID)) * time.Minute).Format(time.RFC3339)
+		var msgID string
+		switch m.sender {
+		case "test@localhost":
+			msgID = sendAsLocalAgent(t, testServer.URL, agentKey, m.sender, m.recipient, m.subject, ts)
+		case "peer@localhost":
+			msgID = sendAsLocalAgent(t, testServer.URL, peerKey, m.sender, m.recipient, m.subject, ts)
+		default:
+			// Foreign-domain senders arrive unsigned (default flag policy).
+			msgID = sendRemoteUnsigned(t, testServer.URL, m.sender, m.recipient, m.subject, ts)
+		}
 		subjectByID[msgID] = m.subject
 	}
 
@@ -1477,7 +1537,7 @@ func TestIntegration_ListMessagesSinceSubSecond(t *testing.T) {
 	subjectByID := make(map[string]string, len(stamps))
 	for i, ts := range stamps {
 		subject := fmt.Sprintf("subsecond-%d", i)
-		msgID := sendTestMessage(t, testServer.URL, "test@localhost", "peer@localhost",
+		msgID := sendAsLocalAgent(t, testServer.URL, agentKey, "test@localhost", "peer@localhost",
 			subject, ts.Format(time.RFC3339Nano))
 		subjectByID[msgID] = subject
 	}
@@ -1875,5 +1935,643 @@ func BenchmarkIntegration_SendMessage(b *testing.B) {
 			b.Fatalf("Failed to send message: %v", err)
 		}
 		resp.Body.Close()
+	}
+}
+
+// gatewayFixture is one in-process AMTP gateway with a domain, an optional
+// signing key, and a mock DNS view of the other gateway.
+type gatewayFixture struct {
+	domain      string
+	server      *server.Server
+	http        *httptest.Server
+	agentKey    string // Bearer key of the local sender agent
+	receiverKey string // Bearer key of the local receiver agent
+}
+
+// twoGatewayEnv wires two in-process gateways: gateway A (domain a.test)
+// signs outbound deliveries with its domain key; gateway B (domain b.test)
+// verifies inbound signatures under the given policy. B's mock DNS
+// publishes A's signing key record so verification can resolve it.
+type twoGatewayEnv struct {
+	a, b       *gatewayFixture
+	signerA    *signing.Signer
+	keyRecordA string // TXT value of A's public key
+	keyFileA   string // path of A's private key file (temp)
+}
+
+// newTwoGatewayEnv builds the A→B topology. policyB is B's remote
+// verify_policy.
+func newTwoGatewayEnv(t *testing.T, policyB string) *twoGatewayEnv {
+	t.Helper()
+
+	// A's ES256 domain key.
+	keyA, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key A: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(keyA)
+	if err != nil {
+		t.Fatalf("marshal key A: %v", err)
+	}
+	pemA := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	signerA, err := signing.LoadSigner(pemA, signing.AlgES256, "k1")
+	if err != nil {
+		t.Fatalf("load signer A: %v", err)
+	}
+	rec, err := signerA.PublicKeyRecord()
+	if err != nil {
+		t.Fatalf("public record A: %v", err)
+	}
+	keyRecordA, err := signing.FormatKeyRecord(rec)
+	if err != nil {
+		t.Fatalf("format record A: %v", err)
+	}
+
+	// Write A's private key to a temp file so server.New loads the signer.
+	keyFile := filepath.Join(t.TempDir(), "a.pem")
+	if err := os.WriteFile(keyFile, pemA, 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	env := &twoGatewayEnv{signerA: signerA, keyRecordA: keyRecordA, keyFileA: keyFile}
+
+	// Gateway B first. Its DNS view starts empty; A's key record is added
+	// right after construction on the SAME mock instance the delivery
+	// engine captured (SetDiscoveryForTesting would only retarget the
+	// verifier, leaving the delivery engine on a stale view).
+	env.b = newGateway(t, gatewayOptions{
+		domain: "b.test",
+		policy: policyB,
+	})
+	if md, ok := env.b.server.DiscoveryForTesting().(*discovery.MockDiscovery); ok {
+		// Publish A's signing key in B's DNS view so B's verifier can
+		// resolve it.
+		md.SetSigningKeyRecord("k1._amtpkey.a.test", keyRecordA)
+	} else {
+		t.Fatal("gateway B discovery is not a MockDiscovery")
+	}
+
+	// Gateway A: signs with keyFile; its DNS view maps b.test to B's HTTP
+	// address via the config's mock records (the delivery engine captures
+	// discovery at construction, so the peer URL must be known up front).
+	env.a = newGateway(t, gatewayOptions{
+		domain:      "a.test",
+		policy:      "flag",
+		keyFile:     keyFile,
+		peerGateway: env.b.http,
+	})
+	return env
+}
+
+type gatewayOptions struct {
+	domain      string
+	policy      string
+	keyFile     string           // optional signing private key
+	peerGateway *httptest.Server // peer whose URL must be in mock DNS at construction
+}
+
+// newSignedTwoGatewayEnv builds an A↔B topology where BOTH gateways sign
+// their outbound deliveries with their own domain key and each verifies the
+// other's signatures. Needed for round-trip scenarios (workflow replies)
+// where traffic flows in both directions.
+func newSignedTwoGatewayEnv(t *testing.T, policyB string) *twoGatewayEnv {
+	t.Helper()
+
+	// One ES256 key per domain.
+	newKey := func(name string) (pemBytes []byte, signer *signing.Signer, txt string) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("generate key %s: %v", name, err)
+		}
+		der, err := x509.MarshalECPrivateKey(key)
+		if err != nil {
+			t.Fatalf("marshal key %s: %v", name, err)
+		}
+		pemBytes = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+		signer, err = signing.LoadSigner(pemBytes, signing.AlgES256, "k1")
+		if err != nil {
+			t.Fatalf("load signer %s: %v", name, err)
+		}
+		rec, err := signer.PublicKeyRecord()
+		if err != nil {
+			t.Fatalf("public record %s: %v", name, err)
+		}
+		txt, err = signing.FormatKeyRecord(rec)
+		if err != nil {
+			t.Fatalf("format record %s: %v", name, err)
+		}
+		return pemBytes, signer, txt
+	}
+	pemA, signerA, txtA := newKey("A")
+	pemB, _, txtB := newKey("B")
+
+	keyFileA := filepath.Join(t.TempDir(), "a.pem")
+	if err := os.WriteFile(keyFileA, pemA, 0o600); err != nil {
+		t.Fatalf("write key file A: %v", err)
+	}
+	keyFileB := filepath.Join(t.TempDir(), "b.pem")
+	if err := os.WriteFile(keyFileB, pemB, 0o600); err != nil {
+		t.Fatalf("write key file B: %v", err)
+	}
+
+	env := &twoGatewayEnv{signerA: signerA, keyRecordA: txtA, keyFileA: keyFileA}
+
+	// Gateway B first: it signs with its key; its DNS view starts empty
+	// (A's URL is unknown until A exists) and is populated afterwards on
+	// the same mock instance B's delivery engine captured.
+	env.b = newGateway(t, gatewayOptions{
+		domain:  "b.test",
+		policy:  policyB,
+		keyFile: keyFileB,
+	})
+	bMock, ok := env.b.server.DiscoveryForTesting().(*discovery.MockDiscovery)
+	if !ok {
+		t.Fatal("gateway B discovery is not a MockDiscovery")
+	}
+	bMock.SetSigningKeyRecord("k1._amtpkey.a.test", txtA)
+
+	// Gateway A: signs with its key; its DNS view maps b.test to B's URL
+	// (baked at construction) and carries B's signing-key record.
+	env.a = newGateway(t, gatewayOptions{
+		domain:      "a.test",
+		policy:      "flag",
+		keyFile:     keyFileA,
+		peerGateway: env.b.http,
+	})
+	aMock, ok := env.a.server.DiscoveryForTesting().(*discovery.MockDiscovery)
+	if !ok {
+		t.Fatal("gateway A discovery is not a MockDiscovery")
+	}
+	aMock.SetSigningKeyRecord("k1._amtpkey.b.test", txtB)
+
+	// Now that A exists, publish A's gateway URL in B's DNS view so B can
+	// deliver the workflow reply back to A.
+	bMock.SetCapabilitiesRecord("a.test", fmt.Sprintf(
+		"v=amtp1;gateway=%s;auth=none;max-size=10485760", env.a.http.URL))
+
+	return env
+}
+
+// newGateway builds one in-process gateway with mock DNS. The peer's
+// capabilities record points at peerGateway when set.
+func newGateway(t *testing.T, opts gatewayOptions) *gatewayFixture {
+	t.Helper()
+
+	cfg := createTestConfig(t)
+	cfg.Server.Domain = opts.domain
+	cfg.Signature.VerifyPolicy = opts.policy
+	cfg.Signature.PrivateKeyFile = opts.keyFile
+	cfg.Signature.KeyID = "k1"
+
+	// The peer's gateway URL must be baked into the config's mock records
+	// before construction: the delivery engine captures the discovery
+	// service (built from these records) at that point.
+	if opts.peerGateway != nil {
+		cfg.DNS.MockRecords[peerDomain(opts.domain)] = fmt.Sprintf(
+			"v=amtp1;gateway=%s;auth=none;max-size=10485760", opts.peerGateway.URL)
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("gateway %s: create server: %v", opts.domain, err)
+	}
+
+	httpSrv := httptest.NewServer(srv.GetRouter())
+	t.Cleanup(httpSrv.Close)
+
+	// Register the local sender agent so Bearer auth works.
+	agentKey := registerLocalAgentWithAddress(t, httpSrv.URL, "sender")
+	receiverKey := registerLocalAgentWithAddress(t, httpSrv.URL, "receiver")
+
+	return &gatewayFixture{domain: opts.domain, server: srv, http: httpSrv, agentKey: agentKey, receiverKey: receiverKey}
+}
+
+func peerDomain(own string) string {
+	if own == "a.test" {
+		return "b.test"
+	}
+	return "a.test"
+}
+
+// TestTwoGatewaySignedDelivery: A sends to B; B verifies the domain
+// signature and records result=verified on the stored status.
+func TestTwoGatewaySignedDelivery(t *testing.T) {
+	env := newTwoGatewayEnv(t, "flag")
+
+	// Send from A's local agent to a recipient at B.
+	sendBody := map[string]interface{}{
+		"sender":     "sender@a.test",
+		"recipients": []string{"receiver@b.test"},
+		"subject":    "cross-domain",
+		"payload":    map[string]interface{}{"hello": "world"},
+	}
+	raw, err := json.Marshal(sendBody)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, env.a.http.URL+"/v1/messages", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+env.a.agentKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	sendRespBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("send: expected 200/202, got %d body=%s", resp.StatusCode, string(sendRespBytes))
+	}
+
+	// The delivery is asynchronous; poll B for the message status until it
+	// appears (or fail after a deadline).
+	deadline := time.Now().Add(5 * time.Second)
+	var statusResp struct {
+		SenderVerification *types.SenderVerification `json:"sender_verification"`
+	}
+	for {
+		stReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages?sender=sender@a.test&limit=5", nil)
+		stReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
+		stResp, err := http.DefaultClient.Do(stReq)
+		if err != nil {
+			t.Fatalf("poll B: %v", err)
+		}
+		var list struct {
+			Messages []struct {
+				MessageID string `json:"message_id"`
+			} `json:"messages"`
+		}
+		bodyBytes, _ := io.ReadAll(stResp.Body)
+		stResp.Body.Close()
+		if stResp.StatusCode != http.StatusOK {
+			t.Fatalf("poll B: status %d body=%s", stResp.StatusCode, string(bodyBytes))
+		}
+		json.Unmarshal(bodyBytes, &list)
+
+		if len(list.Messages) > 0 {
+			// Fetch the status of the delivered message.
+			id := list.Messages[0].MessageID
+			sReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages/"+id+"/status", nil)
+			sReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
+			sResp, err := http.DefaultClient.Do(sReq)
+			if err != nil {
+				t.Fatalf("get status: %v", err)
+			}
+			json.NewDecoder(sResp.Body).Decode(&statusResp)
+			sResp.Body.Close()
+			if statusResp.SenderVerification != nil {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("message with sender_verification never appeared at gateway B")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if statusResp.SenderVerification.Result != "verified" {
+		t.Errorf("expected result verified, got %q", statusResp.SenderVerification.Result)
+	}
+	if statusResp.SenderVerification.Domain != "a.test" {
+		t.Errorf("expected domain a.test, got %q", statusResp.SenderVerification.Domain)
+	}
+}
+
+// TestTwoGatewayForgedUnsigned: an unsigned message claiming to be from
+// a.test arrives directly at B. Under flag B accepts it and records
+// unsigned; under reject B refuses 403.
+func TestTwoGatewayForgedUnsigned(t *testing.T) {
+	for _, tc := range []struct {
+		policy string
+		want   int
+	}{
+		{"flag", http.StatusOK},
+		{"reject", http.StatusForbidden},
+	} {
+		t.Run(tc.policy, func(t *testing.T) {
+			env := newTwoGatewayEnv(t, tc.policy)
+
+			body := map[string]interface{}{
+				"sender":     "sender@a.test",
+				"recipients": []string{"receiver@b.test"},
+				"payload":    map[string]interface{}{"forged": true},
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			req, err := http.NewRequest(http.MethodPost, env.b.http.URL+"/v1/messages", bytes.NewReader(raw))
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Fatalf("policy %s: expected %d, got %d", tc.policy, tc.want, resp.StatusCode)
+			}
+			if tc.want == http.StatusForbidden {
+				body, _ := io.ReadAll(resp.Body)
+				if !strings.Contains(string(body), "SIGNATURE_REJECTED") {
+					t.Errorf("expected SIGNATURE_REJECTED, got %s", string(body))
+				}
+			}
+		})
+	}
+}
+
+// TestTwoGatewayTamperedDelivery: A signs a delivery but the body is
+// mutated in flight; B must reject it under reject policy.
+func TestTwoGatewayTamperedDelivery(t *testing.T) {
+	env := newTwoGatewayEnv(t, "reject")
+
+	// Build the signed wire body exactly as A's delivery engine would,
+	// then tamper with the payload before it reaches B.
+	msg := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01936b1e-6000-7000-8000-000000000001",
+		IdempotencyKey: "01936b1e-6000-4000-8000-000000000002",
+		Timestamp:      time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Sender:         "sender@a.test",
+		Recipients:     []string{"receiver@b.test"},
+		Payload:        json.RawMessage(`{"hello":"world"}`),
+	}
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	sig, err := env.signerA.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	body["payload"] = map[string]interface{}{"tampered": true}
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, env.b.http.URL+"/v1/messages", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for tampered delivery, got %d", resp.StatusCode)
+	}
+}
+
+// TestTwoGatewayKeyUnavailable: B cannot resolve A's signing key (no DNS
+// record published); under reject B must answer 503.
+func TestTwoGatewayKeyUnavailable(t *testing.T) {
+	env := newTwoGatewayEnv(t, "reject")
+
+	// Remove A's key record from B's DNS view.
+	if md, ok := env.b.server.DiscoveryForTesting().(*discovery.MockDiscovery); ok {
+		md.RemoveSigningKeyRecord("k1._amtpkey.a.test")
+	}
+
+	msg := &types.Message{
+		Version:        "1.0",
+		MessageID:      "01936b1e-7000-7000-8000-000000000001",
+		IdempotencyKey: "01936b1e-7000-4000-8000-000000000002",
+		Timestamp:      time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		Sender:         "sender@a.test",
+		Recipients:     []string{"receiver@b.test"},
+		Payload:        json.RawMessage(`{"hello":"world"}`),
+	}
+	body, err := signing.BuildWireBody(msg, msg.Recipients[0])
+	if err != nil {
+		t.Fatalf("build wire body: %v", err)
+	}
+	sig, err := env.signerA.SignBody(body)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	body, err = signing.AttachWireBody(body, sig)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	raw, err := signing.MarshalWireBody(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, env.b.http.URL+"/v1/messages", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for key unavailable, got %d", resp.StatusCode)
+	}
+}
+
+// TestTwoGatewaySignedWorkflowReplyAdvancesState: A's local agent starts a
+// parallel workflow whose only required responder is B's receiver. The
+// dispatched message is delivered to B signed by A's domain key and recorded
+// as verified. B's receiver replies with a workflow response; B signs the
+// outbound reply with its own domain key, A verifies it, and only then does
+// the workflow state machine advance to completed — observable as the
+// workflow-completion notification delivered to A's sender inbox.
+func TestTwoGatewaySignedWorkflowReplyAdvancesState(t *testing.T) {
+	// Both gateways sign: A signs the dispatched workflow message, B signs
+	// the workflow reply. Each verifies the other's signature before any
+	// state change.
+	env := newSignedTwoGatewayEnv(t, "flag")
+
+	// 1. A's sender starts a parallel workflow with B's receiver as the
+	//    single required responder.
+	sendBody := map[string]interface{}{
+		"sender":     "sender@a.test",
+		"recipients": []string{"receiver@b.test"},
+		"subject":    "cross-domain workflow",
+		"coordination": map[string]interface{}{
+			"type":               "parallel",
+			"timeout":            60,
+			"required_responses": []string{"receiver@b.test"},
+		},
+		"payload": map[string]interface{}{"task": "review"},
+	}
+	raw, err := json.Marshal(sendBody)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, env.a.http.URL+"/v1/messages", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+env.a.agentKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	sendRespBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("send: expected 200/202, got %d body=%s", resp.StatusCode, string(sendRespBytes))
+	}
+	var sendResp struct {
+		MessageID  string `json:"message_id"`
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.Unmarshal(sendRespBytes, &sendResp); err != nil {
+		t.Fatalf("unmarshal send response: %v", err)
+	}
+	if sendResp.WorkflowID == "" {
+		t.Fatal("send response missing workflow_id")
+	}
+
+	// 2. B must have received the dispatched message and recorded it as
+	//    verified (A's domain signature).
+	deadline := time.Now().Add(10 * time.Second)
+	var dispatchedID string
+	for {
+		listReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages?sender=sender@a.test&limit=5", nil)
+		listReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
+		listResp, err := http.DefaultClient.Do(listReq)
+		if err != nil {
+			t.Fatalf("poll B: %v", err)
+		}
+		var list struct {
+			Messages []struct {
+				MessageID string `json:"message_id"`
+			} `json:"messages"`
+		}
+		bodyBytes, _ := io.ReadAll(listResp.Body)
+		listResp.Body.Close()
+		if listResp.StatusCode != http.StatusOK {
+			t.Fatalf("poll B: status %d body=%s", listResp.StatusCode, string(bodyBytes))
+		}
+		json.Unmarshal(bodyBytes, &list)
+		if len(list.Messages) > 0 {
+			dispatchedID = list.Messages[0].MessageID
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("dispatched workflow message never arrived at gateway B")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	stReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages/"+dispatchedID+"/status", nil)
+	stReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
+	stResp, err := http.DefaultClient.Do(stReq)
+	if err != nil {
+		t.Fatalf("get status at B: %v", err)
+	}
+	defer stResp.Body.Close()
+	var statusResp struct {
+		SenderVerification *types.SenderVerification `json:"sender_verification"`
+	}
+	json.NewDecoder(stResp.Body).Decode(&statusResp)
+	if statusResp.SenderVerification == nil || statusResp.SenderVerification.Result != "verified" {
+		got := "<nil>"
+		if statusResp.SenderVerification != nil {
+			got = statusResp.SenderVerification.Result
+		}
+		t.Fatalf("dispatched message at B: sender_verification.result = %s, want verified", got)
+	}
+
+	// 3. B's receiver replies with a workflow response. B signs the
+	//    outbound delivery with its domain key; A verifies it before the
+	//    workflow state machine advances.
+	replyBody := map[string]interface{}{
+		"sender":        "receiver@b.test",
+		"recipients":    []string{"sender@a.test"},
+		"subject":       "Re: cross-domain workflow",
+		"response_type": "workflow_response",
+		"in_reply_to":   sendResp.WorkflowID,
+		"workflow_id":   sendResp.WorkflowID,
+		"payload":       map[string]interface{}{"status": "done"},
+	}
+	replyRaw, err := json.Marshal(replyBody)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
+	}
+	replyReq, err := http.NewRequest(http.MethodPost, env.b.http.URL+"/v1/messages", bytes.NewReader(replyRaw))
+	if err != nil {
+		t.Fatalf("build reply request: %v", err)
+	}
+	replyReq.Header.Set("Content-Type", "application/json")
+	replyReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
+	replyResp, err := http.DefaultClient.Do(replyReq)
+	if err != nil {
+		t.Fatalf("send reply: %v", err)
+	}
+	replyRespBytes, _ := io.ReadAll(replyResp.Body)
+	replyResp.Body.Close()
+	if replyResp.StatusCode != http.StatusOK && replyResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("reply: expected 200/202, got %d body=%s", replyResp.StatusCode, string(replyRespBytes))
+	}
+
+	// 4. The workflow must advance to completed, which dispatches the
+	//    completion notification to A's sender inbox. Poll A's inbox for
+	//    the notification from workflow@a.test referencing the workflow.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		inboxReq, _ := http.NewRequest(http.MethodGet, env.a.http.URL+"/v1/inbox/sender@a.test", nil)
+		inboxReq.Header.Set("Authorization", "Bearer "+env.a.agentKey)
+		inboxResp, err := http.DefaultClient.Do(inboxReq)
+		if err != nil {
+			t.Fatalf("poll A inbox: %v", err)
+		}
+		var inbox struct {
+			Messages []struct {
+				Sender     string          `json:"sender"`
+				InReplyTo  string          `json:"in_reply_to"`
+				WorkflowID string          `json:"workflow_id"`
+				Payload    json.RawMessage `json:"payload"`
+			} `json:"messages"`
+		}
+		inboxBytes, _ := io.ReadAll(inboxResp.Body)
+		inboxResp.Body.Close()
+		if inboxResp.StatusCode != http.StatusOK {
+			t.Fatalf("poll A inbox: status %d body=%s", inboxResp.StatusCode, string(inboxBytes))
+		}
+		json.Unmarshal(inboxBytes, &inbox)
+
+		for _, m := range inbox.Messages {
+			if m.Sender == "workflow@a.test" && m.WorkflowID == sendResp.WorkflowID {
+				// The notification payload reports the final status.
+				var payload struct {
+					Status string `json:"status"`
+				}
+				if err := json.Unmarshal(m.Payload, &payload); err != nil {
+					t.Fatalf("unmarshal notification payload: %v", err)
+				}
+				if payload.Status != "completed" {
+					t.Fatalf("workflow final status = %q, want completed", payload.Status)
+				}
+				return // workflow reply verified and state advanced
+			}
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("workflow completion notification never arrived at A's sender inbox; inbox=%s", string(inboxBytes))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

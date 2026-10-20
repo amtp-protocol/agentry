@@ -60,3 +60,9 @@ schema:
   error_reporting:
     enabled: true
     include_payload: false
+
+# Domain signature configuration
+signature:
+  private_key_file: ""
+  key_id: "k1"
+  verify_policy: "flag"

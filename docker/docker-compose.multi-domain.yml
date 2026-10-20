@@ -8,6 +8,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: amtp-gateway-company-a
     environment:
       - AMTP_DOMAIN=company-a.com
@@ -40,6 +42,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: amtp-gateway-subsidiary
     environment:
       - AMTP_DOMAIN=subsidiary.com
@@ -72,6 +76,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: amtp-gateway-partner
     environment:
       - AMTP_DOMAIN=partner.com

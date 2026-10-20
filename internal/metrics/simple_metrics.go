@@ -35,10 +35,11 @@ type SimpleMetrics struct {
 	httpInFlight  int64
 
 	// Message processing metrics
-	messages         map[string]int64
-	messageDurations map[string][]float64
-	messagesInFlight int64
-	messageSizes     map[string][]float64
+	messages            map[string]int64
+	messageDurations    map[string][]float64
+	messagesInFlight    int64
+	messageSizes        map[string][]float64
+	senderVerifications map[string]int64
 
 	// Delivery metrics
 	deliveries        map[string]int64
@@ -67,21 +68,22 @@ type SimpleMetrics struct {
 // NewSimpleMetrics creates a new simple metrics instance
 func NewSimpleMetrics() *SimpleMetrics {
 	return &SimpleMetrics{
-		httpRequests:       make(map[string]int64),
-		httpDurations:      make(map[string][]float64),
-		messages:           make(map[string]int64),
-		messageDurations:   make(map[string][]float64),
-		messageSizes:       make(map[string][]float64),
-		deliveries:         make(map[string]int64),
-		deliveryDurations:  make(map[string][]float64),
-		deliveryAttempts:   make(map[string]int64),
-		deliveryRetries:    make(map[string]int64),
-		discoveries:        make(map[string]int64),
-		discoveryDurations: make(map[string][]float64),
-		discoveryCacheHits: make(map[string]int64),
-		errors:             make(map[string]int64),
-		startTime:          time.Now(),
-		lastUpdate:         time.Now(),
+		httpRequests:        make(map[string]int64),
+		httpDurations:       make(map[string][]float64),
+		messages:            make(map[string]int64),
+		messageDurations:    make(map[string][]float64),
+		messageSizes:        make(map[string][]float64),
+		senderVerifications: make(map[string]int64),
+		deliveries:          make(map[string]int64),
+		deliveryDurations:   make(map[string][]float64),
+		deliveryAttempts:    make(map[string]int64),
+		deliveryRetries:     make(map[string]int64),
+		discoveries:         make(map[string]int64),
+		discoveryDurations:  make(map[string][]float64),
+		discoveryCacheHits:  make(map[string]int64),
+		errors:              make(map[string]int64),
+		startTime:           time.Now(),
+		lastUpdate:          time.Now(),
 	}
 }
 
@@ -119,6 +121,30 @@ func (m *SimpleMetrics) RecordMessage(status, coordinationType string, duration 
 		m.messageSizes[schema] = append(m.messageSizes[schema], float64(sizeBytes))
 	}
 	m.lastUpdate = time.Now()
+}
+
+// RecordSenderVerification records an inbound sender-verification outcome.
+// result is the verification result (verified/unsigned/invalid/key_unavailable)
+// and policy is the applied signature policy decision (accept/flag/reject).
+func (m *SimpleMetrics) RecordSenderVerification(result, policy string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.senderVerifications[result+":"+policy]++
+	m.lastUpdate = time.Now()
+}
+
+// SenderVerifications returns a copy of the recorded sender-verification
+// counters keyed by "result:policy".
+func (m *SimpleMetrics) SenderVerifications() map[string]int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make(map[string]int64, len(m.senderVerifications))
+	for k, v := range m.senderVerifications {
+		out[k] = v
+	}
+	return out
 }
 
 // IncMessagesInFlight increments in-flight messages
@@ -220,10 +246,11 @@ func (m *SimpleMetrics) ToJSON() ([]byte, error) {
 			"in_flight": atomic.LoadInt64(&m.httpInFlight),
 		},
 		"messages": map[string]interface{}{
-			"total":     m.messages,
-			"durations": m.calculateStats(m.messageDurations),
-			"in_flight": atomic.LoadInt64(&m.messagesInFlight),
-			"sizes":     m.calculateStats(m.messageSizes),
+			"total":                m.messages,
+			"durations":            m.calculateStats(m.messageDurations),
+			"in_flight":            atomic.LoadInt64(&m.messagesInFlight),
+			"sizes":                m.calculateStats(m.messageSizes),
+			"sender_verifications": m.senderVerifications,
 		},
 		"deliveries": map[string]interface{}{
 			"total":     m.deliveries,

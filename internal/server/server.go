@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,6 +34,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/middleware"
 	"github.com/amtp-protocol/agentry/internal/processing"
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/signing"
 	"github.com/amtp-protocol/agentry/internal/storage"
 	"github.com/amtp-protocol/agentry/internal/validation"
 	"github.com/amtp-protocol/agentry/internal/workflow"
@@ -78,6 +80,11 @@ type Server struct {
 	// blocks on a filesystem read per request; it re-reads only when the key
 	// file's mtime or size changes.
 	adminKeyValidator *middleware.AdminKeyValidator
+
+	// verifier checks inbound domain signatures against DNS-published
+	// keys. Nil only for servers assembled by hand in tests that never
+	// receive remote traffic; New always sets it.
+	verifier *signing.Verifier
 }
 
 // New creates a new AMTP server
@@ -167,6 +174,32 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	deliveryEngine := processing.NewDeliveryEngine(discoveryService, agentRegistry, deliveryConfig)
 
+	// Load the optional domain-signing key. Absent means unsigned delivery
+	// (with a warning); present but unreadable or invalid fails startup so a
+	// misconfigured gateway never silently sends unsigned traffic.
+	if cfg.Signature.PrivateKeyFile != "" {
+		pemBytes, err := os.ReadFile(cfg.Signature.PrivateKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read signature private key %s: %w", cfg.Signature.PrivateKeyFile, err)
+		}
+		algorithm, err := signing.DetectPEMAlgorithm(pemBytes)
+		if err != nil {
+			return nil, fmt.Errorf("invalid signature private key %s: %w", cfg.Signature.PrivateKeyFile, err)
+		}
+		signer, err := signing.LoadSigner(pemBytes, algorithm, cfg.Signature.KeyID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid signature private key %s: %w", cfg.Signature.PrivateKeyFile, err)
+		}
+		deliveryEngine.SetSigner(signer)
+		logger.Infof("domain signing enabled: key_id=%s key_file=%s", cfg.Signature.KeyID, cfg.Signature.PrivateKeyFile)
+	} else {
+		logger.Warn("domain signing disabled: no signature.private_key_file configured; outbound messages will be unsigned")
+	}
+
+	// Create the inbound signature verifier backed by the discovery
+	// service's signing-key resolution (DNS TXT with caching).
+	verifier := signing.NewVerifier(discoveryKeyResolver{discoveryService})
+
 	// Create validator with agent management capabilities
 	agentManagerAdapter := &AgentManagerAdapter{agentRegistry: agentRegistry}
 	var validator *validation.Validator
@@ -197,6 +230,7 @@ func New(cfg *config.Config) (*Server, error) {
 		config:            cfg,
 		router:            router,
 		discovery:         discoveryService,
+		verifier:          verifier,
 		validator:         validator,
 		processor:         processor,
 		storage:           storage,
@@ -261,6 +295,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // GetRouter returns the Gin router for testing purposes
 func (s *Server) GetRouter() *gin.Engine {
 	return s.router
+}
+
+// SetDiscoveryForTesting replaces the discovery service after construction.
+// It exists so integration tests can point a gateway's DNS view at another
+// in-process gateway and publish signing-key records; production code must
+// not call it.
+func (s *Server) SetDiscoveryForTesting(svc processing.DiscoveryService) {
+	s.discovery = svc
+	s.verifier = signing.NewVerifier(discoveryKeyResolver{svc})
+}
+
+// DiscoveryForTesting returns the active discovery service. It exists for
+// integration tests that need to mutate mock DNS state; production code
+// must not call it.
+func (s *Server) DiscoveryForTesting() processing.DiscoveryService {
+	return s.discovery
 }
 
 // setupMiddleware configures middleware for the server
@@ -367,7 +417,9 @@ func (s *Server) createTLSConfig() (*tls.Config, error) {
 			tls.TLS_AES_128_GCM_SHA256,
 			tls.TLS_CHACHA20_POLY1305_SHA256,
 		},
-		PreferServerCipherSuites: true,
+		// PreferServerCipherSuites is deprecated (ignored since Go 1.18);
+		// TLS 1.3 cipher suites are always negotiated by the client's
+		// preference order.
 	}
 
 	// Set minimum TLS version based on configuration
@@ -574,4 +626,19 @@ func (s *Server) checkReadiness() ReadinessStatus {
 		Version:      "1.0",
 		Dependencies: dependencies,
 	}
+}
+
+// discoveryKeyResolver adapts a processing.DiscoveryService to the
+// signing.KeyResolver interface so the verifier can resolve
+// <selector>._amtpkey.<domain> TXT records through the shared discovery
+// cache.
+type discoveryKeyResolver struct {
+	svc interface {
+		ResolveSigningKeyTXT(ctx context.Context, domain, selector string) ([]string, error)
+	}
+}
+
+// ResolveKeyTXT implements signing.KeyResolver.
+func (r discoveryKeyResolver) ResolveKeyTXT(ctx context.Context, domain, selector string) ([]string, error) {
+	return r.svc.ResolveSigningKeyTXT(ctx, domain, selector)
 }

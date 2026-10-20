@@ -71,12 +71,14 @@ func (m *MockDeliveryEngine) SetDeliveryError(err error) {
 // MockDiscovery for testing
 type MockDiscovery struct {
 	capabilities map[string]*discovery.AMTPCapabilities
+	signingKeys  map[string][]string
 	error        error
 }
 
 func NewMockDiscovery() *MockDiscovery {
 	return &MockDiscovery{
 		capabilities: make(map[string]*discovery.AMTPCapabilities),
+		signingKeys:  make(map[string][]string),
 	}
 }
 
@@ -98,6 +100,24 @@ func (m *MockDiscovery) DiscoverCapabilities(ctx context.Context, domain string)
 		DiscoveredAt: time.Now(),
 		TTL:          5 * time.Minute,
 	}, nil
+}
+
+// ResolveSigningKeyTXT returns mock signing-key TXT strings for
+// "<selector>.<domain>" (the caller normalizes before lookup).
+func (m *MockDiscovery) ResolveSigningKeyTXT(ctx context.Context, domain, selector string) ([]string, error) {
+	if m.error != nil {
+		return nil, m.error
+	}
+	if txts, ok := m.signingKeys[selector+"."+domain]; ok {
+		return txts, nil
+	}
+	return nil, nil
+}
+
+// SetSigningKeyTXT registers mock signing-key TXT strings for
+// "<selector>.<domain>".
+func (m *MockDiscovery) SetSigningKeyTXT(domain, selector string, txts []string) {
+	m.signingKeys[selector+"."+domain] = txts
 }
 
 func (m *MockDiscovery) SetCapabilities(domain string, cap *discovery.AMTPCapabilities) {
@@ -125,6 +145,19 @@ func NewMockStorage() *MockStorage {
 	}
 }
 
+func (m *MockStorage) StoreMessageWithStatus(ctx context.Context, message *types.Message, initialStatus *types.MessageStatus) error {
+	if m.error != nil {
+		return m.error
+	}
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.messages[message.MessageID] = message
+	if initialStatus != nil {
+		m.statuses[message.MessageID] = initialStatus
+	}
+	return nil
+}
+
 func (m *MockStorage) StoreMessage(ctx context.Context, message *types.Message) error {
 	if m.error != nil {
 		return m.error
@@ -144,7 +177,7 @@ func (m *MockStorage) GetMessage(ctx context.Context, messageID string) (*types.
 	if msg, exists := m.messages[messageID]; exists {
 		return msg, nil
 	}
-	return nil, fmt.Errorf("message not found: %s", messageID)
+	return nil, fmt.Errorf("%w: %s", storage.ErrMessageNotFound, messageID)
 }
 
 func (m *MockStorage) DeleteMessage(ctx context.Context, messageID string) error {

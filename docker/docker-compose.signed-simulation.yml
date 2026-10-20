@@ -1,0 +1,170 @@
+# Signed domain-simulation stack.
+#
+# Unlike docker-compose.domain-simulation.yml, this compose file expects the
+# helper script scripts/test-signed-simulation.sh to have generated, per
+# domain:
+#   * a signing key pair (private PEM under /tmp/amtp-signed-keys/<domain>.pem)
+#   * a dnsmasq config with both the _amtp capability records and the
+#     k1._amtpkey.<domain> signing-key records (/tmp/amtp-signed-dns/dnsmasq.conf)
+#
+# The script starts this stack, runs the signed-delivery E2E assertions, and
+# tears it down. Private keys are generated at runtime and never committed.
+services:
+  # DNS server serving AMTP capability and signing-key TXT records.
+  dns-server:
+    image: strm/dnsmasq
+    container_name: amtp-signed-dns
+    networks:
+      amtp-signed-network:
+        ipv4_address: 172.21.0.10
+    volumes:
+      - /tmp/amtp-signed-dns/dnsmasq.conf:/etc/dnsmasq.conf:ro
+    command:
+      - --no-daemon
+      - --keep-in-foreground
+      - --log-queries
+      - --server=8.8.8.8
+
+  gateway-company-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
+    container_name: gateway-signed-a
+    hostname: company-a.local
+    environment:
+      - AMTP_DOMAIN=company-a.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_LOGGING_LEVEL=info
+      - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.21.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SIGNATURE_PRIVATE_KEY_FILE=/etc/agentry/signing/private.pem
+      - AMTP_SIGNATURE_KEY_ID=k1
+      - AMTP_SIGNATURE_VERIFY_POLICY=flag
+      - AMTP_ADMIN_KEY_FILE=/etc/agentry/admin/admin.key
+      - AMTP_DNS_CACHE_TTL=2s
+    ports:
+      - "8180:8080"
+    volumes:
+      - /tmp/amtp-signed-keys/company-a.local.pem:/etc/agentry/signing/private.pem:ro
+      - /tmp/amtp-signed-keys/admin.key:/etc/agentry/admin/admin.key:ro
+    networks:
+      amtp-signed-network:
+        aliases:
+          - company-a.local
+    dns:
+      - 172.21.0.10
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Company B rejects unsigned/invalid remote senders.
+  gateway-company-b:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
+    container_name: gateway-signed-b
+    hostname: company-b.local
+    environment:
+      - AMTP_DOMAIN=company-b.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_LOGGING_LEVEL=info
+      - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.21.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SIGNATURE_PRIVATE_KEY_FILE=/etc/agentry/signing/private.pem
+      - AMTP_SIGNATURE_KEY_ID=k1
+      - AMTP_SIGNATURE_VERIFY_POLICY=reject
+      - AMTP_ADMIN_KEY_FILE=/etc/agentry/admin/admin.key
+      - AMTP_DNS_CACHE_TTL=2s
+    ports:
+      - "8181:8080"
+    volumes:
+      - /tmp/amtp-signed-keys/company-b.local.pem:/etc/agentry/signing/private.pem:ro
+      - /tmp/amtp-signed-keys/admin.key:/etc/agentry/admin/admin.key:ro
+    networks:
+      amtp-signed-network:
+        aliases:
+          - company-b.local
+    dns:
+      - 172.21.0.10
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Partner flags unsigned remote senders (accepts and records).
+  gateway-partner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
+    container_name: gateway-signed-partner
+    hostname: partner.local
+    environment:
+      - AMTP_DOMAIN=partner.local
+      - AMTP_SERVER_ADDRESS=:8080
+      - AMTP_TLS_ENABLED=false
+      - AMTP_LOGGING_LEVEL=info
+      - AMTP_LOGGING_FORMAT=text
+      - AMTP_DNS_RESOLVERS=172.21.0.10:53
+      - AMTP_DNS_ALLOW_HTTP=true
+      - AMTP_SIGNATURE_PRIVATE_KEY_FILE=/etc/agentry/signing/private.pem
+      - AMTP_SIGNATURE_KEY_ID=k1
+      - AMTP_SIGNATURE_VERIFY_POLICY=flag
+      - AMTP_ADMIN_KEY_FILE=/etc/agentry/admin/admin.key
+      - AMTP_DNS_CACHE_TTL=2s
+    ports:
+      - "8182:8080"
+    volumes:
+      - /tmp/amtp-signed-keys/partner.local.pem:/etc/agentry/signing/private.pem:ro
+      - /tmp/amtp-signed-keys/admin.key:/etc/agentry/admin/admin.key:ro
+    networks:
+      amtp-signed-network:
+        aliases:
+          - partner.local
+    dns:
+      - 172.21.0.10
+    depends_on:
+      - dns-server
+    healthcheck:
+      test: ["CMD", "/agentry", "--health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Test client for DNS queries and cross-gateway HTTP from inside the network.
+  test-client:
+    image: alpine:3.19
+    container_name: amtp-signed-test-client
+    networks:
+      - amtp-signed-network
+    dns:
+      - 172.21.0.10
+    depends_on:
+      - dns-server
+    command: sleep infinity
+
+networks:
+  amtp-signed-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24

@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -31,6 +32,7 @@ import (
 	"github.com/amtp-protocol/agentry/internal/agents"
 	"github.com/amtp-protocol/agentry/internal/discovery"
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/signing"
 	"github.com/amtp-protocol/agentry/internal/types"
 )
 
@@ -47,6 +49,7 @@ type DeliveryEngine struct {
 	agentRegistry agents.AgentRegistry // for managing local agents
 	config        DeliveryConfig
 	localDomain   string
+	signer        *signing.Signer // optional; nil sends unsigned
 }
 
 // DeliveryConfig defines delivery engine configuration
@@ -61,6 +64,14 @@ type DeliveryConfig struct {
 	MaxMessageSize int64
 	AllowHTTP      bool
 	LocalDomain    string
+}
+
+// SetSigner sets the optional domain-signing key. When set, deliveries whose
+// sender belongs to the gateway's local domain are signed; other senders are
+// sent unsigned (or refused when they already carry a signature). It must be
+// called before the engine serves traffic.
+func (de *DeliveryEngine) SetSigner(s *signing.Signer) {
+	de.signer = s
 }
 
 // DeliveryResult represents the result of a delivery attempt
@@ -168,19 +179,73 @@ func (de *DeliveryEngine) DeliverMessage(ctx context.Context, message *types.Mes
 		return result, fmt.Errorf("message too large for %s", domain)
 	}
 
-	// Attempt delivery with retries
+	// Attempt delivery with retries. The final wire bytes are prepared once
+	// inside the retry loop's helper so every retry sends the identical body
+	// and signature.
 	return de.attemptDeliveryWithRetries(ctx, message, recipient, capabilities, result)
+}
+
+// errRelayUnsupported signals a remote-origin signed message cannot be
+// forwarded by this gateway.
+var errRelayUnsupported = errors.New("relay of signed messages is unsupported; the gateway will not re-sign a foreign sender's message")
+
+// prepareDeliveryBytes builds the final single-recipient wire payload for a
+// remote delivery, signing it when the sender belongs to the local domain and
+// a signer is configured. The returned bytes are immutable across retries.
+func (de *DeliveryEngine) prepareDeliveryBytes(message *types.Message, recipient string) ([]byte, error) {
+	// A message that already carries a signature from another origin must not
+	// be re-signed by this gateway: relay is unsupported, and silently signing
+	// for a foreign sender would misattribute the message to our domain.
+	if message.Signature != nil {
+		return nil, errRelayUnsupported
+	}
+
+	body, err := signing.BuildWireBody(message, recipient)
+	if err != nil {
+		return nil, fmt.Errorf("build wire body: %w", err)
+	}
+
+	if de.signer != nil {
+		senderDomain := discovery.ExtractDomain(message.Sender)
+		if senderDomain == de.localDomain {
+			sig, err := de.signer.SignBody(body)
+			if err != nil {
+				return nil, fmt.Errorf("sign delivery body: %w", err)
+			}
+			body, err = signing.AttachWireBody(body, sig)
+			if err != nil {
+				return nil, fmt.Errorf("attach signature: %w", err)
+			}
+		}
+	}
+
+	return signing.MarshalWireBody(body)
 }
 
 // attemptDeliveryWithRetries attempts delivery with retry logic
 func (de *DeliveryEngine) attemptDeliveryWithRetries(ctx context.Context, message *types.Message, recipient string, capabilities *discovery.AMTPCapabilities, result *DeliveryResult) (*DeliveryResult, error) {
 	var lastErr error
 
+	// Build the immutable delivery bytes once: retries must send the exact
+	// same body and signature.
+	payloadBytes, err := de.prepareDeliveryBytes(message, recipient)
+	if err != nil {
+		result.Status = types.StatusFailed
+		if errors.Is(err, errRelayUnsupported) {
+			result.ErrorCode = "RELAY_UNSUPPORTED"
+			result.ErrorMessage = err.Error()
+		} else {
+			result.ErrorCode = "PAYLOAD_PREPARE_FAILED"
+			result.ErrorMessage = fmt.Sprintf("failed to prepare delivery payload: %v", err)
+		}
+		return result, err
+	}
+
 	for attempt := 1; attempt <= de.config.MaxRetries; attempt++ {
 		result.Attempts = attempt
 
 		// Attempt delivery
-		deliveryErr := de.attemptSingleDelivery(ctx, message, recipient, capabilities, result)
+		deliveryErr := de.attemptSingleDelivery(ctx, payloadBytes, recipient, capabilities, result)
 		if deliveryErr == nil {
 			// Success
 			result.Status = types.StatusDelivered
@@ -228,35 +293,9 @@ func (de *DeliveryEngine) attemptDeliveryWithRetries(ctx context.Context, messag
 	return result, lastErr
 }
 
-// attemptSingleDelivery attempts a single delivery
-func (de *DeliveryEngine) attemptSingleDelivery(ctx context.Context, message *types.Message, recipient string, capabilities *discovery.AMTPCapabilities, result *DeliveryResult) error {
-	// Prepare delivery payload
-	deliveryPayload := map[string]interface{}{
-		"version":         message.Version,
-		"message_id":      message.MessageID,
-		"idempotency_key": message.IdempotencyKey,
-		"timestamp":       message.Timestamp.Format(time.RFC3339),
-		"sender":          message.Sender,
-		"recipients":      []string{recipient}, // Single recipient for this delivery
-		"subject":         message.Subject,
-		"schema":          message.Schema,
-		"coordination":    message.Coordination,
-		"headers":         message.Headers,
-		"payload":         message.Payload,
-		"attachments":     message.Attachments,
-		"signature":       message.Signature,
-		"in_reply_to":     message.InReplyTo,
-		"response_type":   message.ResponseType,
-	}
-
-	// Marshal payload
-	payloadBytes, err := json.Marshal(deliveryPayload)
-	if err != nil {
-		result.ErrorCode = "PAYLOAD_MARSHAL_FAILED"
-		result.ErrorMessage = fmt.Sprintf("failed to marshal payload: %v", err)
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
+// attemptSingleDelivery attempts a single delivery of the prepared,
+// immutable payload bytes.
+func (de *DeliveryEngine) attemptSingleDelivery(ctx context.Context, payloadBytes []byte, recipient string, capabilities *discovery.AMTPCapabilities, result *DeliveryResult) error {
 	// Create HTTP request
 	gatewayURL := strings.TrimSuffix(capabilities.Gateway, "/") + "/v1/messages"
 	req, err := http.NewRequestWithContext(ctx, "POST", gatewayURL, bytes.NewReader(payloadBytes))

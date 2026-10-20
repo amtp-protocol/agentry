@@ -36,6 +36,10 @@ var _ MessageProcessorService = (*MessageProcessor)(nil)
 // DiscoveryService defines the interface for AMTP discovery
 type DiscoveryService interface {
 	DiscoverCapabilities(ctx context.Context, domain string) (*discovery.AMTPCapabilities, error)
+	// ResolveSigningKeyTXT returns the TXT strings published at
+	// <selector>._amtpkey.<domain>, with caching and singleflight
+	// collapsing. It is the DNS half of domain-signature verification.
+	ResolveSigningKeyTXT(ctx context.Context, domain, selector string) ([]string, error)
 }
 
 // DeliveryService defines the interface for message delivery

@@ -21,6 +21,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: gateway-company-a
     hostname: company-a.local
     environment:
@@ -34,10 +36,12 @@ services:
       - AMTP_DNS_ALLOW_HTTP=true
       - AMTP_SCHEMA_REGISTRY_TYPE=local
       - AMTP_SCHEMA_REGISTRY_PATH=/schemas
+      - AMTP_ADMIN_KEY_FILE=/etc/agentry/admin/admin.key
     ports:
-      - "8080:8080"
+      - "${AMTP_COMPANY_A_PORT:-8080}:8080"
     volumes:
       - /tmp/amtp-schemas:/schemas
+      - /tmp/amtp-keys/admin.key:/etc/agentry/admin/admin.key:ro
     networks:
       amtp-network:
         aliases:
@@ -59,6 +63,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: gateway-company-b
     hostname: company-b.local
     environment:
@@ -72,10 +78,12 @@ services:
       - AMTP_DNS_ALLOW_HTTP=true
       - AMTP_SCHEMA_REGISTRY_TYPE=local
       - AMTP_SCHEMA_REGISTRY_PATH=/schemas
+      - AMTP_ADMIN_KEY_FILE=/etc/agentry/admin/admin.key
     ports:
-      - "8081:8080"
+      - "${AMTP_COMPANY_B_PORT:-8081}:8080"
     volumes:
       - /tmp/amtp-schemas:/schemas
+      - /tmp/amtp-keys/admin.key:/etc/agentry/admin/admin.key:ro
     networks:
       amtp-network:
         aliases:
@@ -97,6 +105,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     container_name: gateway-partner
     hostname: partner.local
     environment:
@@ -110,10 +120,12 @@ services:
       - AMTP_DNS_ALLOW_HTTP=true
       - AMTP_SCHEMA_REGISTRY_TYPE=local
       - AMTP_SCHEMA_REGISTRY_PATH=/schemas
+      - AMTP_ADMIN_KEY_FILE=/etc/agentry/admin/admin.key
     ports:
-      - "8082:8080"
+      - "${AMTP_PARTNER_PORT:-8082}:8080"
     volumes:
       - /tmp/amtp-schemas:/schemas
+      - /tmp/amtp-keys/admin.key:/etc/agentry/admin/admin.key:ro
     networks:
       amtp-network:
         aliases:
@@ -130,15 +142,17 @@ services:
       retries: 3
       start_period: 10s
 
-  # Test client container for inter-gateway communication
+  # Test client container for inter-gateway communication. curlimages/curl
+  # ships curl preinstalled, so the stack does not depend on reaching the
+  # Alpine package CDN at startup.
   test-client:
-    image: alpine:3.19
+    image: curlimages/curl:latest
     container_name: amtp-test-client
     networks:
       - amtp-network
     dns:
       - 172.20.0.10  # Use our custom DNS server
-    command: ["sh", "-c", "apk add --no-cache curl bind-tools && sleep 3600"]
+    command: ["sleep", "infinity"]
     depends_on:
       - dns-server
       - gateway-company-a

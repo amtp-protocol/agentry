@@ -3,8 +3,10 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        GOPROXY: ${GOPROXY:-direct}
     ports:
-      - "8080:8080"
+      - "${AMTP_DBTEST_GATEWAY_PORT:-8080}:8080"
     environment:
       - AMTP_TLS_ENABLED=false
       - AMTP_SERVER_ADDRESS=:8080
@@ -18,6 +20,9 @@ services:
       - AMTP_STORAGE_DATABASE_MAX_CONNS=100
       - AMTP_STORAGE_DATABASE_MAX_IDLE_TIME=300
       - AMTP_SCHEMA_REGISTRY_TYPE=database
+      - AMTP_ADMIN_KEY_FILE=/etc/agentry/admin/admin.key
+    volumes:
+      - /tmp/amtp-keys/admin.key:/etc/agentry/admin/admin.key:ro
     healthcheck:
       test: ["CMD", "/agentry", "--health-check"]
       interval: 30s
@@ -38,7 +43,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: agentry
     ports:
-      - "5432:5432"
+      - "${AMTP_DBTEST_PG_PORT:-5432}:5432"
     volumes:
       - ../deployment/db:/docker-entrypoint-initdb.d
     healthcheck:
@@ -49,9 +54,9 @@ services:
       start_period: 30s
 
   test-client:
-    image: alpine:3.19
+    image: curlimages/curl:latest
     container_name: amtp-test-client
-    command: ["sh", "-c", "apk add --no-cache curl bind-tools jq && sleep 3600"]
+    command: ["sleep", "3600"]
     depends_on:
       - agentry
       - postgres

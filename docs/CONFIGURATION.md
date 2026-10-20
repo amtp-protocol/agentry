@@ -114,6 +114,23 @@ If no `-config` flag is provided, the gateway uses default values combined with 
 |----------|---------|-------------|
 | `AMTP_METRICS_ENABLED` | `false` | Enable JSON metrics collection and `/metrics` endpoint |
 
+### Domain Signatures
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AMTP_SIGNATURE_PRIVATE_KEY_FILE` | - | Path to the PEM domain-signing private key. Empty disables outbound signing. |
+| `AMTP_SIGNATURE_KEY_ID` | `k1` | Key selector (DNS label) used as the signature `keyid` |
+| `AMTP_SIGNATURE_VERIFY_POLICY` | `flag` | Policy for remote messages without a valid signature: `accept`, `flag`, or `reject` |
+
+Generate a key pair and print the DNS TXT record to publish:
+
+```bash
+agentry-admin keygen --domain example.com --key-id k1 --out private.pem
+# Owner: k1._amtpkey.example.com.
+# TXT: v=amtpkey1;alg=ES256;p=...
+```
+
+The private key file is read once at startup; a missing or invalid key fails startup when configured. See [API.md](API.md) for the verification semantics of each policy.
+
 ### Schema
 | Variable | Default | Description |
 |----------|---------|-------------|

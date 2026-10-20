@@ -112,6 +112,14 @@ Whether an admin key file should be mounted (existing secret or inline key provi
 {{- end }}
 
 {{/*
+Whether a signing private key should be mounted (existing secret only; the
+chart never generates or inlines private key material)
+*/}}
+{{- define "agentry.signingKeyEnabled" -}}
+{{- if .Values.signature.privateKeyExistingSecret }}true{{- end }}
+{{- end }}
+
+{{/*
 Return the environment variable style name for container
 */}}
 {{- define "agentry.envVarPrefix" -}}

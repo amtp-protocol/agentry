@@ -55,6 +55,29 @@ dns:
 
 ## Security Design
 
+### Local Sender Authentication
+
+`POST /v1/messages` from a **local-domain sender** (same domain as the
+gateway) requires a Bearer agent API key — the key must belong to the agent
+whose address matches the `sender` field:
+
+```bash
+# Register the sender agent first (returns its api_key)
+curl -H "X-Admin-Key: <admin-key>" -X POST http://localhost:8080/v1/admin/agents \
+  -H "Content-Type: application/json" \
+  -d '{"address":"test","delivery_mode":"pull"}'
+
+# Then send with the agent's API key
+curl -X POST http://localhost:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <test-agent-api-key>" \
+  -d '{"sender":"test@localhost","recipients":["user@localhost"]}'
+```
+
+Remote senders (foreign domains) are authenticated by their **domain
+signature** instead — see `docs/API.md` for the signature format and the
+`signature.verify_policy` settings (`accept` / `flag` / `reject`).
+
 ### HTTP Gateway Validation
 
 By default, AMTP **requires HTTPS** for all gateway URLs to ensure security:
@@ -63,6 +86,7 @@ By default, AMTP **requires HTTPS** for all gateway URLs to ensure security:
 # Default behavior (AMTP_DNS_ALLOW_HTTP=false)
 # ❌ HTTP gateways are rejected
 curl -X POST http://localhost:8080/v1/messages \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{"sender":"test@localhost","recipients":["user@localhost"]}'
 # Result: "gateway URL must use HTTPS"
 ```
@@ -72,10 +96,11 @@ curl -X POST http://localhost:8080/v1/messages \
 When explicitly enabled, HTTP is allowed for local testing:
 
 ```bash
-# Development mode (AMTP_DNS_ALLOW_HTTP=true)  
+# Development mode (AMTP_DNS_ALLOW_HTTP=true)
 # ✅ HTTP gateways are accepted
 export AMTP_DNS_ALLOW_HTTP=true
 curl -X POST http://localhost:8080/v1/messages \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{"sender":"test@localhost","recipients":["user@localhost"]}'
 # Result: Message processed successfully
 ```
@@ -111,10 +136,11 @@ export AMTP_DNS_MOCK_RECORDS='{
 
 ## Message Query Authentication
 
-`POST /v1/messages` is **public** by design (AMTP is a federated protocol
-where remote senders have no local key). The message **query** endpoints —
-`GET /v1/messages`, `GET /v1/messages/{id}` and `GET /v1/messages/{id}/status`
-— require one of:
+`POST /v1/messages` from local senders requires a **Bearer agent API key**
+(see [Local Sender Authentication](#local-sender-authentication) above);
+remote senders are authenticated by their domain signature. The message
+**query** endpoints — `GET /v1/messages`, `GET /v1/messages/{id}` and
+`GET /v1/messages/{id}/status` — require one of:
 
 - an **agent API key** (`Authorization: Bearer <agent-api-key>`): the caller
   is scoped to messages the agent sent or received; or
@@ -161,6 +187,7 @@ AMTP_DNS_MOCK_MODE=true AMTP_TLS_ENABLED=false ./build/agentry
 # This should fail with "gateway URL must use HTTPS"
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{
     "sender": "test@localhost",
     "recipients": ["user@localhost"],
@@ -180,6 +207,7 @@ AMTP_DNS_MOCK_MODE=true AMTP_DNS_ALLOW_HTTP=true AMTP_TLS_ENABLED=false ./build/
 # This should succeed
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{
     "sender": "test@localhost",
     "recipients": ["user@localhost"],
@@ -201,10 +229,12 @@ export AMTP_DNS_ALLOW_HTTP=true
 
 # Test HTTP gateway (works)
 curl -X POST http://localhost:8080/v1/messages \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{"sender":"test@localhost","recipients":["user@http.local"],"subject":"HTTP Test"}'
 
-# Test HTTPS gateway (also works)  
+# Test HTTPS gateway (also works)
 curl -X POST http://localhost:8080/v1/messages \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{"sender":"test@localhost","recipients":["user@https.local"],"subject":"HTTPS Test"}'
 ```
 
@@ -218,6 +248,7 @@ agent does not support the message schema is rejected.
 # Test schema support patterns
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{
     "sender": "test@localhost",
     "recipients": ["user@localhost"],
@@ -290,6 +321,7 @@ curl http://localhost:8080/v1/capabilities/localhost
 # 3. Test HTTP validation
 curl -X POST http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <agent-api-key>" \
   -d '{"sender":"test@localhost","recipients":["user@localhost"],"subject":"Debug"}'
 
 # 4. Check environment variables
@@ -342,7 +374,7 @@ dns:
 
 #### ✅ Good - Production
 ```yaml
-# config.yaml - production configuration  
+# config.yaml - production configuration
 dns:
   mock_mode: false   # Use real DNS
   allow_http: false  # Require HTTPS (default)

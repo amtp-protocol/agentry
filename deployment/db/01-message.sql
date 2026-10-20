@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS message_statuses (
     next_retry TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    delivered_at TIMESTAMPTZ
+    delivered_at TIMESTAMPTZ,
+    sender_verification JSONB
 );
 
 -- Create recipient status table
@@ -83,6 +84,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_in_reply_to ON messages(in_reply_to);
 -- Upgrade path for databases created before workflow_id existed
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS workflow_id UUID;
 CREATE INDEX IF NOT EXISTS idx_messages_workflow_id ON messages(workflow_id);
+
+-- Upgrade path for databases created before sender verification existed
+ALTER TABLE message_statuses ADD COLUMN IF NOT EXISTS sender_verification JSONB;
 
 -- Message statuses table indexes
 CREATE INDEX IF NOT EXISTS idx_message_statuses_message_id ON message_statuses(message_id);

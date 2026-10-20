@@ -31,19 +31,30 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/amtp-protocol/agentry/internal/schema"
+	"github.com/amtp-protocol/agentry/internal/signing"
 )
 
 // Config holds the application configuration
 type Config struct {
-	Server  ServerConfig          `yaml:"server"`
-	TLS     TLSConfig             `yaml:"tls"`
-	DNS     DNSConfig             `yaml:"dns"`
-	Message MessageConfig         `yaml:"message"`
-	Auth    AuthConfig            `yaml:"auth"`
-	Logging LoggingConfig         `yaml:"logging"`
-	Storage StorageConfig         `yaml:"storage,omitempty"`
-	Metrics *MetricsConfig        `yaml:"metrics,omitempty"`
-	Schema  *schema.ManagerConfig `yaml:"schema,omitempty"`
+	Server    ServerConfig          `yaml:"server"`
+	TLS       TLSConfig             `yaml:"tls"`
+	DNS       DNSConfig             `yaml:"dns"`
+	Message   MessageConfig         `yaml:"message"`
+	Auth      AuthConfig            `yaml:"auth"`
+	Logging   LoggingConfig         `yaml:"logging"`
+	Storage   StorageConfig         `yaml:"storage,omitempty"`
+	Metrics   *MetricsConfig        `yaml:"metrics,omitempty"`
+	Schema    *schema.ManagerConfig `yaml:"schema,omitempty"`
+	Signature SignatureConfig       `yaml:"signature"`
+}
+
+// SignatureConfig holds domain-signature configuration. The private key
+// file is only referenced here; reading and parsing the PEM happens once in
+// server startup so a broken key fails fast and is not re-read per request.
+type SignatureConfig struct {
+	PrivateKeyFile string `yaml:"private_key_file"`
+	KeyID          string `yaml:"key_id"`
+	VerifyPolicy   string `yaml:"verify_policy"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -183,6 +194,11 @@ func getDefaultConfig() *Config {
 		Storage: StorageConfig{
 			Type: "memory",
 		},
+		Signature: SignatureConfig{
+			PrivateKeyFile: "",
+			KeyID:          "k1",
+			VerifyPolicy:   "flag",
+		},
 	}
 }
 
@@ -321,6 +337,17 @@ func loadFromEnv(cfg *Config) {
 
 	// Schema configuration
 	loadSchemaFromEnv(cfg)
+
+	// Signature configuration
+	if val := getEnv("AMTP_SIGNATURE_PRIVATE_KEY_FILE", ""); val != "" {
+		cfg.Signature.PrivateKeyFile = val
+	}
+	if val := getEnv("AMTP_SIGNATURE_KEY_ID", ""); val != "" {
+		cfg.Signature.KeyID = val
+	}
+	if val := getEnv("AMTP_SIGNATURE_VERIFY_POLICY", ""); val != "" {
+		cfg.Signature.VerifyPolicy = val
+	}
 }
 
 // validate validates the configuration
@@ -352,6 +379,39 @@ func (c *Config) validate() error {
 		}
 	}
 
+	// Validate signature configuration
+	if err := c.validateSignature(); err != nil {
+		return fmt.Errorf("invalid signature configuration: %w", err)
+	}
+
+	return nil
+}
+
+// validVerifyPolicies lists the accepted remote-signature policies.
+var validVerifyPolicies = map[string]bool{
+	"accept": true,
+	"flag":   true,
+	"reject": true,
+}
+
+// validateSignature validates the signature configuration. The private key
+// file itself is not read here; server startup loads and parses it once so a
+// broken key fails fast at boot.
+func (c *Config) validateSignature() error {
+	// Apply defaults for fields left empty so partially-constructed configs
+	// (e.g. YAML files without a signature block) validate consistently.
+	if c.Signature.VerifyPolicy == "" {
+		c.Signature.VerifyPolicy = "flag"
+	}
+	if c.Signature.KeyID == "" {
+		c.Signature.KeyID = "k1"
+	}
+	if !validVerifyPolicies[c.Signature.VerifyPolicy] {
+		return fmt.Errorf("verify_policy must be one of accept, flag, reject: %s", c.Signature.VerifyPolicy)
+	}
+	if err := signing.ValidateSelector(c.Signature.KeyID); err != nil {
+		return fmt.Errorf("key_id: %w", err)
+	}
 	return nil
 }
 

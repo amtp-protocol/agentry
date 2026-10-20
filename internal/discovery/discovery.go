@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/amtp-protocol/agentry/internal/signing"
 )
 
 // AMTPCapabilities represents AMTP capabilities discovered via DNS or HTTP
@@ -67,6 +69,10 @@ type Discovery struct {
 	cacheMutex sync.RWMutex
 	timeout    time.Duration
 	defaultTTL time.Duration
+
+	// signingKeys caches <selector>._amtpkey.<domain> TXT lookups for
+	// domain-signature verification.
+	signingKeys *SigningKeyCache
 }
 
 type cacheEntry struct {
@@ -95,12 +101,23 @@ func NewDiscovery(timeout, defaultTTL time.Duration, resolvers []string) *Discov
 		resolver = net.DefaultResolver
 	}
 
-	return &Discovery{
+	d := &Discovery{
 		resolver:   resolver,
 		cache:      make(map[string]*cacheEntry),
 		timeout:    timeout,
 		defaultTTL: defaultTTL,
 	}
+	d.signingKeys = NewSigningKeyCache(d, defaultTTL)
+	return d
+}
+
+// ResolveSigningKeyTXT returns the TXT strings for
+// <selector>._amtpkey.<domain> with caching (positive: configured TTL;
+// negative: min(TTL, 30s)) and singleflight collapsing of concurrent
+// lookups. It implements processing.DiscoveryService and, via the
+// signing.KeyResolver shape, feeds signature verification.
+func (d *Discovery) ResolveSigningKeyTXT(ctx context.Context, domain, selector string) ([]string, error) {
+	return d.signingKeys.ResolveKeyTXT(ctx, domain, selector)
 }
 
 // MockDiscovery provides a mock DNS discovery service for development/testing
@@ -109,15 +126,64 @@ type MockDiscovery struct {
 	cache      map[string]*cacheEntry
 	cacheMutex sync.RWMutex
 	defaultTTL time.Duration
+
+	// signingKeyRecords holds mock <selector>._amtpkey.<domain> TXT values
+	// for the domain-signature verification path.
+	signingKeyRecords map[string]string
+	mockMutex         sync.RWMutex
 }
 
 // NewMockDiscovery creates a new mock discovery service
 func NewMockDiscovery(mockRecords map[string]string, defaultTTL time.Duration) *MockDiscovery {
 	return &MockDiscovery{
-		records:    mockRecords,
-		cache:      make(map[string]*cacheEntry),
-		defaultTTL: defaultTTL,
+		records:           mockRecords,
+		cache:             make(map[string]*cacheEntry),
+		defaultTTL:        defaultTTL,
+		signingKeyRecords: make(map[string]string),
 	}
+}
+
+// SetSigningKeyRecord registers a mock signing-key TXT record for owner
+// (either "<selector>._amtpkey.<domain>" or "<selector>.<domain>").
+func (m *MockDiscovery) SetSigningKeyRecord(owner, txt string) {
+	m.mockMutex.Lock()
+	defer m.mockMutex.Unlock()
+	m.signingKeyRecords[owner] = txt
+}
+
+// SetCapabilitiesRecord registers a mock AMTP capabilities TXT record for
+// the domain, so tests can point a gateway's delivery engine at a peer that
+// did not exist when the engine was constructed.
+func (m *MockDiscovery) SetCapabilitiesRecord(domain, txt string) {
+	m.mockMutex.Lock()
+	defer m.mockMutex.Unlock()
+	m.records[domain] = txt
+	m.cacheMutex.Lock()
+	delete(m.cache, domain)
+	m.cacheMutex.Unlock()
+}
+
+// RemoveSigningKeyRecord deletes a mock signing-key TXT record so tests can
+// simulate a domain whose key cannot be resolved.
+func (m *MockDiscovery) RemoveSigningKeyRecord(owner string) {
+	m.mockMutex.Lock()
+	defer m.mockMutex.Unlock()
+	delete(m.signingKeyRecords, owner)
+}
+
+// ResolveSigningKeyTXT returns the mock TXT strings for
+// <selector>._amtpkey.<domain>. Unlike the real Discovery it does not
+// cache (mock records are set up-front), but it applies the same
+// normalization and selector validation so tests exercise the same paths.
+func (m *MockDiscovery) ResolveSigningKeyTXT(ctx context.Context, domain, selector string) ([]string, error) {
+	normalized, err := signing.NormalizeDomain(domain)
+	if err != nil {
+		return nil, err
+	}
+	if err := signing.ValidateSelector(selector); err != nil {
+		return nil, err
+	}
+	return m.lookupSigningKeyTXT(ctx, selector+"."+signingKeyPrefix+"."+normalized)
 }
 
 // DiscoverCapabilities discovers AMTP capabilities using mock records
@@ -127,8 +193,12 @@ func (m *MockDiscovery) DiscoverCapabilities(ctx context.Context, domain string)
 		return cached, nil
 	}
 
-	// Check mock records
-	if record, exists := m.records[domain]; exists {
+	// Check mock records (read under the mock mutex: tests may add records
+	// after construction via SetCapabilitiesRecord)
+	m.mockMutex.RLock()
+	record, exists := m.records[domain]
+	m.mockMutex.RUnlock()
+	if exists {
 		if capabilities := m.parseAMTPRecord(record); capabilities != nil {
 			capabilities.DiscoveredAt = time.Now()
 			capabilities.TTL = m.defaultTTL

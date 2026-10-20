@@ -1911,3 +1911,128 @@ func TestMemoryStorage_ConcurrentReadDuringUpdate(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func atomicTestMessage(id string) *types.Message {
+	return &types.Message{
+		Version:    "1.0",
+		MessageID:  id,
+		Sender:     "sender@remote.test",
+		Recipients: []string{"a@local.test", "b@local.test"},
+		Payload:    []byte(`{"k":"v"}`),
+	}
+}
+
+func atomicTestStatus(id string, result string) *types.MessageStatus {
+	return &types.MessageStatus{
+		MessageID: id,
+		Status:    types.StatusQueued,
+		Recipients: []types.RecipientStatus{
+			{Address: "a@local.test", Status: types.StatusQueued},
+			{Address: "b@local.test", Status: types.StatusQueued},
+		},
+		SenderVerification: &types.SenderVerification{
+			Result: result,
+			Domain: "remote.test",
+			Policy: "flag",
+		},
+	}
+}
+
+// TestMemoryStorage_StoreMessageWithStatus verifies the atomic write stores
+// both the message and its initial status (including sender verification)
+// in one call.
+func TestMemoryStorage_StoreMessageWithStatus(t *testing.T) {
+	ms := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	msg := atomicTestMessage("01936b1e-4000-7000-8000-000000000001")
+	status := atomicTestStatus("01936b1e-4000-7000-8000-000000000001", "verified")
+
+	if err := ms.StoreMessageWithStatus(ctx, msg, status); err != nil {
+		t.Fatalf("StoreMessageWithStatus: %v", err)
+	}
+
+	got, err := ms.GetMessage(ctx, msg.MessageID)
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.MessageID != msg.MessageID {
+		t.Errorf("stored message id = %s, want %s", got.MessageID, msg.MessageID)
+	}
+
+	st, err := ms.GetStatus(ctx, msg.MessageID)
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if st.Status != types.StatusQueued {
+		t.Errorf("status = %s, want queued", st.Status)
+	}
+	if st.SenderVerification == nil {
+		t.Fatal("sender_verification not stored")
+	}
+	if st.SenderVerification.Result != "verified" {
+		t.Errorf("verification result = %s, want verified", st.SenderVerification.Result)
+	}
+	if len(st.Recipients) != 2 {
+		t.Errorf("recipient statuses = %d, want 2", len(st.Recipients))
+	}
+}
+
+// TestMemoryStorage_StoreMessageWithStatus_Atomicity verifies a status write
+// failure (empty message ID) leaves no message behind.
+func TestMemoryStorage_StoreMessageWithStatus_Atomicity(t *testing.T) {
+	ms := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	msg := atomicTestMessage("01936b1e-4000-7000-8000-000000000002")
+	bad := atomicTestStatus("", "verified") // empty MessageID must fail
+
+	if err := ms.StoreMessageWithStatus(ctx, msg, bad); err == nil {
+		t.Fatal("expected error for status with empty message ID")
+	}
+
+	if _, err := ms.GetMessage(ctx, msg.MessageID); err == nil {
+		t.Fatal("message must not be stored when the status write fails")
+	}
+}
+
+// TestMemoryStorage_StoreMessageWithStatus_CapacityExceeded verifies the
+// capacity check applies to the atomic path too.
+func TestMemoryStorage_StoreMessageWithStatus_CapacityExceeded(t *testing.T) {
+	ms := NewMemoryStorage(MemoryStorageConfig{MaxMessages: 1})
+	ctx := context.Background()
+
+	id1 := "01936b1e-4000-7000-8000-000000000003"
+	id2 := "01936b1e-4000-7000-8000-000000000004"
+	if err := ms.StoreMessageWithStatus(ctx, atomicTestMessage(id1), atomicTestStatus(id1, "unsigned")); err != nil {
+		t.Fatalf("first store: %v", err)
+	}
+	if err := ms.StoreMessageWithStatus(ctx, atomicTestMessage(id2), atomicTestStatus(id2, "unsigned")); err == nil {
+		t.Fatal("expected capacity error on second store")
+	}
+}
+
+// TestMemoryStorage_SenderVerificationClone verifies the stored status is a
+// deep copy: mutating the caller's SenderVerification after the store must
+// not change what GetStatus returns.
+func TestMemoryStorage_SenderVerificationClone(t *testing.T) {
+	ms := NewMemoryStorage(MemoryStorageConfig{})
+	ctx := context.Background()
+
+	id := "01936b1e-4000-7000-8000-000000000005"
+	msg := atomicTestMessage(id)
+	status := atomicTestStatus(id, "verified")
+
+	if err := ms.StoreMessageWithStatus(ctx, msg, status); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	status.SenderVerification.Result = "tampered"
+	st, err := ms.GetStatus(ctx, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if st.SenderVerification.Result != "verified" {
+		t.Errorf("stored verification mutated: %s", st.SenderVerification.Result)
+	}
+}

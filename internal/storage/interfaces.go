@@ -57,6 +57,11 @@ type Storage interface {
 
 	// Message operations
 	StoreMessage(ctx context.Context, message *types.Message) error
+	// StoreMessageWithStatus atomically stores a message together with its
+	// initial status (including sender verification). Production ingest uses
+	// this so a crash between the two writes can never leave a message
+	// without a status row.
+	StoreMessageWithStatus(ctx context.Context, message *types.Message, initialStatus *types.MessageStatus) error
 	GetMessage(ctx context.Context, messageID string) (*types.Message, error)
 	DeleteMessage(ctx context.Context, messageID string) error
 	ListMessages(ctx context.Context, filter MessageFilter) ([]*types.Message, error)
