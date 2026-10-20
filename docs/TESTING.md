@@ -198,7 +198,7 @@ tests := []struct {
     expectedStatus int
     expectedCode   string
 }{
-    {"Invalid JSON", "invalid json", 400, "INVALID_REQUEST_FORMAT"},
+    {"Invalid JSON", "invalid json", 400, "INVALID_MESSAGE_FORMAT"},
     {"Missing Sender", request, 400, "VALIDATION_FAILED"},
 }
 ```

@@ -117,7 +117,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	limited := io.LimitReader(c.Request.Body, maxBody+1)
 	rawBody, err := io.ReadAll(limited)
 	if err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_MESSAGE_FORMAT",
 			"Failed to read request body", map[string]interface{}{
 				"parse_error": err.Error(),
 			})
@@ -136,7 +136,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	// (RFC 8785 canonicalization) depends on, so it applies to every
 	// request, signed or not.
 	if _, err := signing.DecodeBody(rawBody); err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_MESSAGE_FORMAT",
 			"Invalid request format", map[string]interface{}{
 				"parse_error": err.Error(),
 			})
@@ -145,7 +145,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 
 	// Bind the raw bytes into the request struct.
 	if err := json.Unmarshal(rawBody, &req); err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_MESSAGE_FORMAT",
 			"Invalid request format", map[string]interface{}{
 				"parse_error": err.Error(),
 			})

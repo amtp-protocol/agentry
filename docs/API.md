@@ -85,13 +85,13 @@ Remote senders additionally attach a domain signature:
    name, no insignificant whitespace, UTF-8. The request body must be a
    single JSON object with no duplicate members. No two members of any object
    may differ only in case — such a body is refused
-   `400 INVALID_REQUEST_FORMAT`, because implementations bind members to
+   `400 INVALID_MESSAGE_FORMAT`, because implementations bind members to
    fields case-insensitively while a verifier reads exact names, which would
    let one member be verified and another stored. Every number must be
    exactly representable as an IEEE 754 double (for example, integers up to
    2^53): JCS rounds numbers to doubles, so a value such as
    `9007199254740993` would be signed as `9007199254740992`. Such numbers are
-   refused `400 INVALID_REQUEST_FORMAT`; send them as strings.
+   refused `400 INVALID_MESSAGE_FORMAT`; send them as strings.
 2. Hash the canonical bytes with SHA-256.
 3. Sign the digest with the domain's private key — `ES256` (P-256, P1363
    `r||s` signature) or `RS256` (RSA ≥ 2048 bits, PKCS#1 v1.5).

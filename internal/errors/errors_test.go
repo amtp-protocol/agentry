@@ -227,6 +227,7 @@ func TestGetHTTPStatus(t *testing.T) {
 		expectedStatus int
 	}{
 		{ErrInvalidRequestFormat, 400},
+		{ErrInvalidMessageFormat, 400},
 		{ErrValidationFailed, 400},
 		{ErrMessageValidationFailed, 400},
 		{ErrInvalidMessageID, 400},

@@ -956,7 +956,7 @@ func TestIntegration_ErrorHandling(t *testing.T) {
 			name:           "Invalid JSON",
 			request:        "invalid json",
 			expectedStatus: http.StatusBadRequest,
-			expectedCode:   "INVALID_REQUEST_FORMAT",
+			expectedCode:   "INVALID_MESSAGE_FORMAT",
 		},
 		{
 			name: "Missing Sender",

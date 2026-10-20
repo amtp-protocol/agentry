@@ -619,8 +619,8 @@ func TestHandleSendMessage_InvalidJSON(t *testing.T) {
 		t.Fatalf("Failed to unmarshal error response: %v", err)
 	}
 
-	if errorResponse.Error.Code != "INVALID_REQUEST_FORMAT" {
-		t.Errorf("Expected error code 'INVALID_REQUEST_FORMAT', got %s", errorResponse.Error.Code)
+	if errorResponse.Error.Code != "INVALID_MESSAGE_FORMAT" {
+		t.Errorf("Expected error code 'INVALID_MESSAGE_FORMAT', got %s", errorResponse.Error.Code)
 	}
 }
 
