@@ -2178,12 +2178,10 @@ func TestTwoGatewaySignedDelivery(t *testing.T) {
 		t.Fatalf("send: expected 200/202, got %d body=%s", resp.StatusCode, string(sendRespBytes))
 	}
 
-	// The delivery is asynchronous; poll B for the message status until it
-	// appears (or fail after a deadline).
+	// The delivery is asynchronous; poll B until the message appears (or
+	// fail after a deadline).
 	deadline := time.Now().Add(5 * time.Second)
-	var statusResp struct {
-		SenderVerification *types.SenderVerification `json:"sender_verification"`
-	}
+	var verification *types.SenderVerification
 	for {
 		stReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages?sender=sender@a.test&limit=5", nil)
 		stReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
@@ -2193,7 +2191,7 @@ func TestTwoGatewaySignedDelivery(t *testing.T) {
 		}
 		var list struct {
 			Messages []struct {
-				MessageID string `json:"message_id"`
+				SenderVerification *types.SenderVerification `json:"sender_verification"`
 			} `json:"messages"`
 		}
 		bodyBytes, _ := io.ReadAll(stResp.Body)
@@ -2203,20 +2201,9 @@ func TestTwoGatewaySignedDelivery(t *testing.T) {
 		}
 		json.Unmarshal(bodyBytes, &list)
 
-		if len(list.Messages) > 0 {
-			// Fetch the status of the delivered message.
-			id := list.Messages[0].MessageID
-			sReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages/"+id+"/status", nil)
-			sReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
-			sResp, err := http.DefaultClient.Do(sReq)
-			if err != nil {
-				t.Fatalf("get status: %v", err)
-			}
-			json.NewDecoder(sResp.Body).Decode(&statusResp)
-			sResp.Body.Close()
-			if statusResp.SenderVerification != nil {
-				break
-			}
+		if len(list.Messages) > 0 && list.Messages[0].SenderVerification != nil {
+			verification = list.Messages[0].SenderVerification
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("message with sender_verification never appeared at gateway B")
@@ -2224,11 +2211,11 @@ func TestTwoGatewaySignedDelivery(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if statusResp.SenderVerification.Result != "verified" {
-		t.Errorf("expected result verified, got %q", statusResp.SenderVerification.Result)
+	if verification.Result != "verified" {
+		t.Errorf("expected result verified, got %q", verification.Result)
 	}
-	if statusResp.SenderVerification.Domain != "a.test" {
-		t.Errorf("expected domain a.test, got %q", statusResp.SenderVerification.Domain)
+	if verification.Domain != "a.test" {
+		t.Errorf("expected domain a.test, got %q", verification.Domain)
 	}
 }
 
@@ -2468,21 +2455,19 @@ func TestTwoGatewaySignedWorkflowReplyAdvancesState(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	stReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages/"+dispatchedID+"/status", nil)
-	stReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
-	stResp, err := http.DefaultClient.Do(stReq)
+	msgReq, _ := http.NewRequest(http.MethodGet, env.b.http.URL+"/v1/messages/"+dispatchedID, nil)
+	msgReq.Header.Set("Authorization", "Bearer "+env.b.receiverKey)
+	msgResp, err := http.DefaultClient.Do(msgReq)
 	if err != nil {
-		t.Fatalf("get status at B: %v", err)
+		t.Fatalf("get message at B: %v", err)
 	}
-	defer stResp.Body.Close()
-	var statusResp struct {
-		SenderVerification *types.SenderVerification `json:"sender_verification"`
-	}
-	json.NewDecoder(stResp.Body).Decode(&statusResp)
-	if statusResp.SenderVerification == nil || statusResp.SenderVerification.Result != "verified" {
+	defer msgResp.Body.Close()
+	var dispatched types.Message
+	json.NewDecoder(msgResp.Body).Decode(&dispatched)
+	if dispatched.SenderVerification == nil || dispatched.SenderVerification.Result != "verified" {
 		got := "<nil>"
-		if statusResp.SenderVerification != nil {
-			got = statusResp.SenderVerification.Result
+		if dispatched.SenderVerification != nil {
+			got = dispatched.SenderVerification.Result
 		}
 		t.Fatalf("dispatched message at B: sender_verification.result = %s, want verified", got)
 	}

@@ -1010,3 +1010,42 @@ func mustBuildWire(t *testing.T, message *types.Message, recipient string) map[s
 	}
 	return body
 }
+
+// TestDeliverLocalPush_IncludesSenderVerification verifies a push-mode agent
+// learns whether the sender was authenticated without a second request.
+func TestDeliverLocalPush_IncludesSenderVerification(t *testing.T) {
+	cs := newCaptureServer(0)
+	defer cs.close()
+
+	registry := NewMockAgentRegistry()
+	_ = registry.RegisterAgent(context.Background(), &agents.LocalAgent{
+		Address:      "agent@local.example",
+		DeliveryMode: "push",
+		PushTarget:   cs.server.URL,
+	})
+	config := createTestDeliveryConfig()
+	config.LocalDomain = "local.example"
+	engine := NewDeliveryEngine(NewMockDiscovery(), registry, config)
+
+	message := createTestMessage()
+	message.Sender = "boss@remote.example"
+	message.SenderVerification = &types.SenderVerification{
+		Result: types.VerificationUnsigned,
+		Domain: "remote.example",
+		Policy: "flag",
+	}
+
+	if _, err := engine.DeliverMessage(context.Background(), message, "agent@local.example"); err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+
+	var pushed struct {
+		SenderVerification *types.SenderVerification `json:"sender_verification"`
+	}
+	if err := json.Unmarshal(cs.body(0), &pushed); err != nil {
+		t.Fatalf("unmarshal push body: %v", err)
+	}
+	if pushed.SenderVerification == nil || pushed.SenderVerification.Result != types.VerificationUnsigned {
+		t.Errorf("pushed sender_verification = %+v, want unsigned", pushed.SenderVerification)
+	}
+}

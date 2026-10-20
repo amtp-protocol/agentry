@@ -100,8 +100,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for key generation and DNS rollout.
 
 #### Send response
 
-The response echoes how the sender was authenticated, so a caller does not
-have to poll the status endpoint to tell "accepted" from "authenticated":
+The response echoes how the sender was authenticated:
 
 ```json
 {
@@ -117,28 +116,15 @@ have to poll the status endpoint to tell "accepted" from "authenticated":
 ```
 
 A successful `status` is **not** by itself proof that the sender was
-authenticated — see [Replay and Trust Guarantees](#replay-and-trust-guarantees).
+authenticated. See [Sender verification](#sender-verification).
 
-### Query Message Status
+#### Sender verification
 
-```http
-GET /v1/messages/{message_id}/status
-```
-
-The response records how the sender was authenticated:
-
-```json
-{
-  "message_id": "...",
-  "status": "delivered",
-  "recipients": [...],
-  "sender_verification": {
-    "result": "verified",
-    "domain": "sender.com",
-    "policy": "reject"
-  }
-}
-```
+The receiving gateway records how it authenticated the sender as
+`sender_verification` on the message itself. Recipients see it everywhere a
+message is returned: `GET /v1/messages/{message_id}`, `GET /v1/messages`,
+`GET /v1/inbox/{recipient}`, and the push-mode webhook body. It is set by the
+gateway at ingest and is never taken from the request.
 
 `sender_verification.result` is one of:
 
@@ -149,6 +135,17 @@ The response records how the sender was authenticated:
 | `invalid` | Signature present but verification failed (bad value, algorithm mismatch, tampered body) |
 | `key_unavailable` | Signing key could not be resolved from DNS |
 | `trusted_internal` | Local sender authenticated by agent API key (or internal workflow dispatch) |
+
+Under the `accept` and `flag` policies, messages with any result are
+delivered, so agents that act on a message should check for `verified` or
+`trusted_internal`. A verified signature proves the sending domain; it is not
+authorization to perform an action.
+
+### Query Message Status
+
+```http
+GET /v1/messages/{message_id}/status
+```
 
 ### List Messages
 

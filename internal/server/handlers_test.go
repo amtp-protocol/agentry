@@ -58,9 +58,9 @@ type MockMessageProcessor struct {
 	processError  error
 	messages      map[string]*types.Message
 	statuses      map[string]*types.MessageStatus
-	// storage, when set, receives the message and its initial status
-	// (including options.SenderVerification) via StoreMessageWithStatus,
-	// mirroring how the real processor persists inbound messages.
+	// storage, when set, receives the message and its initial status via
+	// StoreMessageWithStatus, mirroring how the real processor persists
+	// inbound messages.
 	storage storage.Storage
 }
 
@@ -383,13 +383,12 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message *type
 	// Store the message and status
 	m.messages[message.MessageID] = message
 	status := &types.MessageStatus{
-		MessageID:          message.MessageID,
-		Status:             result.Status,
-		Recipients:         result.Recipients,
-		Attempts:           1,
-		CreatedAt:          time.Now().UTC(),
-		UpdatedAt:          time.Now().UTC(),
-		SenderVerification: options.SenderVerification,
+		MessageID:  message.MessageID,
+		Status:     result.Status,
+		Recipients: result.Recipients,
+		Attempts:   1,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
 	}
 	m.statuses[message.MessageID] = status
 	if m.storage != nil {
@@ -4400,10 +4399,10 @@ func TestRejectBlocksStorageAndWorkflow(t *testing.T) {
 	}
 }
 
-// TestVerificationRecordedOnStatus: an accepted signed remote message
+// TestVerificationRecordedOnMessage: an accepted signed remote message
 // records sender_verification with result=verified; an unsigned one under
 // flag records result=unsigned.
-func TestVerificationRecordedOnStatus(t *testing.T) {
+func TestVerificationRecordedOnMessage(t *testing.T) {
 	env := newSigningTestEnv(t, "flag")
 
 	// Signed -> verified.
@@ -4419,9 +4418,9 @@ func TestVerificationRecordedOnStatus(t *testing.T) {
 	}
 
 	mockStorage := env.server.storage.(*MockStorage)
-	st, ok := mockStorage.statuses[resp.MessageID]
+	st, ok := mockStorage.messages[resp.MessageID]
 	if !ok {
-		t.Fatalf("status not stored for %s", resp.MessageID)
+		t.Fatalf("message not stored for %s", resp.MessageID)
 	}
 	if st.SenderVerification == nil {
 		t.Fatal("sender_verification not recorded for signed message")
@@ -4442,9 +4441,9 @@ func TestVerificationRecordedOnStatus(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	st, ok = mockStorage.statuses[resp.MessageID]
+	st, ok = mockStorage.messages[resp.MessageID]
 	if !ok {
-		t.Fatalf("status not stored for %s", resp.MessageID)
+		t.Fatalf("message not stored for %s", resp.MessageID)
 	}
 	if st.SenderVerification == nil {
 		t.Fatal("sender_verification not recorded for unsigned message")
@@ -4470,9 +4469,9 @@ func TestLocalSenderTrustedInternal(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	mockStorage := env.server.storage.(*MockStorage)
-	st, ok := mockStorage.statuses[resp.MessageID]
+	st, ok := mockStorage.messages[resp.MessageID]
 	if !ok {
-		t.Fatalf("status not stored for %s", resp.MessageID)
+		t.Fatalf("message not stored for %s", resp.MessageID)
 	}
 	if st.SenderVerification == nil {
 		t.Fatal("sender_verification not recorded")

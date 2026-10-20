@@ -507,6 +507,8 @@ func (de *DeliveryEngine) deliverLocalPush(ctx context.Context, message *types.M
 		"coordination":  message.Coordination,
 		"in_reply_to":   message.InReplyTo,
 		"response_type": message.ResponseType,
+		// Tells the agent whether the sender address is authentic.
+		"sender_verification": message.SenderVerification,
 	}
 
 	// Marshal payload
