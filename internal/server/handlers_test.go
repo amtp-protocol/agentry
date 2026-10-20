@@ -4501,6 +4501,79 @@ func TestWorkflowReplyBypassesLocalAuth(t *testing.T) {
 	}
 }
 
+// recordingWorkflow captures the replies the handler hands to the engine.
+type recordingWorkflow struct {
+	replies []*types.Message
+}
+
+func (w *recordingWorkflow) Initialize(ctx context.Context, msg *types.Message) (*types.Workflow, error) {
+	return nil, nil
+}
+
+func (w *recordingWorkflow) ProcessResponse(ctx context.Context, workflowID string, replyMsg *types.Message) error {
+	w.replies = append(w.replies, replyMsg)
+	return nil
+}
+
+func (w *recordingWorkflow) Start(ctx context.Context) {}
+
+func (w *recordingWorkflow) Stop() error { return nil }
+
+// TestWorkflowReplyCarriesSenderVerification: the workflow engine decides
+// whether a reply may change workflow state from its sender verification, so
+// the handler must attach it before handing the reply over.
+func TestWorkflowReplyCarriesSenderVerification(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		signed bool
+		want   string
+	}{
+		{"signed", true, types.VerificationVerified},
+		{"unsigned", false, types.VerificationUnsigned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSigningTestEnv(t, "flag")
+			wf := &recordingWorkflow{}
+			env.server.workflow = wf
+
+			msg := remoteMessage()
+			msg.ResponseType = "workflow_response"
+			msg.WorkflowID = "01936b1e-2000-7000-8000-000000000002"
+
+			var req *http.Request
+			if tc.signed {
+				req = env.signedRemoteRequest(t, msg)
+			} else {
+				raw, err := json.Marshal(map[string]interface{}{
+					"sender":        msg.Sender,
+					"recipients":    msg.Recipients,
+					"payload":       msg.Payload,
+					"response_type": msg.ResponseType,
+					"workflow_id":   msg.WorkflowID,
+				})
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				req = httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+				req.Header.Set("Content-Type", "application/json")
+			}
+
+			rr := httptest.NewRecorder()
+			env.server.router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+				t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+			}
+			if len(wf.replies) != 1 {
+				t.Fatalf("workflow engine received %d replies, want 1", len(wf.replies))
+			}
+			got := wf.replies[0].SenderVerification
+			if got == nil || got.Result != tc.want {
+				t.Errorf("reply sender_verification = %+v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDuplicateJSONMemberRejected: a request body with duplicate top-level
 // members is rejected 400.
 func TestDuplicateJSONMemberRejected(t *testing.T) {

@@ -108,6 +108,12 @@ const (
 	VerificationTrustedInternal = "trusted_internal"
 )
 
+// Authenticated reports whether the sender address is proven, either by a
+// verified domain signature or by this gateway's own credential check.
+func (v *SenderVerification) Authenticated() bool {
+	return v != nil && (v.Result == VerificationVerified || v.Result == VerificationTrustedInternal)
+}
+
 // MessageStatus represents the delivery status of a message
 type MessageStatus struct {
 	MessageID   string            `json:"message_id"`

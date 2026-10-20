@@ -410,6 +410,11 @@ export AMTP_SIGNATURE_VERIFY_POLICY="flag"              # accept | flag | reject
 Local-domain senders are unaffected by this policy — they always
 authenticate with a Bearer agent API key (see [API.md](API.md)).
 
+The policy only decides whether a message is delivered. A workflow response
+from a remote participant advances the workflow only when its signature
+verifies, so remote participants in cross-domain workflows must sign their
+messages.
+
 ### Kubernetes Secret Rollout
 
 ```bash

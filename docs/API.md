@@ -37,6 +37,11 @@ The unsigned and invalid cases share the code `403 SIGNATURE_REJECTED`; apart
 from the details, `error.message` distinguishes them ("Message has no domain
 signature" vs "Domain signature verification failed").
 
+Whatever the policy, a workflow response changes workflow state only when its
+sender is authenticated (`verified` or `trusted_internal`). Any other response
+is still delivered as an ordinary message, but the workflow keeps waiting for
+that participant.
+
 ## Core Messaging
 
 ### Send Message

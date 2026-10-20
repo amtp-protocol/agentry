@@ -177,6 +177,15 @@ func (m *managerImpl) executeConditional(ctx context.Context, workflow *types.Wo
 }
 
 func (m *managerImpl) ProcessResponse(ctx context.Context, workflowID string, replyMsg *types.Message) error {
+	// Participant membership is only meaningful for a proven sender address:
+	// a forged reply would otherwise complete the participant with the
+	// forger's payload and cause the genuine reply to be dropped as a
+	// duplicate.
+	if !replyMsg.SenderVerification.Authenticated() {
+		m.logger.Warnf("Ignoring response to workflow %s from unauthenticated sender %s", workflowID, replyMsg.Sender)
+		return nil
+	}
+
 	for {
 		workflow, err := m.storage.GetWorkflow(ctx, workflowID)
 		if err != nil {
@@ -265,6 +274,9 @@ func (m *managerImpl) buildTemplateMessage(wf *types.Workflow, dispatchKey strin
 		Subject:        wf.Subject,
 		Schema:         wf.Schema,
 		Payload:        wf.Payload,
+		SenderVerification: &types.SenderVerification{
+			Result: types.VerificationTrustedInternal,
+		},
 	}, nil
 }
 
@@ -313,6 +325,9 @@ func (m *managerImpl) notifySender(ctx context.Context, wf *types.Workflow, fina
 		InReplyTo:      wf.WorkflowID,
 		WorkflowID:     wf.WorkflowID,
 		Payload:        json.RawMessage(aggPayload),
+		SenderVerification: &types.SenderVerification{
+			Result: types.VerificationTrustedInternal,
+		},
 	}
 	if err := m.dispatcher.Dispatch(ctx, notif); err != nil {
 		m.logger.Errorf(err, "Failed to notify workflow sender %s of %s", wf.Sender, finalStatus)

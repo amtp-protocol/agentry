@@ -111,6 +111,8 @@ func (m *mockStorage) UpdateWorkflowStatusAtomic(ctx context.Context, workflowID
 	return m.UpdateWorkflowStatus(ctx, workflowID, status)
 }
 
+var authenticatedSender = &types.SenderVerification{Result: types.VerificationVerified}
+
 func TestManager_Initialize(t *testing.T) {
 	st := newMockStorage()
 	dp := &mockDispatcher{}
@@ -237,9 +239,10 @@ func TestManager_ProcessResponse_Parallel(t *testing.T) {
 	dp.dispatched = nil // reset
 
 	reply1 := &types.Message{
-		Sender:    "a1",
-		InReplyTo: wfID,
-		Payload:   json.RawMessage(`{}`),
+		Sender:             "a1",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
+		Payload:            json.RawMessage(`{}`),
 	}
 
 	err := mgr.ProcessResponse(context.Background(), wfID, reply1)
@@ -253,9 +256,10 @@ func TestManager_ProcessResponse_Parallel(t *testing.T) {
 	}
 
 	reply2 := &types.Message{
-		Sender:    "a2",
-		InReplyTo: wfID,
-		Payload:   json.RawMessage(`{}`),
+		Sender:             "a2",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
+		Payload:            json.RawMessage(`{}`),
 	}
 	mgr.ProcessResponse(context.Background(), wfID, reply2)
 
@@ -284,8 +288,9 @@ func TestManager_ProcessResponse_Sequential(t *testing.T) {
 	dp.dispatched = nil
 
 	reply1 := &types.Message{
-		Sender:    "a1",
-		InReplyTo: wfID,
+		Sender:             "a1",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
 	}
 
 	err := mgr.ProcessResponse(context.Background(), wfID, reply1)
@@ -298,8 +303,9 @@ func TestManager_ProcessResponse_Sequential(t *testing.T) {
 	}
 
 	reply2 := &types.Message{
-		Sender:    "a2",
-		InReplyTo: wfID,
+		Sender:             "a2",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
 	}
 	mgr.ProcessResponse(context.Background(), wfID, reply2)
 
@@ -334,9 +340,10 @@ func TestManager_ProcessResponse_Conditional(t *testing.T) {
 	dp.dispatched = nil
 
 	reply1 := &types.Message{
-		Sender:    "eval",
-		InReplyTo: wfID,
-		Payload:   json.RawMessage(`{"status":"ok"}`),
+		Sender:             "eval",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
+		Payload:            json.RawMessage(`{"status":"ok"}`),
 	}
 
 	err := mgr.ProcessResponse(context.Background(), wfID, reply1)
@@ -352,8 +359,9 @@ func TestManager_ProcessResponse_Conditional(t *testing.T) {
 	}
 
 	reply2 := &types.Message{
-		Sender:    "a1",
-		InReplyTo: wfID,
+		Sender:             "a1",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
 	}
 	mgr.ProcessResponse(context.Background(), wfID, reply2)
 
@@ -406,7 +414,7 @@ func TestManager_ProcessResponse_WorkflowNotFound(t *testing.T) {
 	dp := &mockDispatcher{}
 	mgr := NewManager(st, dp, nil, "workflow@localhost")
 
-	err := mgr.ProcessResponse(context.Background(), "unknown", &types.Message{})
+	err := mgr.ProcessResponse(context.Background(), "unknown", &types.Message{SenderVerification: authenticatedSender})
 	if err == nil {
 		t.Errorf("Expected error for missing workflow")
 	}
@@ -430,9 +438,10 @@ func TestManager_ProcessResponse_StopOnFailure(t *testing.T) {
 	wfID := wf.WorkflowID
 
 	reply1 := &types.Message{
-		Sender:       "a1",
-		InReplyTo:    wfID,
-		ResponseType: "error", // Triggers failure
+		Sender:             "a1",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
+		ResponseType:       "error", // Triggers failure
 	}
 
 	mgr.ProcessResponse(context.Background(), wfID, reply1)
@@ -465,9 +474,10 @@ func TestManager_NotifySenderOnCompletion(t *testing.T) {
 
 	// Send the sole participant response → terminal transition
 	mgr.ProcessResponse(context.Background(), wfID, &types.Message{
-		Sender:    "a1",
-		InReplyTo: wfID,
-		Payload:   json.RawMessage(`{"status":"ok"}`),
+		Sender:             "a1",
+		SenderVerification: authenticatedSender,
+		InReplyTo:          wfID,
+		Payload:            json.RawMessage(`{"status":"ok"}`),
 	})
 
 	// Should have exactly one dispatch: the notification to the initiator
@@ -594,7 +604,7 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 		}
 
 		dp.dispatched = nil
-		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		reply := &types.Message{Sender: "a1", SenderVerification: authenticatedSender, WorkflowID: wf.WorkflowID}
 		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
 			t.Fatalf("ProcessResponse failed: %v", err)
 		}
@@ -638,9 +648,10 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 
 		dp.dispatched = nil
 		reply := &types.Message{
-			Sender:     "eval",
-			WorkflowID: wf.WorkflowID,
-			Payload:    json.RawMessage(`{"status":"ok"}`),
+			Sender:             "eval",
+			SenderVerification: authenticatedSender,
+			WorkflowID:         wf.WorkflowID,
+			Payload:            json.RawMessage(`{"status":"ok"}`),
 		}
 		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
 			t.Fatalf("ProcessResponse failed: %v", err)
@@ -673,7 +684,7 @@ func TestManager_DispatchedMessagesCarryWorkflowID(t *testing.T) {
 		}
 		dp.dispatched = nil
 
-		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		reply := &types.Message{Sender: "a1", SenderVerification: authenticatedSender, WorkflowID: wf.WorkflowID}
 		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
 			t.Fatalf("ProcessResponse failed: %v", err)
 		}
@@ -731,7 +742,7 @@ func TestManager_EngineDispatchedMessagesAreValid(t *testing.T) {
 		}
 
 		dp.dispatched = nil
-		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		reply := &types.Message{Sender: "a1", SenderVerification: authenticatedSender, WorkflowID: wf.WorkflowID}
 		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
 			t.Fatalf("ProcessResponse failed: %v", err)
 		}
@@ -808,9 +819,10 @@ func TestManager_EngineDispatchedMessagesAreValid(t *testing.T) {
 		dp.dispatched = nil
 
 		reply := &types.Message{
-			Sender:     "eval",
-			WorkflowID: wf.WorkflowID,
-			Payload:    json.RawMessage(`{"status":"ok"}`),
+			Sender:             "eval",
+			SenderVerification: authenticatedSender,
+			WorkflowID:         wf.WorkflowID,
+			Payload:            json.RawMessage(`{"status":"ok"}`),
 		}
 		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
 			t.Fatalf("ProcessResponse failed: %v", err)
@@ -841,7 +853,7 @@ func TestManager_EngineDispatchedMessagesAreValid(t *testing.T) {
 		}
 		dp.dispatched = nil
 
-		reply := &types.Message{Sender: "a1", WorkflowID: wf.WorkflowID}
+		reply := &types.Message{Sender: "a1", SenderVerification: authenticatedSender, WorkflowID: wf.WorkflowID}
 		if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, reply); err != nil {
 			t.Fatalf("ProcessResponse failed: %v", err)
 		}
@@ -854,4 +866,104 @@ func TestManager_EngineDispatchedMessagesAreValid(t *testing.T) {
 			t.Errorf("Notification sender = %q, want the configured system sender", notif.Sender)
 		}
 	})
+}
+
+// TestManager_ProcessResponse_IgnoresUnauthenticatedSender verifies a reply
+// whose sender is not proven cannot complete a participant, so it can neither
+// advance the workflow nor pre-empt the genuine reply.
+func TestManager_ProcessResponse_IgnoresUnauthenticatedSender(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		verification *types.SenderVerification
+	}{
+		{"none", nil},
+		{"unsigned", &types.SenderVerification{Result: types.VerificationUnsigned}},
+		{"invalid", &types.SenderVerification{Result: types.VerificationInvalid}},
+		{"key_unavailable", &types.SenderVerification{Result: types.VerificationKeyUnavailable}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newMockStorage()
+			mgr := NewManager(st, &mockDispatcher{}, nil, "workflow@localhost")
+			wf, err := mgr.Initialize(context.Background(), &types.Message{
+				MessageID: "msg-forged",
+				Coordination: &types.CoordinationConfig{
+					Type:              "parallel",
+					RequiredResponses: []string{"a1"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Initialize: %v", err)
+			}
+
+			forged := &types.Message{
+				Sender:             "a1",
+				SenderVerification: tc.verification,
+				WorkflowID:         wf.WorkflowID,
+				Payload:            json.RawMessage(`{"forged":true}`),
+			}
+			if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, forged); err != nil {
+				t.Fatalf("ProcessResponse(forged): %v", err)
+			}
+			w, _ := st.GetWorkflow(context.Background(), wf.WorkflowID)
+			if w.Status == types.WorkflowStatusCompleted || w.Participants[0].Status != types.ParticipantStatusPending {
+				t.Fatalf("unauthenticated reply changed workflow state: status=%s participant=%s",
+					w.Status, w.Participants[0].Status)
+			}
+
+			genuine := &types.Message{
+				Sender:             "a1",
+				SenderVerification: authenticatedSender,
+				WorkflowID:         wf.WorkflowID,
+				Payload:            json.RawMessage(`{"genuine":true}`),
+			}
+			if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, genuine); err != nil {
+				t.Fatalf("ProcessResponse(genuine): %v", err)
+			}
+			w, _ = st.GetWorkflow(context.Background(), wf.WorkflowID)
+			if w.Status != types.WorkflowStatusCompleted {
+				t.Errorf("genuine reply did not complete the workflow: status=%s", w.Status)
+			}
+			if string(w.Participants[0].ResponsePayload) != `{"genuine":true}` {
+				t.Errorf("participant payload = %s, want the genuine reply's", w.Participants[0].ResponsePayload)
+			}
+		})
+	}
+}
+
+// TestManager_EngineMessagesAreTrustedInternal verifies messages the engine
+// generates itself carry trusted_internal, since no request authenticated
+// them.
+func TestManager_EngineMessagesAreTrustedInternal(t *testing.T) {
+	st := newMockStorage()
+	dp := &mockDispatcher{}
+	mgr := NewManager(st, dp, nil, "workflow@localhost")
+
+	wf, err := mgr.Initialize(context.Background(), &types.Message{
+		MessageID: "msg-seq",
+		Sender:    "initiator@localhost",
+		Coordination: &types.CoordinationConfig{
+			Type:     "sequential",
+			Sequence: []string{"a1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := mgr.ProcessResponse(context.Background(), wf.WorkflowID, &types.Message{
+		Sender:             "a1",
+		SenderVerification: authenticatedSender,
+		WorkflowID:         wf.WorkflowID,
+	}); err != nil {
+		t.Fatalf("ProcessResponse: %v", err)
+	}
+
+	if len(dp.dispatched) < 2 {
+		t.Fatalf("expected a step message and a notification, got %d dispatches", len(dp.dispatched))
+	}
+	for i, msg := range dp.dispatched {
+		if msg.SenderVerification == nil || msg.SenderVerification.Result != types.VerificationTrustedInternal {
+			t.Errorf("dispatch %d (%s -> %v): sender_verification = %+v, want trusted_internal",
+				i, msg.Sender, msg.Recipients, msg.SenderVerification)
+		}
+	}
 }
