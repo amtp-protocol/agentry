@@ -98,8 +98,11 @@ The public key is published as a DNS TXT record at
 `{keyid}._amtpkey.{sender-domain}`:
 
 ```
-v=amtpkey1;alg=ES256;p=<base64url-encoded-public-key>
+v=amtpkey1;alg=ES256;p=<base64-encoded-public-key>
 ```
+
+`p` is the DER SubjectPublicKeyInfo in standard base64 with padding. Unlike
+the signature value, it is not base64url.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for key generation and DNS rollout.
 
