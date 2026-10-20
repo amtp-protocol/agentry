@@ -392,8 +392,14 @@ func TestDecodeBody(t *testing.T) {
 		`{"a":1,"b":[1,2,{"c":null}]}`,
 		`{"a":125.5}`,
 		`  {"a":1}  `,
-		`{"a":1e-400}`,           // subnormal underflow -> 0, in range
-		`{"a":9007199254740993}`, // precision loss canonicalizes per RFC 8785
+		`{"a":0.1}`,
+		`{"a":1.0}`,
+		`{"a":-0}`,
+		`{"a":0e99}`,
+		`{"a":1E2}`,
+		`{"a":9007199254740992}`,
+		`{"a":1.7976931348623157e308}`,
+		`{"a":5e-324}`,
 	}
 	invalid := []string{
 		``,
@@ -408,6 +414,12 @@ func TestDecodeBody(t *testing.T) {
 		`{"x":{"a":1,"a":2}}`,
 		`{"a":1e400}`,
 		`{"a":-1e400}`,
+		`{"a":9007199254740993}`,           // rounds to ...992 in the canonical form
+		`{"a":[1,18446744073709551615]}`,   // uint64 max is not a double
+		`{"a":0.30000000000000000001}`,     // rounds to 0.3
+		`{"a":1e-400}`,                     // underflows to 0
+		`{"a":1e-999999999999}`,            // exponent beyond int32
+		`{"x":{"y":12345678901234567890}}`, // nested
 		`{"s":"a","a":1,"s":2}`,
 	}
 	for _, raw := range valid {
@@ -719,6 +731,16 @@ func TestBuildWireBodyPayloadRange(t *testing.T) {
 	msg.Payload = json.RawMessage(`{"amount":1e400}`)
 	if _, err := BuildWireBody(msg, vectorRecipient); err == nil {
 		t.Error("out-of-range payload number must fail")
+	}
+}
+
+// TestBuildWireBodyPayloadPrecision checks a payload integer that a double
+// cannot hold is refused instead of being signed in rounded form.
+func TestBuildWireBodyPayloadPrecision(t *testing.T) {
+	msg := testMessage()
+	msg.Payload = json.RawMessage(`{"amount":9007199254740993}`)
+	if _, err := BuildWireBody(msg, vectorRecipient); err == nil {
+		t.Error("payload number beyond double precision must fail")
 	}
 }
 

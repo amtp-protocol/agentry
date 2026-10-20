@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -30,7 +31,7 @@ import (
 //   - the body is exactly one JSON object (no trailing data),
 //   - no duplicate member names anywhere in the document,
 //   - no two members of the same object differ only in case,
-//   - all numbers are within IEEE 754 double precision range.
+//   - every number is exactly representable as an IEEE 754 double.
 //
 // The case rule exists because encoding/json binds object members to struct
 // fields case-insensitively and lets the last one win: with "sender" and
@@ -40,9 +41,7 @@ import (
 //
 // encoding/json silently keeps the last of duplicate members and accepts
 // trailing data, so this decoder walks the token stream itself. Numbers are
-// returned as float64 (the type the JCS formatter consumes), which means a
-// literal carrying more precision than a double holds canonicalizes to the
-// double's value — the behavior RFC 8785 defines.
+// returned as float64, the type the JCS formatter consumes.
 func DecodeBody(raw []byte) (map[string]interface{}, error) {
 	doc, err := decodeStrict(raw)
 	if err != nil {
@@ -141,10 +140,12 @@ func decodeValue(dec *json.Decoder) (interface{}, error) {
 	}
 }
 
-// checkNumbers rejects numbers outside IEEE 754 double range (e.g. 1e400):
-// their canonical form is undefined and cross-language verifiers would
-// disagree. Subnormal underflow (1e-400 → 0) is in range and canonicalizes
-// to "0" per RFC 8785.
+// checkNumbers rejects numbers whose canonical form would not carry the
+// exact value written. The signature covers the canonical form, which
+// rounds to a double, while the stored payload keeps the original literal:
+// without this check 9007199254740993 and 9007199254740992 sign identically,
+// so the low digits of a large integer could be altered without breaking the
+// signature.
 func checkNumbers(v interface{}) error {
 	switch t := v.(type) {
 	case map[string]interface{}:
@@ -160,11 +161,49 @@ func checkNumbers(v interface{}) error {
 			}
 		}
 	case json.Number:
-		if _, err := t.Float64(); err != nil {
+		f, err := t.Float64()
+		if err != nil {
 			return fmt.Errorf("%w: number %s out of double range", ErrMalformedBody, t.String())
+		}
+		if !sameDecimal(t.String(), strconv.FormatFloat(f, 'g', -1, 64)) {
+			return fmt.Errorf("%w: number %s is not exactly representable as a double", ErrMalformedBody, t.String())
 		}
 	}
 	return nil
+}
+
+// sameDecimal reports whether two JSON number literals denote the same
+// decimal value. It compares normalized digits and exponents as strings so
+// a literal such as 1e-999999999 costs no more than its length to check.
+func sameDecimal(a, b string) bool {
+	negA, digitsA, expA, okA := decimalForm(a)
+	negB, digitsB, expB, okB := decimalForm(b)
+	return okA && okB && negA == negB && digitsA == digitsB && expA == expB
+}
+
+// decimalForm splits a JSON number literal into sign, significant digits
+// without leading or trailing zeros, and the power of ten they are scaled
+// by. Zero is returned as positive with no digits, so 0, -0 and 0.0 match.
+func decimalForm(s string) (neg bool, digits string, exp int64, ok bool) {
+	neg = strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	mantissa, expPart, hasExp := strings.Cut(strings.ToLower(s), "e")
+	if hasExp {
+		e, err := strconv.ParseInt(expPart, 10, 32)
+		if err != nil {
+			return false, "", 0, false
+		}
+		exp = e
+	}
+	intPart, frac, _ := strings.Cut(mantissa, ".")
+	digits = strings.TrimLeft(intPart+frac, "0")
+	exp -= int64(len(frac))
+	trimmed := strings.TrimRight(digits, "0")
+	exp += int64(len(digits) - len(trimmed))
+	if trimmed == "" {
+		return false, "", 0, true
+	}
+	return neg, trimmed, exp, true
 }
 
 // convertNumbers rewrites json.Number values to float64 throughout the tree
