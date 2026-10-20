@@ -205,21 +205,29 @@ func (de *DeliveryEngine) prepareDeliveryBytes(message *types.Message, recipient
 		return nil, fmt.Errorf("build wire body: %w", err)
 	}
 
-	if de.signer != nil {
-		senderDomain := discovery.ExtractDomain(message.Sender)
-		if senderDomain == de.localDomain {
-			sig, err := de.signer.SignBody(body)
-			if err != nil {
-				return nil, fmt.Errorf("sign delivery body: %w", err)
-			}
-			body, err = signing.AttachWireBody(body, sig)
-			if err != nil {
-				return nil, fmt.Errorf("attach signature: %w", err)
-			}
+	if de.signer != nil && de.ownsSenderDomain(message.Sender) {
+		sig, err := de.signer.SignBody(body)
+		if err != nil {
+			return nil, fmt.Errorf("sign delivery body: %w", err)
+		}
+		body, err = signing.AttachWireBody(body, sig)
+		if err != nil {
+			return nil, fmt.Errorf("attach signature: %w", err)
 		}
 	}
 
 	return signing.MarshalWireBody(body)
+}
+
+// ownsSenderDomain compares domains the way the receiving verifier does, so
+// a sender written in a different case is still signed.
+func (de *DeliveryEngine) ownsSenderDomain(sender string) bool {
+	senderDomain, err := signing.NormalizeDomain(discovery.ExtractDomain(sender))
+	if err != nil {
+		return false
+	}
+	localDomain, err := signing.NormalizeDomain(de.localDomain)
+	return err == nil && senderDomain == localDomain
 }
 
 // attemptDeliveryWithRetries attempts delivery with retry logic

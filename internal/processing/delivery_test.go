@@ -844,6 +844,29 @@ func TestDeliverMessage_SignedWireBytes(t *testing.T) {
 	}
 }
 
+// TestDeliverMessage_SignsLocalSenderInAnyCase verifies a local sender whose
+// domain differs from the configured one only in case is still signed.
+func TestDeliverMessage_SignsLocalSenderInAnyCase(t *testing.T) {
+	signer := newTestSigner(t, "k1")
+	engine, cs := setupSignedDelivery(t, signer, 0)
+
+	message := createTestMessage()
+	message.Sender = "agent@Local.EXAMPLE"
+
+	if _, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example"); err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+
+	resolver := &fixedKeyResolver{txts: []string{signerKeyRecord(t, signer)}}
+	verification, err := signing.NewVerifier(resolver).VerifyBody(context.Background(), cs.body(0))
+	if err != nil {
+		t.Fatalf("VerifyBody: %v", err)
+	}
+	if verification.Result != signing.ResultVerified {
+		t.Errorf("verification result = %s, want verified", verification.Result)
+	}
+}
+
 // fixedKeyResolver returns the same TXT strings for any owner.
 type fixedKeyResolver struct {
 	txts []string
