@@ -1978,11 +1978,7 @@ func newTwoGatewayEnv(t *testing.T, policyB string) *twoGatewayEnv {
 	if err != nil {
 		t.Fatalf("load signer A: %v", err)
 	}
-	rec, err := signerA.PublicKeyRecord()
-	if err != nil {
-		t.Fatalf("public record A: %v", err)
-	}
-	keyRecordA, err := signing.FormatKeyRecord(rec)
+	keyRecordA, err := signing.FormatKeyRecord(signerA.PublicKeyRecord())
 	if err != nil {
 		t.Fatalf("format record A: %v", err)
 	}
@@ -2052,11 +2048,7 @@ func newSignedTwoGatewayEnv(t *testing.T, policyB string) *twoGatewayEnv {
 		if err != nil {
 			t.Fatalf("load signer %s: %v", name, err)
 		}
-		rec, err := signer.PublicKeyRecord()
-		if err != nil {
-			t.Fatalf("public record %s: %v", name, err)
-		}
-		txt, err = signing.FormatKeyRecord(rec)
+		txt, err = signing.FormatKeyRecord(signer.PublicKeyRecord())
 		if err != nil {
 			t.Fatalf("format record %s: %v", name, err)
 		}

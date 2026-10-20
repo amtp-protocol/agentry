@@ -102,11 +102,7 @@ func runKeygenCmd(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("generated key failed validation: %w", err)
 	}
-	rec, err := signer.PublicKeyRecord()
-	if err != nil {
-		return fmt.Errorf("derive public key record: %w", err)
-	}
-	txt, err := signing.FormatKeyRecord(rec)
+	txt, err := signing.FormatKeyRecord(signer.PublicKeyRecord())
 	if err != nil {
 		return fmt.Errorf("format key record: %w", err)
 	}

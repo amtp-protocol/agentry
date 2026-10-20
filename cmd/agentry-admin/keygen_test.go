@@ -87,10 +87,7 @@ func TestKeygenES256RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseKeyRecord(%q): %v", txt, err)
 	}
-	want, err := signer.PublicKeyRecord()
-	if err != nil {
-		t.Fatalf("PublicKeyRecord: %v", err)
-	}
+	want := signer.PublicKeyRecord()
 	if rec.Algorithm != want.Algorithm {
 		t.Errorf("TXT algorithm = %s, want %s", rec.Algorithm, want.Algorithm)
 	}
@@ -124,7 +121,7 @@ func TestKeygenRS256(t *testing.T) {
 	if rec.Algorithm != "RS256" {
 		t.Errorf("TXT algorithm = %s, want RS256", rec.Algorithm)
 	}
-	want, _ := signer.PublicKeyRecord()
+	want := signer.PublicKeyRecord()
 	if !signing.KeysEqual(rec.PublicKey, want.PublicKey) {
 		t.Error("TXT public key does not match the generated private key")
 	}

@@ -720,11 +720,7 @@ func newTestSigner(t *testing.T, keyID string) *signing.Signer {
 // signerKeyRecord formats the signer's public key as a DNS TXT record.
 func signerKeyRecord(t *testing.T, s *signing.Signer) string {
 	t.Helper()
-	rec, err := s.PublicKeyRecord()
-	if err != nil {
-		t.Fatalf("public key record: %v", err)
-	}
-	txt, err := signing.FormatKeyRecord(rec)
+	txt, err := signing.FormatKeyRecord(s.PublicKeyRecord())
 	if err != nil {
 		t.Fatalf("format key record: %v", err)
 	}

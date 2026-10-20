@@ -183,11 +183,11 @@ func (sig *Signature) ToMap() map[string]interface{} {
 
 // PublicKeyRecord derives the DNS key record for this signer's key. Used by
 // tooling (keygen) to print the TXT value a domain must publish.
-func (s *Signer) PublicKeyRecord() (*KeyRecord, error) {
+func (s *Signer) PublicKeyRecord() *KeyRecord {
 	return &KeyRecord{
 		Algorithm: s.algorithm,
 		PublicKey: s.publicKey(),
-	}, nil
+	}
 }
 
 func (s *Signer) publicKey() crypto.PublicKey {

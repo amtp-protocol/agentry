@@ -4138,11 +4138,7 @@ func newSigningTestEnv(t *testing.T, policy string) *signingTestEnv {
 	}
 
 	// Publish the remote key in DNS so the verifier can resolve it.
-	rec, err := remoteSign.PublicKeyRecord()
-	if err != nil {
-		t.Fatalf("remote public record: %v", err)
-	}
-	txt, err := signing.FormatKeyRecord(rec)
+	txt, err := signing.FormatKeyRecord(remoteSign.PublicKeyRecord())
 	if err != nil {
 		t.Fatalf("format remote record: %v", err)
 	}

@@ -970,10 +970,7 @@ func TestSignerAccessorsAndRecord(t *testing.T) {
 	if signer.Algorithm() != AlgES256 {
 		t.Errorf("Algorithm() = %q", signer.Algorithm())
 	}
-	rec, err := signer.PublicKeyRecord()
-	if err != nil {
-		t.Fatalf("PublicKeyRecord: %v", err)
-	}
+	rec := signer.PublicKeyRecord()
 	if rec.Algorithm != AlgES256 {
 		t.Errorf("record algorithm = %q", rec.Algorithm)
 	}
