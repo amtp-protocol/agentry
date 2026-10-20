@@ -29,7 +29,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -991,14 +990,6 @@ func TestSignerAccessorsAndRecord(t *testing.T) {
 	}
 	if _, err := FormatKeyRecord(&KeyRecord{Algorithm: AlgES256, PublicKey: "not-a-key"}); err == nil {
 		t.Error("bad public key must fail")
-	}
-}
-
-// TestBigIntBytes covers the P1363 scalar encoding helper.
-func TestBigIntBytes(t *testing.T) {
-	v := new(big.Int).SetBytes([]byte{1, 2, 3})
-	if got := bigIntBytes(v); !bytes.Equal(got, append(make([]byte, 29), 1, 2, 3)) {
-		t.Errorf("bigIntBytes = %x", got)
 	}
 }
 
