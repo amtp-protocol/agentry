@@ -370,16 +370,24 @@ receiving gateways resolve the public key from DNS and verify.
 
 ### Key Generation
 
-Generate an ES256 (P-256) key pair per domain (RS256 with ≥ 2048 bits is
-also supported):
+Generate an ES256 (P-256) key pair per domain with `agentry-admin keygen`
+(pass `--algorithm RS256` for a 2048-bit RSA key). It writes the private key
+and prints the exact TXT record to publish:
 
 ```bash
-# Private key (keep secret — mount via Secret, never bake into the image)
-openssl ecparam -name prime256v1 -genkey -noout -out private.pem
+agentry-admin keygen --domain company-a.com --key-id k1 \
+  --out /etc/agentry/signing/private.pem
+```
 
-# Public key, base64url (no padding) for the DNS record
-openssl ec -in private.pem -pubout -outform DER \
-  | basenc --base64url -w0 | tr -d '='
+Keep the private key secret: mount it via a Secret, never bake it into the
+image.
+
+To generate the key with openssl instead, note that `p=` is the DER
+SubjectPublicKeyInfo in **standard base64 with padding**, not base64url:
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out private.pem
+openssl ec -in private.pem -pubout -outform DER | base64 -w0
 ```
 
 ### DNS Key Record
@@ -388,7 +396,7 @@ Publish the public key as a TXT record at
 `{keyid}._amtpkey.{domain}` (default keyid: `k1`):
 
 ```dns
-k1._amtpkey.company-a.com.  IN TXT "v=amtpkey1;alg=ES256;p=<base64url-public-key>"
+k1._amtpkey.company-a.com.  IN TXT "v=amtpkey1;alg=ES256;p=<base64-public-key>"
 ```
 
 ### Gateway Configuration
@@ -409,6 +417,11 @@ export AMTP_SIGNATURE_VERIFY_POLICY="flag"              # accept | flag | reject
 
 Local-domain senders are unaffected by this policy — they always
 authenticate with a Bearer agent API key (see [API.md](API.md)).
+
+The policy only decides whether a message is delivered. A workflow response
+from a remote participant advances the workflow only when its signature
+verifies, so remote participants in cross-domain workflows must sign their
+messages.
 
 ### Kubernetes Secret Rollout
 

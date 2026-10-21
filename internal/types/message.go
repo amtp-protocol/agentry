@@ -40,6 +40,9 @@ type Message struct {
 	InReplyTo      string                 `json:"in_reply_to,omitempty" validate:"omitempty,uuidv7"`
 	ResponseType   string                 `json:"response_type,omitempty"`
 	WorkflowID     string                 `json:"workflow_id,omitempty" validate:"omitempty,uuidv7"`
+	// SenderVerification is set by this gateway at ingest and never taken
+	// from the wire, so consumers can trust it as the sender's authenticity.
+	SenderVerification *SenderVerification `json:"sender_verification,omitempty"`
 }
 
 // CoordinationConfig defines multi-agent coordination parameters
@@ -77,8 +80,7 @@ type MessageSignature struct {
 }
 
 // SenderVerification is the structured outcome of authenticating the sender
-// of an inbound message, recorded on the message status (protocol Section
-// 9.3.4). Result is one of: verified, unsigned, invalid, key_unavailable,
+// of an inbound message, recorded on the message (protocol Section 9.3.4). Result is one of: verified, unsigned, invalid, key_unavailable,
 // trusted_internal. Domain is the normalized sender domain for remote
 // senders, or the local domain for trusted internal dispatch. Policy is the
 // verification policy in effect when the message was accepted. Reason
@@ -106,17 +108,22 @@ const (
 	VerificationTrustedInternal = "trusted_internal"
 )
 
+// Authenticated reports whether the sender address is proven, either by a
+// verified domain signature or by this gateway's own credential check.
+func (v *SenderVerification) Authenticated() bool {
+	return v != nil && (v.Result == VerificationVerified || v.Result == VerificationTrustedInternal)
+}
+
 // MessageStatus represents the delivery status of a message
 type MessageStatus struct {
-	MessageID          string              `json:"message_id"`
-	Status             DeliveryStatus      `json:"status"`
-	Recipients         []RecipientStatus   `json:"recipients"`
-	Attempts           int                 `json:"attempts"`
-	NextRetry          *time.Time          `json:"next_retry,omitempty"`
-	CreatedAt          time.Time           `json:"created_at"`
-	UpdatedAt          time.Time           `json:"updated_at"`
-	DeliveredAt        *time.Time          `json:"delivered_at,omitempty"`
-	SenderVerification *SenderVerification `json:"sender_verification,omitempty"`
+	MessageID   string            `json:"message_id"`
+	Status      DeliveryStatus    `json:"status"`
+	Recipients  []RecipientStatus `json:"recipients"`
+	Attempts    int               `json:"attempts"`
+	NextRetry   *time.Time        `json:"next_retry,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+	DeliveredAt *time.Time        `json:"delivered_at,omitempty"`
 }
 
 // RecipientStatus represents the delivery status for a specific recipient
@@ -331,6 +338,11 @@ func (m *Message) Clone() *Message {
 	if m.Signature != nil {
 		sig := *m.Signature
 		clone.Signature = &sig
+	}
+
+	if m.SenderVerification != nil {
+		v := *m.SenderVerification
+		clone.SenderVerification = &v
 	}
 
 	return &clone

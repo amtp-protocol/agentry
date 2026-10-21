@@ -23,7 +23,7 @@ import (
 )
 
 // Result is the protocol-level verification outcome recorded on the message
-// status (Section 9.3.4).
+// (Section 9.3.4).
 type Result string
 
 const (

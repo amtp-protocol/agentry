@@ -37,6 +37,11 @@ The unsigned and invalid cases share the code `403 SIGNATURE_REJECTED`; apart
 from the details, `error.message` distinguishes them ("Message has no domain
 signature" vs "Domain signature verification failed").
 
+Whatever the policy, a workflow response changes workflow state only when its
+sender is authenticated (`verified` or `trusted_internal`). Any other response
+is still delivered as an ordinary message, but the workflow keeps waiting for
+that participant.
+
 ## Core Messaging
 
 ### Send Message
@@ -80,9 +85,13 @@ Remote senders additionally attach a domain signature:
    name, no insignificant whitespace, UTF-8. The request body must be a
    single JSON object with no duplicate members. No two members of any object
    may differ only in case — such a body is refused
-   `400 INVALID_REQUEST_FORMAT`, because implementations bind members to
+   `400 INVALID_MESSAGE_FORMAT`, because implementations bind members to
    fields case-insensitively while a verifier reads exact names, which would
-   let one member be verified and another stored.
+   let one member be verified and another stored. Every number must be
+   exactly representable as an IEEE 754 double (for example, integers up to
+   2^53): JCS rounds numbers to doubles, so a value such as
+   `9007199254740993` would be signed as `9007199254740992`. Such numbers are
+   refused `400 INVALID_MESSAGE_FORMAT`; send them as strings.
 2. Hash the canonical bytes with SHA-256.
 3. Sign the digest with the domain's private key — `ES256` (P-256, P1363
    `r||s` signature) or `RS256` (RSA ≥ 2048 bits, PKCS#1 v1.5).
@@ -93,15 +102,17 @@ The public key is published as a DNS TXT record at
 `{keyid}._amtpkey.{sender-domain}`:
 
 ```
-v=amtpkey1;alg=ES256;p=<base64url-encoded-public-key>
+v=amtpkey1;alg=ES256;p=<base64-encoded-public-key>
 ```
+
+`p` is the DER SubjectPublicKeyInfo in standard base64 with padding. Unlike
+the signature value, it is not base64url.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for key generation and DNS rollout.
 
 #### Send response
 
-The response echoes how the sender was authenticated, so a caller does not
-have to poll the status endpoint to tell "accepted" from "authenticated":
+The response echoes how the sender was authenticated:
 
 ```json
 {
@@ -117,28 +128,15 @@ have to poll the status endpoint to tell "accepted" from "authenticated":
 ```
 
 A successful `status` is **not** by itself proof that the sender was
-authenticated — see [Replay and Trust Guarantees](#replay-and-trust-guarantees).
+authenticated. See [Sender verification](#sender-verification).
 
-### Query Message Status
+#### Sender verification
 
-```http
-GET /v1/messages/{message_id}/status
-```
-
-The response records how the sender was authenticated:
-
-```json
-{
-  "message_id": "...",
-  "status": "delivered",
-  "recipients": [...],
-  "sender_verification": {
-    "result": "verified",
-    "domain": "sender.com",
-    "policy": "reject"
-  }
-}
-```
+The receiving gateway records how it authenticated the sender as
+`sender_verification` on the message itself. Recipients see it everywhere a
+message is returned: `GET /v1/messages/{message_id}`, `GET /v1/messages`,
+`GET /v1/inbox/{recipient}`, and the push-mode webhook body. It is set by the
+gateway at ingest and is never taken from the request.
 
 `sender_verification.result` is one of:
 
@@ -149,6 +147,17 @@ The response records how the sender was authenticated:
 | `invalid` | Signature present but verification failed (bad value, algorithm mismatch, tampered body) |
 | `key_unavailable` | Signing key could not be resolved from DNS |
 | `trusted_internal` | Local sender authenticated by agent API key (or internal workflow dispatch) |
+
+Under the `accept` and `flag` policies, messages with any result are
+delivered, so agents that act on a message should check for `verified` or
+`trusted_internal`. A verified signature proves the sending domain; it is not
+authorization to perform an action.
+
+### Query Message Status
+
+```http
+GET /v1/messages/{message_id}/status
+```
 
 ### List Messages
 

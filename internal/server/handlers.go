@@ -117,7 +117,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	limited := io.LimitReader(c.Request.Body, maxBody+1)
 	rawBody, err := io.ReadAll(limited)
 	if err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_MESSAGE_FORMAT",
 			"Failed to read request body", map[string]interface{}{
 				"parse_error": err.Error(),
 			})
@@ -136,7 +136,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	// (RFC 8785 canonicalization) depends on, so it applies to every
 	// request, signed or not.
 	if _, err := signing.DecodeBody(rawBody); err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_MESSAGE_FORMAT",
 			"Invalid request format", map[string]interface{}{
 				"parse_error": err.Error(),
 			})
@@ -145,7 +145,7 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 
 	// Bind the raw bytes into the request struct.
 	if err := json.Unmarshal(rawBody, &req); err != nil {
-		s.respondWithError(c, http.StatusBadRequest, "INVALID_REQUEST_FORMAT",
+		s.respondWithError(c, http.StatusBadRequest, "INVALID_MESSAGE_FORMAT",
 			"Invalid request format", map[string]interface{}{
 				"parse_error": err.Error(),
 			})
@@ -244,11 +244,12 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 	// interception, storage, delivery). Local senders must present a valid
 	// agent API key; remote senders are authenticated by their domain
 	// signature according to the configured verification policy. The
-	// outcome is recorded on the message status (protocol Section 9.3.4).
+	// outcome is recorded on the message (protocol Section 9.3.4).
 	verification, ok := s.authenticateSender(c, message, rawBody)
 	if !ok {
 		return
 	}
+	message.SenderVerification = verification
 
 	// Intercept workflow responses.
 	//
@@ -305,10 +306,9 @@ func (s *Server) handleSendMessage(c *gin.Context) {
 
 	// Process message using the message processor
 	processingOptions := processing.ProcessingOptions{
-		ImmediatePath:      message.Coordination == nil || !isSenderLocal,
-		Timeout:            30 * time.Second,
-		MaxRetries:         3,
-		SenderVerification: verification,
+		ImmediatePath: message.Coordination == nil || !isSenderLocal,
+		Timeout:       30 * time.Second,
+		MaxRetries:    3,
 	}
 
 	result, err := s.processor.ProcessMessage(c.Request.Context(), message, processingOptions)
@@ -728,6 +728,9 @@ func (s *Server) handleListMessages(c *gin.Context) {
 		}
 		if msg.Payload != nil {
 			item["payload"] = msg.Payload
+		}
+		if msg.SenderVerification != nil {
+			item["sender_verification"] = msg.SenderVerification
 		}
 		response = append(response, item)
 		statusIDs = append(statusIDs, msg.MessageID)
@@ -1379,7 +1382,7 @@ func (s *Server) verifyAgentAccess(c *gin.Context, agentAddress string) bool {
 // federated protocol where remote senders have no local key — so without the
 // fallback such messages would be permanently unreadable.
 // authenticateSender authenticates the sender of an inbound message and
-// returns the verification record to persist on the message status.
+// returns the verification record to persist on the message.
 //
 // Local senders (same domain as this gateway) must present a Bearer agent
 // API key; the authenticated address must equal the message sender. Remote

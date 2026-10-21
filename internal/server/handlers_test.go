@@ -58,9 +58,9 @@ type MockMessageProcessor struct {
 	processError  error
 	messages      map[string]*types.Message
 	statuses      map[string]*types.MessageStatus
-	// storage, when set, receives the message and its initial status
-	// (including options.SenderVerification) via StoreMessageWithStatus,
-	// mirroring how the real processor persists inbound messages.
+	// storage, when set, receives the message and its initial status via
+	// StoreMessageWithStatus, mirroring how the real processor persists
+	// inbound messages.
 	storage storage.Storage
 }
 
@@ -383,13 +383,12 @@ func (m *MockMessageProcessor) ProcessMessage(ctx context.Context, message *type
 	// Store the message and status
 	m.messages[message.MessageID] = message
 	status := &types.MessageStatus{
-		MessageID:          message.MessageID,
-		Status:             result.Status,
-		Recipients:         result.Recipients,
-		Attempts:           1,
-		CreatedAt:          time.Now().UTC(),
-		UpdatedAt:          time.Now().UTC(),
-		SenderVerification: options.SenderVerification,
+		MessageID:  message.MessageID,
+		Status:     result.Status,
+		Recipients: result.Recipients,
+		Attempts:   1,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
 	}
 	m.statuses[message.MessageID] = status
 	if m.storage != nil {
@@ -620,8 +619,8 @@ func TestHandleSendMessage_InvalidJSON(t *testing.T) {
 		t.Fatalf("Failed to unmarshal error response: %v", err)
 	}
 
-	if errorResponse.Error.Code != "INVALID_REQUEST_FORMAT" {
-		t.Errorf("Expected error code 'INVALID_REQUEST_FORMAT', got %s", errorResponse.Error.Code)
+	if errorResponse.Error.Code != "INVALID_MESSAGE_FORMAT" {
+		t.Errorf("Expected error code 'INVALID_MESSAGE_FORMAT', got %s", errorResponse.Error.Code)
 	}
 }
 
@@ -4138,11 +4137,7 @@ func newSigningTestEnv(t *testing.T, policy string) *signingTestEnv {
 	}
 
 	// Publish the remote key in DNS so the verifier can resolve it.
-	rec, err := remoteSign.PublicKeyRecord()
-	if err != nil {
-		t.Fatalf("remote public record: %v", err)
-	}
-	txt, err := signing.FormatKeyRecord(rec)
+	txt, err := signing.FormatKeyRecord(remoteSign.PublicKeyRecord())
 	if err != nil {
 		t.Fatalf("format remote record: %v", err)
 	}
@@ -4404,10 +4399,10 @@ func TestRejectBlocksStorageAndWorkflow(t *testing.T) {
 	}
 }
 
-// TestVerificationRecordedOnStatus: an accepted signed remote message
+// TestVerificationRecordedOnMessage: an accepted signed remote message
 // records sender_verification with result=verified; an unsigned one under
 // flag records result=unsigned.
-func TestVerificationRecordedOnStatus(t *testing.T) {
+func TestVerificationRecordedOnMessage(t *testing.T) {
 	env := newSigningTestEnv(t, "flag")
 
 	// Signed -> verified.
@@ -4423,9 +4418,9 @@ func TestVerificationRecordedOnStatus(t *testing.T) {
 	}
 
 	mockStorage := env.server.storage.(*MockStorage)
-	st, ok := mockStorage.statuses[resp.MessageID]
+	st, ok := mockStorage.messages[resp.MessageID]
 	if !ok {
-		t.Fatalf("status not stored for %s", resp.MessageID)
+		t.Fatalf("message not stored for %s", resp.MessageID)
 	}
 	if st.SenderVerification == nil {
 		t.Fatal("sender_verification not recorded for signed message")
@@ -4446,9 +4441,9 @@ func TestVerificationRecordedOnStatus(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	st, ok = mockStorage.statuses[resp.MessageID]
+	st, ok = mockStorage.messages[resp.MessageID]
 	if !ok {
-		t.Fatalf("status not stored for %s", resp.MessageID)
+		t.Fatalf("message not stored for %s", resp.MessageID)
 	}
 	if st.SenderVerification == nil {
 		t.Fatal("sender_verification not recorded for unsigned message")
@@ -4474,9 +4469,9 @@ func TestLocalSenderTrustedInternal(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	mockStorage := env.server.storage.(*MockStorage)
-	st, ok := mockStorage.statuses[resp.MessageID]
+	st, ok := mockStorage.messages[resp.MessageID]
 	if !ok {
-		t.Fatalf("status not stored for %s", resp.MessageID)
+		t.Fatalf("message not stored for %s", resp.MessageID)
 	}
 	if st.SenderVerification == nil {
 		t.Fatal("sender_verification not recorded")
@@ -4503,6 +4498,79 @@ func TestWorkflowReplyBypassesLocalAuth(t *testing.T) {
 	// delivery; verification must still accept the signed message.
 	if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
 		t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// recordingWorkflow captures the replies the handler hands to the engine.
+type recordingWorkflow struct {
+	replies []*types.Message
+}
+
+func (w *recordingWorkflow) Initialize(ctx context.Context, msg *types.Message) (*types.Workflow, error) {
+	return nil, nil
+}
+
+func (w *recordingWorkflow) ProcessResponse(ctx context.Context, workflowID string, replyMsg *types.Message) error {
+	w.replies = append(w.replies, replyMsg)
+	return nil
+}
+
+func (w *recordingWorkflow) Start(ctx context.Context) {}
+
+func (w *recordingWorkflow) Stop() error { return nil }
+
+// TestWorkflowReplyCarriesSenderVerification: the workflow engine decides
+// whether a reply may change workflow state from its sender verification, so
+// the handler must attach it before handing the reply over.
+func TestWorkflowReplyCarriesSenderVerification(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		signed bool
+		want   string
+	}{
+		{"signed", true, types.VerificationVerified},
+		{"unsigned", false, types.VerificationUnsigned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newSigningTestEnv(t, "flag")
+			wf := &recordingWorkflow{}
+			env.server.workflow = wf
+
+			msg := remoteMessage()
+			msg.ResponseType = "workflow_response"
+			msg.WorkflowID = "01936b1e-2000-7000-8000-000000000002"
+
+			var req *http.Request
+			if tc.signed {
+				req = env.signedRemoteRequest(t, msg)
+			} else {
+				raw, err := json.Marshal(map[string]interface{}{
+					"sender":        msg.Sender,
+					"recipients":    msg.Recipients,
+					"payload":       msg.Payload,
+					"response_type": msg.ResponseType,
+					"workflow_id":   msg.WorkflowID,
+				})
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				req = httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(raw))
+				req.Header.Set("Content-Type", "application/json")
+			}
+
+			rr := httptest.NewRecorder()
+			env.server.router.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK && rr.Code != http.StatusAccepted {
+				t.Fatalf("expected 200/202, got %d body=%s", rr.Code, rr.Body.String())
+			}
+			if len(wf.replies) != 1 {
+				t.Fatalf("workflow engine received %d replies, want 1", len(wf.replies))
+			}
+			got := wf.replies[0].SenderVerification
+			if got == nil || got.Result != tc.want {
+				t.Errorf("reply sender_verification = %+v, want %s", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -28,7 +28,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"math/big"
 )
 
 // Errors specific to signing (as opposed to verification).
@@ -184,11 +183,11 @@ func (sig *Signature) ToMap() map[string]interface{} {
 
 // PublicKeyRecord derives the DNS key record for this signer's key. Used by
 // tooling (keygen) to print the TXT value a domain must publish.
-func (s *Signer) PublicKeyRecord() (*KeyRecord, error) {
+func (s *Signer) PublicKeyRecord() *KeyRecord {
 	return &KeyRecord{
 		Algorithm: s.algorithm,
 		PublicKey: s.publicKey(),
-	}, nil
+	}
 }
 
 func (s *Signer) publicKey() crypto.PublicKey {
@@ -210,13 +209,6 @@ func FormatKeyRecord(rec *KeyRecord) (string, error) {
 	}
 	return fmt.Sprintf("v=%s;alg=%s;p=%s", keyRecordVersion, rec.Algorithm,
 		base64.StdEncoding.EncodeToString(der)), nil
-}
-
-// bigIntBytes is used by tests to reconstruct P1363 components.
-func bigIntBytes(i *big.Int) []byte {
-	b := make([]byte, es256ScalarBytes)
-	i.FillBytes(b)
-	return b
 }
 
 // KeysEqual reports whether two public keys of the profile are the same key.

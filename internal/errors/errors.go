@@ -29,6 +29,7 @@ type ErrorCode string
 const (
 	// Request validation errors
 	ErrInvalidRequestFormat    ErrorCode = "INVALID_REQUEST_FORMAT"
+	ErrInvalidMessageFormat    ErrorCode = "INVALID_MESSAGE_FORMAT"
 	ErrValidationFailed        ErrorCode = "VALIDATION_FAILED"
 	ErrMessageValidationFailed ErrorCode = "MESSAGE_VALIDATION_FAILED"
 	ErrInvalidMessageID        ErrorCode = "INVALID_MESSAGE_ID"
@@ -189,7 +190,7 @@ func (e *AMTPError) IsRetryable() bool {
 // GetHTTPStatus returns the appropriate HTTP status code for the error
 func (e *AMTPError) GetHTTPStatus() int {
 	switch e.Code {
-	case ErrInvalidRequestFormat, ErrValidationFailed, ErrMessageValidationFailed,
+	case ErrInvalidRequestFormat, ErrInvalidMessageFormat, ErrValidationFailed, ErrMessageValidationFailed,
 		ErrInvalidMessageID, ErrInvalidRecipient, ErrMessageTooLarge:
 		return 400 // Bad Request
 

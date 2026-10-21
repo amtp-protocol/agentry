@@ -209,16 +209,11 @@ poll_sender_verification() {
     local verification=""
     local deadline=$((SECONDS + 30))
     while [ $SECONDS -lt $deadline ]; do
-        local list msg_id
+        local list
         list=$(curl -sf "$base_url/v1/messages?sender=$sender&limit=5" \
             -H "Authorization: Bearer $api_key") || { sleep 1; continue; }
-        msg_id=$(printf '%s' "$list" | jq -r '.messages[0].message_id // empty')
-        if [ -n "$msg_id" ]; then
-            verification=$(curl -sf "$base_url/v1/messages/$msg_id/status" \
-                -H "Authorization: Bearer $api_key" \
-                | jq -r '.sender_verification.result // empty')
-            [ -n "$verification" ] && break
-        fi
+        verification=$(printf '%s' "$list" | jq -r '.messages[0].sender_verification.result // empty')
+        [ -n "$verification" ] && break
         sleep 1
     done
     printf '%s' "$verification"

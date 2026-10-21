@@ -720,11 +720,7 @@ func newTestSigner(t *testing.T, keyID string) *signing.Signer {
 // signerKeyRecord formats the signer's public key as a DNS TXT record.
 func signerKeyRecord(t *testing.T, s *signing.Signer) string {
 	t.Helper()
-	rec, err := s.PublicKeyRecord()
-	if err != nil {
-		t.Fatalf("public key record: %v", err)
-	}
-	txt, err := signing.FormatKeyRecord(rec)
+	txt, err := signing.FormatKeyRecord(s.PublicKeyRecord())
 	if err != nil {
 		t.Fatalf("format key record: %v", err)
 	}
@@ -836,6 +832,29 @@ func TestDeliverMessage_SignedWireBytes(t *testing.T) {
 	resolver := &fixedKeyResolver{txts: []string{signerKeyRecord(t, signer)}}
 	verifier := signing.NewVerifier(resolver)
 	verification, err := verifier.VerifyBody(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("VerifyBody: %v", err)
+	}
+	if verification.Result != signing.ResultVerified {
+		t.Errorf("verification result = %s, want verified", verification.Result)
+	}
+}
+
+// TestDeliverMessage_SignsLocalSenderInAnyCase verifies a local sender whose
+// domain differs from the configured one only in case is still signed.
+func TestDeliverMessage_SignsLocalSenderInAnyCase(t *testing.T) {
+	signer := newTestSigner(t, "k1")
+	engine, cs := setupSignedDelivery(t, signer, 0)
+
+	message := createTestMessage()
+	message.Sender = "agent@Local.EXAMPLE"
+
+	if _, err := engine.DeliverMessage(context.Background(), message, "recipient@remote.example"); err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+
+	resolver := &fixedKeyResolver{txts: []string{signerKeyRecord(t, signer)}}
+	verification, err := signing.NewVerifier(resolver).VerifyBody(context.Background(), cs.body(0))
 	if err != nil {
 		t.Fatalf("VerifyBody: %v", err)
 	}
@@ -990,4 +1009,43 @@ func mustBuildWire(t *testing.T, message *types.Message, recipient string) map[s
 		t.Fatalf("BuildWireBody: %v", err)
 	}
 	return body
+}
+
+// TestDeliverLocalPush_IncludesSenderVerification verifies a push-mode agent
+// learns whether the sender was authenticated without a second request.
+func TestDeliverLocalPush_IncludesSenderVerification(t *testing.T) {
+	cs := newCaptureServer(0)
+	defer cs.close()
+
+	registry := NewMockAgentRegistry()
+	_ = registry.RegisterAgent(context.Background(), &agents.LocalAgent{
+		Address:      "agent@local.example",
+		DeliveryMode: "push",
+		PushTarget:   cs.server.URL,
+	})
+	config := createTestDeliveryConfig()
+	config.LocalDomain = "local.example"
+	engine := NewDeliveryEngine(NewMockDiscovery(), registry, config)
+
+	message := createTestMessage()
+	message.Sender = "boss@remote.example"
+	message.SenderVerification = &types.SenderVerification{
+		Result: types.VerificationUnsigned,
+		Domain: "remote.example",
+		Policy: "flag",
+	}
+
+	if _, err := engine.DeliverMessage(context.Background(), message, "agent@local.example"); err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+
+	var pushed struct {
+		SenderVerification *types.SenderVerification `json:"sender_verification"`
+	}
+	if err := json.Unmarshal(cs.body(0), &pushed); err != nil {
+		t.Fatalf("unmarshal push body: %v", err)
+	}
+	if pushed.SenderVerification == nil || pushed.SenderVerification.Result != types.VerificationUnsigned {
+		t.Errorf("pushed sender_verification = %+v, want unsigned", pushed.SenderVerification)
+	}
 }

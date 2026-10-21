@@ -692,6 +692,10 @@ func cloneMessage(m *types.Message) *types.Message {
 		sig := *m.Signature
 		c.Signature = &sig
 	}
+	if m.SenderVerification != nil {
+		v := *m.SenderVerification
+		c.SenderVerification = &v
+	}
 	return &c
 }
 
@@ -710,10 +714,6 @@ func cloneStatus(s *types.MessageStatus) *types.MessageStatus {
 	if s.DeliveredAt != nil {
 		t := *s.DeliveredAt
 		c.DeliveredAt = &t
-	}
-	if s.SenderVerification != nil {
-		v := *s.SenderVerification
-		c.SenderVerification = &v
 	}
 	return &c
 }

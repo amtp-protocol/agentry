@@ -54,11 +54,6 @@ type ProcessingOptions struct {
 	ImmediatePath bool
 	Timeout       time.Duration
 	MaxRetries    int
-	// SenderVerification records the outcome of authenticating the inbound
-	// sender (domain signature check or local Bearer auth). It is persisted
-	// on the message's initial status so downstream readers can see how the
-	// sender was authenticated. Nil means no verification was performed.
-	SenderVerification *types.SenderVerification
 }
 
 // NewMessageProcessor creates a new message processor
@@ -97,17 +92,16 @@ func (mp *MessageProcessor) ProcessMessage(ctx context.Context, message *types.M
 		}
 	}
 
-	// Store the message and its initial status (carrying the sender
-	// verification outcome) in one atomic write so a crash between the two
-	// stores can never leave a message without a status row.
+	// Store the message and its initial status in one atomic write so a
+	// crash between the two stores can never leave a message without a
+	// status row.
 	initialStatus := &types.MessageStatus{
-		MessageID:          message.MessageID,
-		Status:             types.StatusQueued,
-		Recipients:         result.Recipients,
-		Attempts:           0,
-		CreatedAt:          time.Now().UTC(),
-		UpdatedAt:          time.Now().UTC(),
-		SenderVerification: options.SenderVerification,
+		MessageID:  message.MessageID,
+		Status:     types.StatusQueued,
+		Recipients: result.Recipients,
+		Attempts:   0,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
 	}
 	if err := mp.storage.StoreMessageWithStatus(ctx, message, initialStatus); err != nil {
 		return nil, fmt.Errorf("failed to store message with status: %w", err)
