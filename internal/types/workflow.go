@@ -40,6 +40,7 @@ const (
 	ParticipantStatusCompleted ParticipantStatus = "completed"
 	ParticipantStatusFailed    ParticipantStatus = "failed"
 	ParticipantStatusTimeout   ParticipantStatus = "timeout"
+	ParticipantStatusSkipped   ParticipantStatus = "skipped"
 )
 
 type Workflow struct {

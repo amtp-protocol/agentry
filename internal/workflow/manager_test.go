@@ -369,6 +369,11 @@ func TestManager_ProcessResponse_Conditional(t *testing.T) {
 	if w.Status != types.WorkflowStatusCompleted {
 		t.Errorf("Should be completed")
 	}
+	for _, p := range w.Participants {
+		if p.Address == "a2" && p.Status != types.ParticipantStatusSkipped {
+			t.Errorf("untaken branch a2 status = %s, want skipped", p.Status)
+		}
+	}
 }
 
 func TestManager_TimeoutSweeper(t *testing.T) {

@@ -477,7 +477,7 @@ func (m *managerImpl) evaluateWorkflow(ctx context.Context, workflowID string, r
 					}
 
 					for _, s := range skipped {
-						if err := m.storage.UpdateWorkflowParticipant(ctx, workflow.WorkflowID, s, types.ParticipantStatusCompleted, []byte(`{"status":"skipped"}`)); err != nil {
+						if err := m.storage.UpdateWorkflowParticipant(ctx, workflow.WorkflowID, s, types.ParticipantStatusSkipped, nil); err != nil {
 							m.logger.Errorf(err, "Failed to update status for skipped participant %s", s)
 						}
 					}
