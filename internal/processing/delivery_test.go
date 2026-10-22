@@ -1049,3 +1049,35 @@ func TestDeliverLocalPush_IncludesSenderVerification(t *testing.T) {
 		t.Errorf("pushed sender_verification = %+v, want unsigned", pushed.SenderVerification)
 	}
 }
+
+func TestDeliverLocalPush_IncludesWorkflowID(t *testing.T) {
+	cs := newCaptureServer(0)
+	defer cs.close()
+
+	registry := NewMockAgentRegistry()
+	_ = registry.RegisterAgent(context.Background(), &agents.LocalAgent{
+		Address:      "agent@local.example",
+		DeliveryMode: "push",
+		PushTarget:   cs.server.URL,
+	})
+	config := createTestDeliveryConfig()
+	config.LocalDomain = "local.example"
+	engine := NewDeliveryEngine(NewMockDiscovery(), registry, config)
+
+	message := createTestMessage()
+	message.WorkflowID = "01937a58-0000-7000-8000-000000000001"
+
+	if _, err := engine.DeliverMessage(context.Background(), message, "agent@local.example"); err != nil {
+		t.Fatalf("DeliverMessage: %v", err)
+	}
+
+	var pushed struct {
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.Unmarshal(cs.body(0), &pushed); err != nil {
+		t.Fatalf("unmarshal push body: %v", err)
+	}
+	if pushed.WorkflowID != message.WorkflowID {
+		t.Errorf("pushed workflow_id = %q, want %q", pushed.WorkflowID, message.WorkflowID)
+	}
+}
