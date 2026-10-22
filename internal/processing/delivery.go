@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strings"
@@ -416,15 +417,12 @@ func (de *DeliveryEngine) calculateRetryDelay(attempt int) time.Duration {
 	// #nosec G115 -- Never overflow
 	delay := baseDelay * time.Duration(1<<uint(attempt-1)) // 2^(attempt-1)
 
-	// Cap the maximum delay
-	maxDelay := 5 * time.Minute
-	if delay > maxDelay {
+	// #nosec G404 -- jitter only spreads retries, it needs no cryptographic randomness
+	delay = time.Duration(float64(delay) * (0.75 + 0.5*rand.Float64()))
+
+	if maxDelay := 5 * time.Minute; delay > maxDelay {
 		delay = maxDelay
 	}
-
-	// Add jitter (±25%)
-	jitter := time.Duration(float64(delay) * 0.25)
-	delay = delay + time.Duration(float64(jitter)*(2*0.5-1)) // Random between -jitter and +jitter
 
 	return delay
 }

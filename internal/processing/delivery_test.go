@@ -591,8 +591,26 @@ func TestCalculateRetryDelay(t *testing.T) {
 	// Test maximum delay cap
 	largeDelay := engine.calculateRetryDelay(20)
 	maxDelay := 5 * time.Minute
-	if largeDelay > maxDelay*2 { // Allow some jitter
+	if largeDelay > maxDelay {
 		t.Errorf("Expected delay to be capped, got %v", largeDelay)
+	}
+}
+
+func TestCalculateRetryDelay_Jitter(t *testing.T) {
+	config := createTestDeliveryConfig()
+	config.RetryDelay = 1 * time.Second
+	engine := NewDeliveryEngine(NewMockDiscovery(), NewMockAgentRegistry(), config)
+
+	seen := make(map[time.Duration]bool)
+	for i := 0; i < 50; i++ {
+		d := engine.calculateRetryDelay(1)
+		if d < 750*time.Millisecond || d > 1250*time.Millisecond {
+			t.Fatalf("delay %v outside ±25%% of 1s", d)
+		}
+		seen[d] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("expected jittered delays to vary, got %v", seen)
 	}
 }
 
